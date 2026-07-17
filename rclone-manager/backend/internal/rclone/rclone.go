@@ -420,11 +420,20 @@ func prepareStableDirectoryFilter(task *models.Task, args []string) ([]string, f
 	for dir := range movieDirs {
 		st := &dirState{stable: true, hasVideo: true}
 		_ = filepath.WalkDir(filepath.Join(root, filepath.FromSlash(dir)), func(path string, d os.DirEntry, err error) error {
-			if err != nil || d == nil || d.IsDir() {
+			if err != nil || d == nil {
 				return nil
 			}
 			info, err := d.Info()
-			if err != nil || !info.Mode().IsRegular() {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if info.ModTime().After(cutoff) {
+					st.stable = false
+				}
+				return nil
+			}
+			if !info.Mode().IsRegular() {
 				return nil
 			}
 			st.files++
