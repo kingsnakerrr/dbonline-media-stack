@@ -39,11 +39,11 @@ var fileLineRegex = regexp.MustCompile(`INFO\s*:\s*(.+?)\s*:\s*(Copied|Deleted|M
 // statsLineRegex matches rclone --stats output like:
 //
 //	Transferred:    1.234 GiB / 5.678 GiB, 22%, 10.234 MiB/s, ETA 4m32s
-var statsLineRegex = regexp.MustCompile(`Transferred:\s+[^,]+,\s*([\d\.]+)%`)
+var statsLineRegex = regexp.MustCompile(`Transferred:\s+[^,]+,\s*([\d\.]+)%(?:,\s*([\d\.]+)\s*([KMGTPE]?i?B|[KMGTPE]?B)/s)?`)
 
 // transferringLineRegex matches rclone per-file progress like:
 //   - filename.mkv: 22% /5.678Gi, 10.234Mi/s, 4m32s
-var transferringLineRegex = regexp.MustCompile(`\*\s+(.+?):\s*([\d\.]+)%`)
+var transferringLineRegex = regexp.MustCompile(`\*\s+(.+?):\s*([\d\.]+)%\s*/\s*[^,]+(?:,\s*([\d\.]+)\s*([KMGTPE]?i?B|[KMGTPE]?B)/s)?`)
 
 var rotationHTTPStatusRegex = regexp.MustCompile(`\b(403|429)\b`)
 
@@ -337,6 +337,35 @@ func parseMinAgeDuration(value string) time.Duration {
 		return 0
 	}
 	return d
+}
+
+func parseRcloneSpeed(value, unit string) float64 {
+	speed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil {
+		return 0
+	}
+	switch strings.TrimSpace(unit) {
+	case "B":
+		return speed
+	case "KB":
+		return speed * 1000
+	case "KiB":
+		return speed * 1024
+	case "MB":
+		return speed * 1000 * 1000
+	case "MiB":
+		return speed * 1024 * 1024
+	case "GB":
+		return speed * 1000 * 1000 * 1000
+	case "GiB":
+		return speed * 1024 * 1024 * 1024
+	case "TB":
+		return speed * 1000 * 1000 * 1000 * 1000
+	case "TiB":
+		return speed * 1024 * 1024 * 1024 * 1024
+	default:
+		return 0
+	}
 }
 
 func hasVideoExt(path string) bool {
@@ -1417,8 +1446,12 @@ func (e *Executor) parseStatsProgress(task *models.Task, line string) {
 	// Try overall progress: "Transferred: 1.234 GiB / 5.678 GiB, 22%, ..."
 	if matches := statsLineRegex.FindStringSubmatch(line); len(matches) >= 2 {
 		percentage, _ := strconv.ParseFloat(matches[1], 64)
-		msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":0,"size":0,"speed":0}`,
-			task.ID, "", percentage)
+		speed := 0.0
+		if len(matches) >= 4 {
+			speed = parseRcloneSpeed(matches[2], matches[3])
+		}
+		msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":0,"size":0,"speed":%.0f}`,
+			task.ID, "", percentage, speed)
 		e.hub.Broadcast(msg)
 		return
 	}
@@ -1427,8 +1460,12 @@ func (e *Executor) parseStatsProgress(task *models.Task, line string) {
 	if matches := transferringLineRegex.FindStringSubmatch(line); len(matches) >= 3 {
 		percentage, _ := strconv.ParseFloat(matches[2], 64)
 		fileName := strings.TrimSpace(matches[1])
-		msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":0,"size":0,"speed":0}`,
-			task.ID, strings.ReplaceAll(fileName, `"`, `\"`), percentage)
+		speed := 0.0
+		if len(matches) >= 5 {
+			speed = parseRcloneSpeed(matches[3], matches[4])
+		}
+		msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":0,"size":0,"speed":%.0f}`,
+			task.ID, strings.ReplaceAll(fileName, `"`, `\"`), percentage, speed)
 		e.hub.Broadcast(msg)
 	}
 }
