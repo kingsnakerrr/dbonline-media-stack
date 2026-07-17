@@ -1,0 +1,36 @@
+services:
+  rclone-manager:
+    build: .
+    image: zzmrclone-manager:local
+    container_name: rclone-manager
+    restart: unless-stopped
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    ports:
+      - "7071:80"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - /root/.config/rclone:/root/.config/rclone
+      - ./logs:/app/logs
+      - /home:/home
+      # 映射你要监控的本机目录
+      # 示例：
+      #- /opt:/opt
+      # 云盘挂载如果要让宿主机可见，请自行映射，例如：
+      #- type: bind
+      #  source: /data/cloud-mount
+      #  target: /data/cloud-mount
+      #  bind:
+      #    propagation: rshared
+    environment:
+      - TZ=Asia/Shanghai
+      - RCLONE_MANAGER_DATA_DIR=/app/data
+      - RCLONE_MANAGER_LOG_DIR=/app/logs
+      - RCLONE_MANAGER_PORT=7070
+      - RCLONE_CONFIG=/root/.config/rclone/rclone.conf

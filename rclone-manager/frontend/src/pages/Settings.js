@@ -1,0 +1,253 @@
+import React, { useState, useEffect } from 'react';
+import { Settings2, Save, AlertTriangle, Lock, Eye, EyeOff, Key } from 'lucide-react';
+import { getRcloneConfig, changePassword, getTokenInfo, updateToken } from '../services/api';
+import toast from 'react-hot-toast';
+
+const Settings = () => {
+  const [config, setConfig] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  // Token state
+  const [apiToken, setApiToken] = useState('');
+  const [tokenEnabled, setTokenEnabled] = useState(false);
+  const [showToken, setShowToken] = useState(false);
+
+  // Password change state
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  const loadData = async () => {
+    try {
+      const [configRes, tokenRes] = await Promise.all([
+        getRcloneConfig(),
+        getTokenInfo(),
+      ]);
+      setConfig(configRes.data.content);
+      // Token
+      if (tokenRes.data) {
+        setTokenEnabled(tokenRes.data.enabled);
+        setApiToken(tokenRes.data.token || '');
+      }
+    } catch (err) {
+      console.error('Failed to load settings');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+
+    if (newPassword !== confirmPassword) {
+      toast.error('两次输入的新密码不一致');
+      return;
+    }
+
+    if (newPassword.length < 6) {
+      toast.error('新密码长度至少6位');
+      return;
+    }
+
+    setChangingPassword(true);
+    try {
+      await changePassword({
+        current_password: currentPassword,
+        new_password: newPassword,
+      });
+      toast.success('密码修改成功');
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (err) {
+      toast.error(err.response?.data?.error || '密码修改失败');
+    } finally {
+      setChangingPassword(false);
+    }
+  };
+
+  const handleSaveToken = async () => {
+    try {
+      await updateToken(apiToken);
+      localStorage.setItem('apiToken', apiToken);
+      setTokenEnabled(apiToken !== '');
+      toast.success('API Token 已保存');
+    } catch (err) {
+      toast.error('保存失败');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6 min-w-0">
+      {/* Header */}
+      <div>
+        <h1 className="text-2xl font-bold text-gray-900">系统设置</h1>
+        <p className="text-gray-500 mt-1">管理 Rclone 全局配置和系统参数</p>
+      </div>
+
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,360px),1fr))] gap-6 items-stretch auto-rows-fr">
+        {/* Change Password */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 h-full flex flex-col">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <Lock className="w-5 h-5 text-blue-500" />
+            修改密码
+          </h2>
+
+          <form onSubmit={handleChangePassword} className="flex-1 flex flex-col gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">当前密码</label>
+              <div className="relative">
+                <input
+                  type={showCurrentPassword ? 'text' : 'password'}
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  required
+                  autoComplete="current-password"
+                  className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none appearance-none"
+                  style={{ WebkitAppearance: 'none' }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
+                  tabIndex="-1"
+                >
+                  {showCurrentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">新密码</label>
+              <div className="relative">
+                <input
+                  type={showNewPassword ? 'text' : 'password'}
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
+                  required
+                  minLength={6}
+                  autoComplete="new-password"
+                  className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none appearance-none"
+                  style={{ WebkitAppearance: 'none' }}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowNewPassword(!showNewPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
+                  tabIndex="-1"
+                >
+                  {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">确认新密码</label>
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                required
+                autoComplete="new-password"
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none appearance-none"
+                style={{ WebkitAppearance: 'none' }}
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={changingPassword}
+              className="mt-auto inline-flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium disabled:opacity-50"
+            >
+              <Save className="w-4 h-4" />
+              {changingPassword ? '保存中...' : '修改密码'}
+            </button>
+          </form>
+        </div>
+
+        {/* API Token */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 h-full flex flex-col">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <Key className="w-5 h-5 text-blue-500" />
+            API Token 设置
+          </h2>
+          <div className="flex-1 flex flex-col gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                访问令牌 {tokenEnabled && <span className="text-green-600 text-xs">(已启用)</span>}
+              </label>
+              <div className="relative">
+                <input
+                  type={showToken ? 'text' : 'password'}
+                  value={apiToken}
+                  onChange={(e) => setApiToken(e.target.value)}
+                  placeholder="留空表示不启用 Token 验证"
+                  className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowToken(!showToken)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
+                >
+                  {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+              <p className="text-sm text-gray-500 mt-1">
+                设置后，外部访问输出日志 API 需要在 URL 中添加 ?token=xxx
+              </p>
+            </div>
+            <button
+              onClick={handleSaveToken}
+              className="mt-auto inline-flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+            >
+              <Save className="w-4 h-4" />
+              保存 Token
+            </button>
+          </div>
+        </div>
+
+        {/* Rclone Config View */}
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 md:p-6 min-w-0 overflow-hidden h-full flex flex-col">
+          <h2 className="text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+            <Settings2 className="w-5 h-5 text-gray-500" />
+            Rclone 配置预览
+          </h2>
+          <div className="relative flex-1 min-h-[220px]">
+            <div
+              className="bg-gray-50 text-gray-700 p-3 md:p-4 rounded-lg h-full max-h-96 text-xs md:text-sm font-mono border border-gray-200 overflow-auto"
+              style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', overflowWrap: 'anywhere' }}
+            >
+              {config || '无法读取配置文件'}
+            </div>
+            <div className="absolute top-2 right-2">
+              <span className="px-2 py-1 bg-gray-200 text-gray-600 text-xs rounded">
+                只读
+              </span>
+            </div>
+          </div>
+          <p className="text-sm text-gray-500 mt-3 flex items-center gap-1">
+            <AlertTriangle className="w-4 h-4 text-amber-500" />
+            配置文件通过 Docker volume 挂载，如需修改请直接编辑宿主机上的 rclone.conf
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Settings;

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+APP_DIR="/opt/dbonline-media-stack"
+cd "$APP_DIR"
+cmd="${1:-status}"
+case "$cmd" in
+  status)
+    docker compose ps
+    ;;
+  logs)
+    shift || true
+    docker compose logs -f --tail=200 "$@"
+    ;;
+  restart)
+    docker compose restart
+    ;;
+  update)
+    git pull --ff-only || true
+    docker compose up -d --build
+    ;;
+  up)
+    docker compose up -d
+    ;;
+  down)
+    docker compose down
+    ;;
+  info)
+    cat "$APP_DIR/install-info.txt"
+    ;;
+  *)
+    echo "用法: media {status|logs|restart|update|up|down|info}"
+    exit 1
+    ;;
+esac

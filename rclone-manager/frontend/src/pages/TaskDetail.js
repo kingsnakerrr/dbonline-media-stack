@@ -1,0 +1,791 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import {
+  ArrowLeft,
+  Play,
+  Square,
+  Pause,
+  Ban,
+  RotateCcw,
+  Pencil,
+  Trash2,
+  Terminal,
+  Activity,
+  Clock,
+  CheckCircle2,
+  ExternalLink,
+  Upload,
+  File
+} from 'lucide-react';
+import { getTask, getTaskStatus, getTaskLogs, startTask, stopTask, pauseTask, cancelTask, dedupeTask, deleteTask } from '../services/api';
+import { createWebSocket } from '../services/api';
+import toast from 'react-hot-toast';
+
+const parseRotationRemotes = (value) => {
+  try {
+    const parsed = JSON.parse(value || '[]');
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch {
+    return (value || '').split(',').map(item => item.trim()).filter(Boolean);
+  }
+};
+
+const parseRotationLimitedRemotes = (value) => {
+  try {
+    const parsed = JSON.parse(value || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const formatTaskDest = (task) => {
+  if (task.dest_type === 'local') return `📂 ${task.remote_dir || ''}`;
+  if (task.task_type === 'rotation') {
+    const remotes = parseRotationRemotes(task.rotation_remotes);
+    return `☁ ${(remotes.length ? remotes.join(' / ') : task.remote_name || '')}:${task.remote_dir || ''}`;
+  }
+  return `☁ ${task.remote_name || ''}:${task.remote_dir || ''}`;
+};
+
+const TaskDetail = () => {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [showLogs, setShowLogs] = useState(false);
+  const showLogsRef = useRef(false);
+  const [task, setTask] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [status, setStatus] = useState({ status: 'idle', running: false });
+  const [qbStatus, setQbStatus] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [fileProgresses, setFileProgresses] = useState({});
+  const wsRef = useRef(null);
+  const progressTimerRef = useRef(null);
+  const logContainerRef = useRef(null);
+
+  // 从单条日志解析 transferring 进度
+  const parseLogProgress = useCallback((line) => {
+    // 匹配 rclone stats transferring 行，如：
+    // * test_file_1.dat:  6% /10Gi, 16.075Mi/s, 9m55s
+    // test_file_1.dat:  6% /10Gi, 16.075Mi/s, 9m55s
+    const match = line.match(/^\s*(?:\*\s*)?(.+?):\s+(\d+(?:\.\d+)?%)\s+\/([^,]+)(?:,\s*([^,]+))?/);
+    if (match) {
+      const fileName = match[1].trim();
+      const percent = parseFloat(match[2]);
+      const sizeStr = match[3].trim();
+      const speedStr = (match[4] || '').trim();
+      setFileProgresses(prev => ({
+        ...prev,
+        [fileName]: {
+          progress: percent,
+          sizeStr,
+          speedStr,
+          lastUpdate: Date.now(),
+        }
+      }));
+    }
+  }, []);
+
+  // 清理超过30秒未更新的文件进度（视为已完成）
+  // 30秒超时兜底，即使偶尔丢日志进度条也不会消失
+  const cleanupStaleProgresses = useCallback(() => {
+    setFileProgresses(prev => {
+      const now = Date.now();
+      const updated = {};
+      let changed = false;
+      for (const [name, data] of Object.entries(prev)) {
+        if (now - data.lastUpdate < 30000) {
+          updated[name] = data;
+        } else {
+          changed = true;
+        }
+      }
+      return changed ? updated : prev;
+    });
+  }, []);
+
+  useEffect(() => {
+    showLogsRef.current = showLogs;
+  }, [showLogs]);
+
+  const loadTask = useCallback(async () => {
+    try {
+      const res = await getTask(id);
+      setTask(res.data);
+    } catch (err) {
+      toast.error('加载任务失败');
+      navigate('/tasks');
+    } finally {
+      setLoading(false);
+    }
+  }, [id, navigate]);
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const res = await getTaskStatus(id);
+      setStatus(res.data);
+      setQbStatus(res.data.qb_status || null);
+      setTask(prev => prev ? {
+        ...prev,
+        remote_name: res.data.remote_name ?? prev.remote_name,
+        rotation_current_index: res.data.rotation_current_index ?? prev.rotation_current_index,
+        rotation_current_round: res.data.rotation_current_round ?? prev.rotation_current_round,
+        rotation_paused_until: res.data.rotation_paused_until ?? prev.rotation_paused_until,
+        rotation_limited_remotes: res.data.rotation_limited_remotes ?? prev.rotation_limited_remotes,
+      } : prev);
+    } catch (err) {
+      console.error('Failed to load status');
+    }
+  }, [id]);
+
+  useEffect(() => {
+    loadTask();
+    loadStatus();
+
+    const ws = createWebSocket();
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      const data = JSON.parse(event.data);
+      if (data.task_id === parseInt(id)) {
+        if (data.type === 'log') {
+          // 无论是否显示日志，都解析 transferring 进度（保证上传部分正常工作）
+          parseLogProgress(data.content);
+
+          // 只有用户点击"获取日志"后才将日志加入 state 展示
+          if (showLogsRef.current) {
+            // 新日志插入到开头，实现倒序（最新的在上面）
+            setLogs(prev => [{
+              time: data.time,
+              content: data.content,
+              stream: data.stream,
+            }, ...prev.slice(0, 499)]);
+          }
+        } else if (data.type === 'task_complete') {
+          toast.success('任务执行完成');
+          setFileProgresses({});
+          loadStatus();
+        } else if (data.type === 'task_error') {
+          toast.error(`任务异常: ${data.error}`);
+          setFileProgresses({});
+          loadStatus();
+        } else if (data.type === 'task_started') {
+          loadStatus();
+        } else if (data.type === 'task_stopped') {
+          loadStatus();
+        } else if (data.type === 'file_progress') {
+          // 兼容后端 WebSocket file_progress 消息
+          setFileProgresses(prev => ({
+            ...prev,
+            [data.file_name]: {
+              progress: data.progress || 0,
+              bytes: data.bytes || 0,
+              size: data.size || 0,
+              speed: data.speed || 0,
+              sizeStr: formatBytes(data.size || 0),
+              speedStr: formatSpeed(data.speed || 0),
+              lastUpdate: Date.now(),
+            }
+          }));
+        }
+      }
+    };
+
+    // Poll status every 2 seconds (was 3s)
+    const interval = setInterval(() => {
+      loadStatus();
+    }, 2000);
+
+    // Cleanup stale progresses every 2 seconds
+    progressTimerRef.current = setInterval(cleanupStaleProgresses, 2000);
+
+    return () => {
+      ws.close();
+      clearInterval(interval);
+      if (progressTimerRef.current) clearInterval(progressTimerRef.current);
+    };
+  }, [id, cleanupStaleProgresses, parseLogProgress, loadTask, loadStatus]);
+
+  useEffect(() => {
+    if (autoScroll && logContainerRef.current) {
+      logContainerRef.current.scrollTop = 0;
+    }
+  }, [logs, autoScroll]);
+
+  const loadLogs = async () => {
+    try {
+      const res = await getTaskLogs(id, 200);
+      const logContent = res.data.logs[0] || '';
+      const lines = logContent.split('\n').filter(l => l.trim()).map(line => ({
+        time: line.match(/\[(.*?)\]/)?.[1] || new Date().toISOString(),
+        content: line.replace(/^\[.*?\]\s*/, ''),
+        stream: 'stdout',
+      }));
+      // 倒序：最新的在前面
+      setLogs(lines.reverse());
+    } catch (err) {
+      // Ignore log load errors
+    }
+  };
+
+  const handleStart = async () => {
+    try {
+      await startTask(id);
+      toast.success('任务已启动');
+      // Small delay so the backend has time to update DB + IsRunning state.
+      setTimeout(loadStatus, 300);
+    } catch (err) {
+      toast.error(err.response?.data?.error || '启动失败');
+    }
+  };
+
+  const handleStop = async () => {
+    try {
+      await stopTask(id);
+      toast.success('任务已停止');
+      setFileProgresses({});
+      setTimeout(loadStatus, 300);
+    } catch (err) {
+      toast.error('停止失败');
+    }
+  };
+
+  const handlePause = async () => {
+    try {
+      await pauseTask(id);
+      toast.success('任务已暂停');
+      setFileProgresses({});
+      setTimeout(loadStatus, 300);
+    } catch (err) {
+      toast.error(err.response?.data?.error || '暂停失败');
+    }
+  };
+
+  const handleCancel = async () => {
+    try {
+      await cancelTask(id);
+      toast.success('任务已停止');
+      setFileProgresses({});
+      setTimeout(loadStatus, 300);
+      setTimeout(loadTask, 300);
+    } catch (err) {
+      toast.error(err.response?.data?.error || '停止失败');
+    }
+  };
+
+  const handleDedupe = async () => {
+    try {
+      await dedupeTask(id);
+      toast.success('去重任务已启动');
+    } catch (err) {
+      toast.error('去重失败');
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!window.confirm('确定要删除这个任务吗？此操作不可恢复。')) return;
+    try {
+      await deleteTask(id);
+      toast.success('任务已删除');
+      navigate('/tasks');
+    } catch (err) {
+      toast.error('删除失败');
+    }
+  };
+
+  const handleShowLogs = () => {
+    setShowLogs(true);
+    loadLogs();
+  };
+
+  const handleRefreshLogs = () => {
+    loadLogs();
+    toast.success('日志已刷新');
+  };
+
+  if (loading || !task) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+      </div>
+    );
+  }
+
+  const isQuickTask = !!task.is_quick_task;
+  const canContinueQuickTask = isQuickTask && (status.status === 'paused' || status.status === 'error');
+  const rotationRemotes = parseRotationRemotes(task.rotation_remotes);
+  const rotationCurrentRemote = rotationRemotes[task.rotation_current_index || 0] || rotationRemotes[0] || '-';
+  const rotationLimitedRemotes = parseRotationLimitedRemotes(task.rotation_limited_remotes);
+  const rotationLimitedEntries = Object.entries(rotationLimitedRemotes);
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => navigate(isQuickTask ? '/files' : '/tasks')}
+            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="text-2xl font-bold text-gray-900">{task.name}</h1>
+              <StatusBadge status={status.status} />
+            </div>
+            <p className="text-gray-500 mt-1">
+              {(task.source_type === 'remote' ? '☁ ' : '📂 ') + task.source_dir}
+              {' → '}
+              {formatTaskDest(task)}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-1.5 md:gap-2">
+          {isQuickTask ? (
+            <>
+              {status.running ? (
+                <>
+                  <button
+                    onClick={handlePause}
+                    className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-amber-50 text-amber-600 rounded-lg hover:bg-amber-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <Pause className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">暂停</span>
+                  </button>
+                  <button
+                    onClick={handleCancel}
+                    className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <Ban className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">停止</span>
+                  </button>
+                </>
+              ) : canContinueQuickTask ? (
+                <>
+                  <button
+                    onClick={handleStart}
+                    className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <Play className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">继续</span>
+                  </button>
+                  <button
+                    onClick={handleCancel}
+                    className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
+                  >
+                    <Ban className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                    <span className="hidden xs:inline">停止</span>
+                  </button>
+                </>
+              ) : null}
+            </>
+          ) : (
+            <>
+              {status.running ? (
+                <button
+                  onClick={handleStop}
+                  className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-red-50 text-red-600 rounded-lg hover:bg-red-100 transition-colors font-medium text-sm md:text-base"
+                >
+                  <Square className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                  <span className="hidden xs:inline">停止</span>
+                </button>
+              ) : (
+                <button
+                  onClick={handleStart}
+                  className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors font-medium text-sm md:text-base"
+                >
+                  <Play className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                  <span className="hidden xs:inline">启动</span>
+                </button>
+              )}
+              <button
+                onClick={handleDedupe}
+                className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-purple-50 text-purple-600 rounded-lg hover:bg-purple-100 transition-colors font-medium text-sm md:text-base"
+              >
+                <RotateCcw className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                <span className="hidden xs:inline">去重</span>
+              </button>
+              <Link
+                to={`/tasks/${id}/edit`}
+                className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 transition-colors font-medium text-sm md:text-base"
+              >
+                <Pencil className="w-3.5 h-3.5 md:w-4 md:h-4" />
+                <span className="hidden xs:inline">编辑</span>
+              </Link>
+            </>
+          )}
+          <button
+            onClick={handleDelete}
+            className="inline-flex items-center gap-1 md:gap-2 px-3 md:px-4 py-2 bg-gray-50 text-gray-600 rounded-lg hover:bg-red-50 hover:text-red-600 transition-colors font-medium text-sm md:text-base"
+          >
+            <Trash2 className="w-3.5 h-3.5 md:w-4 md:h-4" />
+            <span className="hidden xs:inline">删除</span>
+          </button>
+        </div>
+      </div>
+
+      {/* Info Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <InfoCard
+          icon={Activity}
+          label="并发传输"
+          value={task.transfers}
+          sub={`检查: ${task.checkers}`}
+        />
+        <InfoCard
+          icon={Clock}
+          label="最小年龄"
+          value={task.min_age}
+          sub={`重试: ${task.retries}次`}
+        />
+        <InfoCard
+          icon={Terminal}
+          label="块大小"
+          value={task.drive_chunk_size}
+          sub={`缓冲: ${task.buffer_size}`}
+        />
+        <InfoCard
+          icon={CheckCircle2}
+          label="自动化"
+          value={task.qb_enabled ? 'qB完成触发' : (task.watch_enabled ? '监控' : '手动')}
+          sub={task.qb_enabled ? `轮询 ${task.qb_poll_interval || 60}秒` : (task.schedule_enabled ? `定时 ${task.schedule_interval}分` : '无定时')}
+        />
+        {task.qb_enabled && (
+          <InfoCard
+            icon={CheckCircle2}
+            label="qBittorrent"
+            value={task.qb_url || '-'}
+            sub={task.qb_delete_files ? '单种子转移后删种并删除文件' : '单种子转移后只删除种子'}
+          />
+        )}
+        {task.task_type === 'rotation' && (
+          <>
+            <InfoCard
+              icon={Upload}
+              label="轮转网盘"
+              value={rotationRemotes.join(' / ') || '-'}
+              sub={`目标目录: ${task.remote_dir || '/'}`}
+            />
+            <InfoCard
+              icon={RotateCcw}
+              label="当前轮转"
+              value={`第 ${(task.rotation_current_round || 0) + 1} 轮 / ${rotationCurrentRemote}`}
+              sub={`当前账号序号: ${(task.rotation_current_index || 0) + 1}`}
+            />
+            <InfoCard
+              icon={Clock}
+              label="恢复信息"
+              value={task.rotation_resume_time || '01:00'}
+              sub={`暂停至: ${task.rotation_paused_until || '未暂停'}`}
+            />
+          </>
+        )}
+      </div>
+
+      {task.task_type === 'rotation' && rotationLimitedEntries.length > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4">
+          <div className="font-semibold text-amber-900 mb-2">
+            本轮已触发上传限制的账号：{rotationLimitedEntries.length}/{rotationRemotes.length}
+          </div>
+          <div className="space-y-2">
+            {rotationLimitedEntries.map(([name, info]) => (
+              <div key={name} className="text-sm text-amber-800 bg-white/70 border border-amber-100 rounded-lg px-3 py-2">
+                <div className="font-medium">{name} {info?.time ? `· ${info.time}` : ''}</div>
+                <div className="text-xs mt-1 break-all">{info?.reason || 'Google Drive 上传限制'}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {task.qb_enabled && <QBQueuePanel status={qbStatus} />}
+
+      {/* Active File Transfers */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Upload className="w-5 h-5 text-blue-500" />
+            <h2 className="font-semibold text-gray-900">正在传输的文件</h2>
+            {Object.keys(fileProgresses).length > 0 && (
+              <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-xs font-medium rounded-full animate-pulse">
+                {Object.keys(fileProgresses).length} 个文件
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="p-4 md:p-6 space-y-4">
+          {Object.keys(fileProgresses).length === 0 ? (
+            <div className="text-center text-gray-400 py-4">
+              <Upload className="w-8 h-8 mx-auto mb-2 opacity-40" />
+              <p className="text-sm">暂无活跃传输</p>
+              <p className="text-xs mt-1">启动任务后将显示实时进度</p>
+            </div>
+          ) : (
+            Object.entries(fileProgresses).map(([fileName, data]) => (
+              <div key={fileName} className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <File className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                    <span className="text-sm font-medium text-gray-700 truncate" title={fileName}>
+                      {fileName}
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex-1 h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-blue-500 to-blue-400 rounded-full transition-all duration-500 ease-out"
+                      style={{ width: `${Math.min(data.progress, 100)}%` }}
+                    />
+                  </div>
+                  <span className="text-xs font-semibold text-blue-600 w-12 text-right flex-shrink-0">
+                    {Math.min(data.progress, 100).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Output Logs API URL */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 md:p-6">
+        <h2 className="text-base md:text-lg font-semibold text-gray-900 mb-4 flex items-center gap-2">
+          <ExternalLink className="w-5 h-5 text-blue-500" />
+          输出日志 API
+        </h2>
+        <div className="bg-gray-50 text-gray-700 p-3 md:p-4 rounded-lg font-mono text-xs md:text-sm break-all border border-gray-200">
+          {(() => {
+            const base = window.location.origin;
+            const token = localStorage.getItem('apiToken') || '';
+            return token
+              ? `${base}/api/output-logs?task_id=${id}&token=${token}`
+              : `${base}/api/output-logs?task_id=${id}`;
+          })()}
+        </div>
+        <div className="flex items-center gap-3 mt-3">
+          <Link
+            to={`/logs?tab=records&task=${id}`}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
+          >
+            <ExternalLink className="w-4 h-4" />
+            查看转移记录
+          </Link>
+        </div>
+      </div>
+
+      {/* Log Viewer */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Terminal className="w-5 h-5 text-gray-600" />
+            <h2 className="font-semibold text-gray-900">实时日志</h2>
+            {status.running && showLogs && (
+              <span className="px-2 py-0.5 bg-green-100 text-green-700 text-xs font-medium rounded-full animate-pulse">
+                实时接收中
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            {!showLogs ? (
+              <button
+                onClick={handleShowLogs}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium text-sm"
+              >
+                <Terminal className="w-4 h-4" />
+                获取日志
+              </button>
+            ) : (
+              <>
+                <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={autoScroll}
+                    onChange={(e) => setAutoScroll(e.target.checked)}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  自动滚动
+                </label>
+                <button
+                  onClick={handleRefreshLogs}
+                  className="p-1.5 text-gray-500 hover:bg-gray-100 rounded-lg transition-colors"
+                  title="刷新日志"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="log-viewer h-64 md:h-96 overflow-auto p-2 rounded-b-lg" ref={logContainerRef}>
+          {!showLogs ? (
+            <div className="flex items-center justify-center h-full text-gray-500">
+              <div className="text-center">
+                <Terminal className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                <p>日志已隐藏</p>
+                <p className="text-sm mt-1">点击上方"获取日志"按钮查看实时输出</p>
+              </div>
+            </div>
+          ) : logs.length === 0 ? (
+            <div className="flex items-center justify-center h-full text-gray-500">
+              <div className="text-center">
+                <Terminal className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                <p>暂无日志</p>
+                <p className="text-sm mt-1">启动任务后将显示实时输出</p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-0">
+              {logs.map((log, idx) => (
+                <div
+                  key={idx}
+                  className={`log-line ${
+                    log.content.includes('ERROR') ? 'log-error' :
+                    log.content.includes('WARN') ? 'log-warn' :
+                    log.content.includes('Transferred') ? 'log-success' :
+                    'log-info'
+                  }`}
+                >
+                  <span className="text-gray-500 mr-2">[{log.time}]</span>
+                  {log.content}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const StatusBadge = ({ status }) => {
+  const configs = {
+    running: { text: '运行中', class: 'bg-green-100 text-green-700' },
+    idle: { text: '当前空闲', class: 'bg-gray-100 text-gray-600' },
+    paused: { text: '暂停', class: 'bg-amber-100 text-amber-700' },
+    canceled: { text: '已停止', class: 'bg-slate-100 text-slate-600' },
+    error: { text: '异常', class: 'bg-red-100 text-red-700' },
+  };
+
+  const config = configs[status] || configs.idle;
+
+  return (
+    <span className={`px-2.5 py-1 rounded-full text-xs font-medium ${config.class}`}>
+      {config.text}
+    </span>
+  );
+};
+
+const InfoCard = ({ icon: Icon, label, value, sub }) => (
+  <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
+    <div className="flex items-center gap-2 mb-2">
+      <Icon className="w-4 h-4 text-gray-400" />
+      <span className="text-sm text-gray-500">{label}</span>
+    </div>
+    <div className="text-lg font-semibold text-gray-900">{value}</div>
+    <div className="text-xs text-gray-500 mt-0.5">{sub}</div>
+  </div>
+);
+
+const QBQueuePanel = ({ status }) => {
+  const waiting = status?.waiting || [];
+  const active = status?.active;
+  const lastSync = status?.last_sync ? formatDateTime(status.last_sync) : '等待轮询';
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-emerald-100 overflow-hidden">
+      <div className="px-6 py-4 border-b border-emerald-50 bg-gradient-to-r from-emerald-50 to-white flex flex-col md:flex-row md:items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+          <div>
+            <h2 className="font-semibold text-gray-900">qBittorrent 传输队列</h2>
+            <p className="text-xs text-gray-500 mt-0.5">只传输已完成种子的实际路径，队列按顺序逐个执行</p>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-2 text-xs font-medium">
+          <span className="px-2.5 py-1 rounded-full bg-white text-gray-700 border border-gray-200">qB 总数 {status?.total_torrents ?? 0}</span>
+          <span className="px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-700">完成 {status?.completed_count ?? 0}</span>
+          <span className="px-2.5 py-1 rounded-full bg-blue-100 text-blue-700">匹配源目录 {status?.matched_completed ?? 0}</span>
+        </div>
+      </div>
+
+      <div className="p-4 md:p-6 grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="rounded-lg border border-gray-100 p-4 bg-gray-50/60">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+              <Upload className="w-4 h-4 text-emerald-500" />
+              正在传输
+            </div>
+            {active && <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-xs animate-pulse">运行中</span>}
+          </div>
+          {active ? (
+            <TorrentQueueItem item={active} />
+          ) : (
+            <div className="text-sm text-gray-400 py-6 text-center">当前没有正在传输的 qB 种子</div>
+          )}
+        </div>
+
+        <div className="rounded-lg border border-gray-100 p-4 bg-gray-50/60">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2 text-sm font-semibold text-gray-900">
+              <Clock className="w-4 h-4 text-blue-500" />
+              等待传输
+            </div>
+            <span className="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-xs">{status?.waiting_count ?? 0} 个</span>
+          </div>
+          {waiting.length > 0 ? (
+            <div className="space-y-2 max-h-64 overflow-auto pr-1">
+              {waiting.map((item, index) => (
+                <TorrentQueueItem key={item.hash || `${item.name}-${index}`} item={item} index={index + 1} />
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-gray-400 py-6 text-center">暂无等待中的完成种子</div>
+          )}
+        </div>
+      </div>
+
+      <div className="px-6 py-3 bg-gray-50 border-t border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-2 text-xs text-gray-500">
+        <span>上次获取 qB：{lastSync}</span>
+        {status?.last_error ? <span className="text-red-500">错误：{status.last_error}</span> : <span>轮询间隔：{status?.poll_interval || 60} 秒</span>}
+      </div>
+    </div>
+  );
+};
+
+const TorrentQueueItem = ({ item, index }) => (
+  <div className="rounded-lg bg-white border border-gray-100 p-3">
+    <div className="flex items-center gap-2 min-w-0">
+      {index && <span className="text-xs font-semibold text-blue-600 bg-blue-50 rounded-full px-2 py-0.5">#{index}</span>}
+      <File className="w-4 h-4 text-gray-400 flex-shrink-0" />
+      <span className="text-sm font-medium text-gray-800 truncate" title={item.name}>{item.name || '未命名种子'}</span>
+    </div>
+    <div className="mt-2 text-xs text-gray-500 font-mono break-all">{item.source_path || '-'}</div>
+  </div>
+);
+
+const formatBytes = (bytes) => {
+  if (bytes === 0 || !bytes) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+};
+
+const formatSpeed = (bytesPerSec) => {
+  if (bytesPerSec === 0 || !bytesPerSec) return '0 B/s';
+  return formatBytes(bytesPerSec) + '/s';
+};
+
+const formatDateTime = (value) => {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+};
+
+export default TaskDetail;
