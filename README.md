@@ -90,7 +90,7 @@ MDC-NG 或 AVDB 需要配置 FlareSolverr 时，用这个地址。
 
 1. 扫描 `/home/mdcng_guaxiao` 下的一级影片目录；
 2. 目录里必须至少有一个视频文件；
-3. 目录内所有文件最后修改时间都超过任务的 `min_age`，默认建议 `5m`；
+3. 目录内所有文件最后修改时间都超过任务的 `min_age`，默认 `3m`；
 4. 满足条件后，整目录交给 rclone 上传；
 5. 未稳定目录会等待下一轮，避免只上传 mp4、漏掉 nfo/poster/fanart/thumb。
 
