@@ -354,13 +354,13 @@ func escapeRcloneFilterPath(path string) string {
 	return replacer.Replace(path)
 }
 
-// prepareStableDirectoryFilter limits local root-directory tasks to completed
-// movie folders.  MDC-NG normally creates a directory, moves the video, then
-// writes nfo/poster/fanart/thumb afterwards.  A plain rclone --min-age works at
-// file level, so it can pick up the video before the sidecars exist.  This
-// filter waits until every file inside a top-level directory is older than
-// task.MinAge and the directory contains at least one video before transferring
-// the whole directory.
+// prepareStableDirectoryFilter limits local tasks to completed movie folders.
+// MDC-NG normally creates actor/title directories, moves the video, then writes
+// nfo/poster/fanart/thumb afterwards. A plain rclone --min-age works at file
+// level, so it can pick up the video before the sidecars exist. This filter
+// detects the parent directory of each video as the movie folder, waits until
+// every file inside that folder is older than task.MinAge, then transfers that
+// whole folder together.
 func prepareStableDirectoryFilter(task *models.Task, args []string) ([]string, func(), []string) {
 	if task == nil || task.SourceType == "remote" || strings.TrimSpace(task.SourceDir) == "" {
 		return args, func() {}, nil
@@ -379,8 +379,8 @@ func prepareStableDirectoryFilter(task *models.Task, args []string) ([]string, f
 		hasVideo bool
 		stable   bool
 	}
-	states := map[string]*dirState{}
-	hasTopLevelDir := false
+	movieDirs := map[string]struct{}{}
+	hasSubDir := false
 
 	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d == nil {
@@ -396,42 +396,47 @@ func prepareStableDirectoryFilter(task *models.Task, args []string) ([]string, f
 			}
 			return nil
 		}
-		parts := strings.Split(filepath.ToSlash(rel), "/")
-		if len(parts) == 1 && d.IsDir() {
-			hasTopLevelDir = true
-			if states[parts[0]] == nil {
-				states[parts[0]] = &dirState{stable: true}
-			}
-			return nil
-		}
-		if len(parts) < 2 {
-			return nil
-		}
-		top := parts[0]
-		st := states[top]
-		if st == nil {
-			st = &dirState{stable: true}
-			states[top] = st
-		}
 		if d.IsDir() {
+			hasSubDir = true
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil || !info.Mode().IsRegular() {
 			return nil
 		}
-		st.files++
 		if hasVideoExt(path) {
-			st.hasVideo = true
-		}
-		if info.ModTime().After(cutoff) {
-			st.stable = false
+			dirRel, err := filepath.Rel(root, filepath.Dir(path))
+			if err == nil && dirRel != "." && !strings.HasPrefix(dirRel, "..") {
+				movieDirs[filepath.ToSlash(dirRel)] = struct{}{}
+			}
 		}
 		return nil
 	})
 
-	if !hasTopLevelDir {
+	if !hasSubDir {
 		return args, func() {}, nil
+	}
+	states := map[string]*dirState{}
+	for dir := range movieDirs {
+		st := &dirState{stable: true, hasVideo: true}
+		_ = filepath.WalkDir(filepath.Join(root, filepath.FromSlash(dir)), func(path string, d os.DirEntry, err error) error {
+			if err != nil || d == nil || d.IsDir() {
+				return nil
+			}
+			info, err := d.Info()
+			if err != nil || !info.Mode().IsRegular() {
+				return nil
+			}
+			st.files++
+			if hasVideoExt(path) {
+				st.hasVideo = true
+			}
+			if info.ModTime().After(cutoff) {
+				st.stable = false
+			}
+			return nil
+		})
+		states[dir] = st
 	}
 	eligible := make([]string, 0)
 	for dir, st := range states {
