@@ -55,6 +55,36 @@ services:
       - ./data/qbittorrent:/config
       - /home:/home
 
+  qb-mdcng-autoremove:
+    build:
+      context: ./qb-autoremove
+    image: dbonline-media-stack/qb-mdcng-autoremove:latest
+    container_name: qb-mdcng-autoremove
+    restart: unless-stopped
+    depends_on:
+      - qbittorrent
+    environment:
+      TZ: ${TZ}
+      QB_AUTOREMOVE_ENABLED: ${QB_AUTOREMOVE_ENABLED:-false}
+      QB_URL: http://qbittorrent:8080
+      QB_USERNAME: ${QBITTORRENT_USER}
+      QB_PASSWORD: ${QBITTORRENT_PASSWORD}
+      QB_CATEGORY: dbonline
+      QB_TAG: ""
+      QB_PATH_PREFIX: /home/dbonline_downloads
+      LOCAL_PATH_PREFIX: /downloads
+      MOUNT_SENTINEL: .qb-autoremove-mounted
+      POLL_SECONDS: ${QB_AUTOREMOVE_POLL_SECONDS:-60}
+      QUIET_SECONDS: ${QB_AUTOREMOVE_QUIET_SECONDS:-3600}
+      MIN_COMPLETED_AGE_SECONDS: ${QB_AUTOREMOVE_MIN_COMPLETED_AGE_SECONDS:-600}
+      FALLBACK_MOVED_PERCENT: ${QB_AUTOREMOVE_FALLBACK_MOVED_PERCENT:-90}
+      DELETE_REMAINING_FILES: ${QB_AUTOREMOVE_DELETE_REMAINING_FILES:-true}
+      DRY_RUN: ${QB_AUTOREMOVE_DRY_RUN:-false}
+      LOG_LEVEL: ${QB_AUTOREMOVE_LOG_LEVEL:-INFO}
+    volumes:
+      - /home/dbonline_downloads:/downloads:ro
+      - ./data/qb-autoremove:/data
+
   mdcng:
     image: mdcng/mdc:latest
     container_name: mdcng

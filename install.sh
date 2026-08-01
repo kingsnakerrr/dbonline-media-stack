@@ -122,7 +122,7 @@ copy_self_or_clone() {
 }
 
 write_env() {
-  local domain="$1" db_user="$2" db_pass="$3" pg_pass="$4" qb_user="$5" qb_pass="$6" mdc_user="$7" mdc_pass="$8" rm_user="$9" rm_pass="${10}" avdb_user="${11}" avdb_pass="${12}" avdb_pg_pass="${13}"
+  local domain="$1" db_user="$2" db_pass="$3" pg_pass="$4" qb_user="$5" qb_pass="$6" mdc_user="$7" mdc_pass="$8" rm_user="$9" rm_pass="${10}" avdb_user="${11}" avdb_pass="${12}" avdb_pg_pass="${13}" qb_autoremove_enabled="${14}"
   cat >"$INSTALL_DIR/.env" <<EOF
 DOMAIN=$domain
 TZ=Asia/Shanghai
@@ -137,6 +137,15 @@ QBITTORRENT_BT_PORT=6881
 QBITTORRENT_USER=$qb_user
 QBITTORRENT_PASSWORD=$qb_pass
 QBITTORRENT_DOWNLOAD_DIR=/home/dbonline_downloads
+
+QB_AUTOREMOVE_ENABLED=$qb_autoremove_enabled
+QB_AUTOREMOVE_POLL_SECONDS=60
+QB_AUTOREMOVE_QUIET_SECONDS=3600
+QB_AUTOREMOVE_MIN_COMPLETED_AGE_SECONDS=600
+QB_AUTOREMOVE_FALLBACK_MOVED_PERCENT=90
+QB_AUTOREMOVE_DELETE_REMAINING_FILES=true
+QB_AUTOREMOVE_DRY_RUN=false
+QB_AUTOREMOVE_LOG_LEVEL=INFO
 
 MDCNG_PORT=9208
 MDCNG_USER=$mdc_user
@@ -161,7 +170,8 @@ EOF
 
 prepare_dirs() {
   mkdir -p /home/dbonline_downloads /home/dbonline_downloads/.incomplete /home/mdcng_guaxiao /root/.config/rclone
-  mkdir -p "$INSTALL_DIR/data"/{dbonline/data,dbonline/cache,dbonline/logs,dbonline-postgres,qbittorrent,mdcng/config,rclone-manager/data,rclone-manager/logs,avdb,avdb-postgres}
+  touch /home/dbonline_downloads/.qb-autoremove-mounted
+  mkdir -p "$INSTALL_DIR/data"/{dbonline/data,dbonline/cache,dbonline/logs,dbonline-postgres,qbittorrent,qb-autoremove,mdcng/config,rclone-manager/data,rclone-manager/logs,avdb,avdb-postgres}
 }
 
 install_control_command() {
@@ -188,6 +198,7 @@ qBittorrent:
 账号: $qb_user
 密码: $qb_pass
 下载目录: /home/dbonline_downloads
+dbonline 种子监控: media autoremove status / media autoremove on / media autoremove off
 
 MDC-NG:
 地址: http://$domain:9208
@@ -227,19 +238,28 @@ media status
 media logs
 media restart
 media update
+media autoremove status
+media autoremove on
+media autoremove off
 EOF
   cat "$INSTALL_DIR/install-info.txt"
 }
 
 main() {
   need_root
-  local default_domain domain db_user db_pass pg_pass qb_user qb_pass mdc_user mdc_pass rm_user rm_pass avdb_user avdb_pass avdb_pg_pass swap_gb bbr
+  local default_domain domain db_user db_pass pg_pass qb_user qb_pass qb_autoremove_choice qb_autoremove_enabled mdc_user mdc_pass rm_user rm_pass avdb_user avdb_pass avdb_pg_pass swap_gb bbr
   default_domain="$(detect_host)"
   domain="$(ask '请输入访问域名/IP' "$default_domain")"
   db_user="$(ask '请输入 DBOnline 账号' admin)"
   db_pass="$(ask_pass '请输入 DBOnline 密码')"
   qb_user="$(ask '请输入 qBittorrent 账号' admin)"
   qb_pass="$(ask_pass '请输入 qBittorrent 密码')"
+  qb_autoremove_choice="$(ask '是否启用 dbonline 种子监控：MDC-NG 刮削移动后删除种子和残留文件' Y)"
+  if [[ "$qb_autoremove_choice" =~ ^[Yy]$ ]]; then
+    qb_autoremove_enabled=true
+  else
+    qb_autoremove_enabled=false
+  fi
   mdc_user="$(ask '请输入 MDC-NG 账号' admin)"
   mdc_pass="$(ask_pass '请输入 MDC-NG 密码')"
   rm_user="$(ask '请输入 Rclone Manager 账号' admin)"
@@ -258,7 +278,7 @@ main() {
   configure_bbr "$bbr"
   copy_self_or_clone
   chmod +x "$INSTALL_DIR/install.sh" "$INSTALL_DIR/media" "$INSTALL_DIR/scripts/"*.sh "$INSTALL_DIR/qbittorrent/entrypoint.sh" || true
-  write_env "$domain" "$db_user" "$db_pass" "$pg_pass" "$qb_user" "$qb_pass" "$mdc_user" "$mdc_pass" "$rm_user" "$rm_pass" "$avdb_user" "$avdb_pass" "$avdb_pg_pass"
+  write_env "$domain" "$db_user" "$db_pass" "$pg_pass" "$qb_user" "$qb_pass" "$mdc_user" "$mdc_pass" "$rm_user" "$rm_pass" "$avdb_user" "$avdb_pass" "$avdb_pg_pass" "$qb_autoremove_enabled"
   prepare_dirs
   install_control_command
 

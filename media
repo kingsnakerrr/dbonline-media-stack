@@ -1,8 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 APP_DIR="/opt/dbonline-media-stack"
 cd "$APP_DIR"
 cmd="${1:-status}"
+
+set_env_value() {
+  local key="$1" value="$2"
+  if grep -q "^${key}=" .env; then
+    sed -i "s|^${key}=.*|${key}=${value}|" .env
+  else
+    printf '%s=%s\n' "$key" "$value" >> .env
+  fi
+}
+
+set_env_default() {
+  local key="$1" value="$2"
+  if ! grep -q "^${key}=" .env; then
+    printf '%s=%s\n' "$key" "$value" >> .env
+  fi
+}
+
+ensure_autoremove_defaults() {
+  set_env_default QB_AUTOREMOVE_POLL_SECONDS 60
+  set_env_default QB_AUTOREMOVE_QUIET_SECONDS 3600
+  set_env_default QB_AUTOREMOVE_MIN_COMPLETED_AGE_SECONDS 600
+  set_env_default QB_AUTOREMOVE_FALLBACK_MOVED_PERCENT 90
+  set_env_default QB_AUTOREMOVE_DELETE_REMAINING_FILES true
+  set_env_default QB_AUTOREMOVE_DRY_RUN false
+  set_env_default QB_AUTOREMOVE_LOG_LEVEL INFO
+}
+
 case "$cmd" in
   status)
     docker compose ps
@@ -27,8 +55,40 @@ case "$cmd" in
   info)
     cat "$APP_DIR/install-info.txt"
     ;;
+  autoremove)
+    sub="${2:-status}"
+    case "$sub" in
+      on|enable|start)
+        ensure_autoremove_defaults
+        set_env_value QB_AUTOREMOVE_ENABLED true
+        touch /home/dbonline_downloads/.qb-autoremove-mounted
+        docker compose up -d --build qb-mdcng-autoremove
+        echo "dbonline 种子监控已开启：MDC-NG 刮削移动后会删除 qB 种子和残留文件。"
+        ;;
+      off|disable|stop)
+        ensure_autoremove_defaults
+        set_env_value QB_AUTOREMOVE_ENABLED false
+        docker compose up -d --build qb-mdcng-autoremove
+        echo "dbonline 种子监控已关闭：不会自动删除 qB 种子和残留文件。"
+        ;;
+      restart)
+        docker compose restart qb-mdcng-autoremove
+        ;;
+      logs)
+        docker compose logs -f --tail=200 qb-mdcng-autoremove
+        ;;
+      status)
+        grep '^QB_AUTOREMOVE_ENABLED=' .env 2>/dev/null || echo 'QB_AUTOREMOVE_ENABLED=false'
+        docker compose ps qb-mdcng-autoremove
+        ;;
+      *)
+        echo "用法: media autoremove {status|on|off|restart|logs}"
+        exit 1
+        ;;
+    esac
+    ;;
   *)
-    echo "用法: media {status|logs|restart|update|up|down|info}"
+    echo "用法: media {status|logs|restart|update|up|down|info|autoremove}"
     exit 1
     ;;
 esac
