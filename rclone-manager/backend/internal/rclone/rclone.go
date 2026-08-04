@@ -3,6 +3,7 @@ package rclone
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 )
 
 const RcloneRCAddr = "http://127.0.0.1:5572"
+const defaultDedupeTimeout = 30 * time.Minute
 
 // fileLineRegex matches rclone per-file transfer log lines like:
 //
@@ -1363,10 +1365,30 @@ func (e *Executor) ExecuteDedupe(task *models.Task) error {
 		"-q",
 	}
 
-	cmd := exec.Command("rclone", args...)
+	timeout := defaultDedupeTimeout
+	if raw := strings.TrimSpace(os.Getenv("RCLONE_MANAGER_DEDUPE_TIMEOUT")); raw != "" {
+		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+			timeout = parsed
+		}
+	}
+
+	logger.WriteLog(
+		fmt.Sprintf("task_%d.log", task.ID),
+		fmt.Sprintf("Dedupe started: %s:%s timeout=%s", task.RemoteName, task.RemoteDir, timeout),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "rclone", args...)
 	output, err := cmd.CombinedOutput()
 
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			message := fmt.Sprintf("Dedupe timeout after %s, process killed. Transfer task will continue next run.", timeout)
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), message)
+			return fmt.Errorf(message)
+		}
 		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("Dedupe failed: %v - %s", err, string(output)))
 		return err
 	}
