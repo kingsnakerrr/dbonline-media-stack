@@ -946,6 +946,13 @@ func (e *Executor) runRotation(taskID uint, generation uint64, callback Completi
 			if !e.advanceRotationSmart(&task, remotes, remote, message) {
 				return
 			}
+			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "Rotation limit handled: waiting 10s, then rescanning source with the next available remote")
+			for i := 0; i < 10; i++ {
+				if !e.hasRunningEntry(taskID, generation) {
+					return
+				}
+				time.Sleep(time.Second)
+			}
 			continue
 		}
 
