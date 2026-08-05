@@ -850,12 +850,8 @@ func (e *Executor) ExecuteRotationWithCallback(task *models.Task, callback Compl
 		return fmt.Errorf("rotation task paused until %s", task.RotationPausedUntil.Format("2006-01-02 15:04"))
 	}
 
-	if task.RotationCurrentIndex < 0 || task.RotationCurrentIndex >= len(remotes) {
-		task.RotationCurrentIndex = 0
-	}
-	if task.RotationCurrentRound < 0 || task.RotationCurrentRound >= task.RotationMaxRounds {
-		task.RotationCurrentRound = 0
-	}
+	task.RotationCurrentIndex = 0
+	task.RotationCurrentRound = 0
 	task.RemoteName = remotes[task.RotationCurrentIndex]
 
 	generation, ok := e.reserveTask(task.ID)
