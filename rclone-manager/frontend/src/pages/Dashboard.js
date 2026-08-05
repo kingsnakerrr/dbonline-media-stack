@@ -10,8 +10,9 @@ import {
   AlertCircle,
   X,
   Loader2,
+  Cloud,
 } from 'lucide-react';
-import { getTasks, getSystemStats, startTask, stopTask, getQuickTasks, deleteTask } from '../services/api';
+import { getTasks, getSystemStats, startTask, stopTask, getQuickTasks, deleteTask, getRemoteStatuses } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 
@@ -23,6 +24,7 @@ const Dashboard = () => {
   const [quickTasks, setQuickTasks] = useState([]);
   const [quickTaskProgress, setQuickTaskProgress] = useState({});
   const [deletingQuickTaskId, setDeletingQuickTaskId] = useState(null);
+  const [remoteStatuses, setRemoteStatuses] = useState([]);
 
   useEffect(() => {
     loadData();
@@ -105,12 +107,14 @@ const Dashboard = () => {
 
   const loadData = async () => {
     try {
-      const [tasksRes, statsRes] = await Promise.all([
+      const [tasksRes, statsRes, remoteStatusRes] = await Promise.all([
         getTasks(),
-        getSystemStats()
+        getSystemStats(),
+        getRemoteStatuses()
       ]);
       setTasks(tasksRes.data);
       setStats(statsRes.data);
+      setRemoteStatuses(remoteStatusRes.data?.remotes || []);
     } catch (err) {
       console.error('Failed to load data:', err);
     } finally {
@@ -342,6 +346,28 @@ const Dashboard = () => {
         )}
       </div>
 
+      {/* Rclone Remote Status */}
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+        <div className="px-4 md:px-6 py-3 md:py-4 border-b border-gray-100 flex items-center justify-between">
+          <h2 className="font-semibold text-gray-900 text-sm md:text-base flex items-center gap-2">
+            <Cloud className="w-4 h-4 text-blue-500" />
+            Rclone 账号状态
+          </h2>
+          <span className="text-xs text-gray-400">读取 rclone.conf 全部账号</span>
+        </div>
+        {remoteStatuses.length === 0 ? (
+          <div className="px-4 md:px-6 py-6 text-sm text-gray-500">
+            没有读取到 rclone 账号，请确认 /root/.config/rclone/rclone.conf 已挂载到容器。
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 p-4">
+            {remoteStatuses.map((remote) => (
+              <RemoteStatusCard key={remote.name} remote={remote} />
+            ))}
+          </div>
+        )}
+      </div>
+
       {/* Quick Tasks */}
       {(runningQuickTasks.length > 0 || finishedQuickTasks.length > 0) && (
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
@@ -438,6 +464,37 @@ const Dashboard = () => {
           )}
         </div>
       )}
+    </div>
+  );
+};
+
+const RemoteStatusCard = ({ remote }) => {
+  const isLimited = remote.status === 'limited';
+  const isActive = remote.active;
+  const badgeClass = isLimited
+    ? 'bg-red-100 text-red-700 border-red-200'
+    : isActive
+      ? 'bg-green-100 text-green-700 border-green-200'
+      : 'bg-slate-100 text-slate-600 border-slate-200';
+  const badgeText = isLimited ? '限额' : isActive ? '当前使用' : '正常';
+
+  return (
+    <div className={`rounded-xl border p-3 ${isLimited ? 'border-red-200 bg-red-50/60' : isActive ? 'border-green-200 bg-green-50/60' : 'border-gray-200 bg-gray-50/60'}`}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="font-semibold text-gray-900 text-sm truncate">{remote.name}</div>
+          <div className="text-xs text-gray-500 mt-0.5 truncate">{remote.type || 'unknown'}</div>
+        </div>
+        <span className={`text-[11px] px-2 py-0.5 rounded-full border shrink-0 ${badgeClass}`}>
+          {badgeText}
+        </span>
+      </div>
+      <div className="mt-2 space-y-1 text-xs text-gray-500">
+        <div>状态码：<span className={isLimited ? 'text-red-600 font-medium' : 'text-gray-700'}>{remote.code || '-'}</span></div>
+        {remote.time && <div>时间：{remote.time}</div>}
+        {remote.task_name && <div className="truncate">任务：{remote.task_name}</div>}
+        {remote.reason && <div className="truncate" title={remote.reason}>原因：{remote.reason}</div>}
+      </div>
     </div>
   );
 };

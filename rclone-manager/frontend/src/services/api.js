@@ -48,6 +48,7 @@ export const cleanLogs = () => api.post('/system/logs/clean');
 
 export const getRemotes = () => api.get('/rclone/remotes');
 export const getRemoteDetails = () => api.get('/rclone/remotes/detail');
+export const getRemoteStatuses = () => api.get('/rclone/remotes/status');
 export const getRcloneConfig = () => api.get('/rclone/config');
 export const listRemoteDir = (remote, path = '/') => api.get(`/rclone/ls?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(path)}`);
 export const createRemoteDir = (remote, path) => api.post('/rclone/mkdir', { remote, path });

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -149,6 +150,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		// Rclone config
 		api.GET("/rclone/remotes", listRemotes)
 		api.GET("/rclone/remotes/detail", listRemoteDetails)
+		api.GET("/rclone/remotes/status", listRemoteStatuses)
 		api.GET("/rclone/config", getRcloneConfig)
 		api.GET("/rclone/ls", listRemoteDir)
 		api.POST("/rclone/mkdir", createRemoteDir)
@@ -1154,6 +1156,160 @@ func listRemoteDetails(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"remotes": remotes})
+}
+
+func listRemoteStatuses(c *gin.Context) {
+	type limitInfo struct {
+		Reason string `json:"reason"`
+		Time   string `json:"time"`
+	}
+	type remoteStatus struct {
+		Name     string `json:"name"`
+		Type     string `json:"type"`
+		Status   string `json:"status"`
+		Code     string `json:"code"`
+		Reason   string `json:"reason"`
+		Time     string `json:"time"`
+		TaskID   uint   `json:"task_id"`
+		TaskName string `json:"task_name"`
+		Active   bool   `json:"active"`
+	}
+
+	remotes := readRcloneRemoteDetails()
+	statuses := make(map[string]*remoteStatus, len(remotes))
+	for _, remote := range remotes {
+		statuses[remote.Name] = &remoteStatus{
+			Name:   remote.Name,
+			Type:   remote.Type,
+			Status: "ok",
+		}
+	}
+
+	var tasks []models.Task
+	db.Where("task_type = ?", "rotation").Find(&tasks)
+	for _, task := range tasks {
+		rotationRemotes := models.ParseRotationRemotes(task.RotationRemotes)
+		for _, remote := range rotationRemotes {
+			if remote == "" {
+				continue
+			}
+			if _, ok := statuses[remote]; !ok {
+				statuses[remote] = &remoteStatus{
+					Name:   remote,
+					Status: "ok",
+				}
+			}
+		}
+		if task.Status == "running" && task.RemoteName != "" {
+			if status, ok := statuses[task.RemoteName]; ok {
+				status.Active = true
+				status.TaskID = task.ID
+				status.TaskName = task.Name
+			}
+		}
+
+		limited := make(map[string]limitInfo)
+		if strings.TrimSpace(task.RotationLimitedRemotes) != "" {
+			_ = json.Unmarshal([]byte(task.RotationLimitedRemotes), &limited)
+		}
+		for remote, info := range limited {
+			if remote == "" {
+				continue
+			}
+			status, ok := statuses[remote]
+			if !ok {
+				status = &remoteStatus{Name: remote}
+				statuses[remote] = status
+			}
+			status.Status = "limited"
+			status.Code = detectRemoteStatusCode(info.Reason)
+			status.Reason = info.Reason
+			status.Time = info.Time
+			status.TaskID = task.ID
+			status.TaskName = task.Name
+		}
+	}
+
+	out := make([]remoteStatus, 0, len(statuses))
+	for _, status := range statuses {
+		out = append(out, *status)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return naturalRemoteLess(out[i].Name, out[j].Name)
+	})
+
+	c.JSON(http.StatusOK, gin.H{"remotes": out})
+}
+
+func readRcloneRemoteDetails() []struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+} {
+	configPath := "/root/.config/rclone/rclone.conf"
+	content, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+
+	var remotes []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	var current *struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	lines := strings.Split(string(content), "\n")
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			name := strings.TrimSuffix(strings.TrimPrefix(line, "["), "]")
+			remotes = append(remotes, struct {
+				Name string `json:"name"`
+				Type string `json:"type"`
+			}{Name: name, Type: ""})
+			current = &remotes[len(remotes)-1]
+			continue
+		}
+		if current == nil {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(line), "type") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				current.Type = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return remotes
+}
+
+func detectRemoteStatusCode(reason string) string {
+	lower := strings.ToLower(reason)
+	switch {
+	case strings.Contains(lower, "403"):
+		return "403"
+	case strings.Contains(lower, "429"):
+		return "429"
+	case strings.Contains(lower, "quota"):
+		return "quota"
+	case strings.Contains(lower, "ratelimit") || strings.Contains(lower, "rate limit"):
+		return "rate_limit"
+	default:
+		return ""
+	}
+}
+
+func naturalRemoteLess(left string, right string) bool {
+	leftLower := strings.ToLower(left)
+	rightLower := strings.ToLower(right)
+	if leftLower == rightLower {
+		return left < right
+	}
+	return leftLower < rightLower
 }
 
 // listRemoteDir lists a remote directory using rclone lsjson.
