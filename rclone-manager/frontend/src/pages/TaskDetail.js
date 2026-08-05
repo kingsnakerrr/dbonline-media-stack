@@ -176,9 +176,11 @@ const TaskDetail = () => {
           loadStatus();
         } else if (data.type === 'file_progress') {
           // 兼容后端 WebSocket file_progress 消息
+          const fileName = String(data.file_name || '').trim();
+          if (!fileName) return;
           setFileProgresses(prev => ({
             ...prev,
-            [data.file_name]: {
+            [fileName]: {
               progress: data.progress || 0,
               bytes: data.bytes || 0,
               size: data.size || 0,

@@ -88,9 +88,11 @@ const Logs = () => {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'file_progress') {
+          const fileName = String(data.file_name || '').trim();
+          if (!fileName) return;
           setTransferProgress(prev => ({
             ...prev,
-            [`${data.task_id}_${data.file_name}`]: data
+            [`${data.task_id}_${fileName}`]: { ...data, file_name: fileName }
           }));
         } else if (data.type === 'task_complete' || data.type === 'task_error') {
           // Clear progress for completed tasks

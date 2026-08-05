@@ -1575,8 +1575,8 @@ func (e *Executor) parseStatsProgress(task *models.Task, line string) {
 		if len(matches) >= 4 {
 			speed = parseRcloneSpeed(matches[2], matches[3])
 		}
-		msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":0,"size":0,"speed":%.0f}`,
-			task.ID, "", percentage, speed)
+		msg := fmt.Sprintf(`{"type":"task_progress","task_id":%d,"progress":%.1f,"speed":%.0f}`,
+			task.ID, percentage, speed)
 		e.hub.Broadcast(msg)
 		return
 	}
