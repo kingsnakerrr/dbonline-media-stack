@@ -661,7 +661,7 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 		"--retries", strconv.Itoa(task.Retries),
 	}
 	var cleanupFilter func()
-	args, cleanupFilter, _ = prepareStableDirectoryFilter(task, args)
+	args, cleanupFilter, eligibleDirs := prepareStableDirectoryFilter(task, args)
 	defer cleanupFilter()
 
 	// move-specific flags
@@ -807,7 +807,7 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 		// Auto dedupe if enabled
 		if task.AutoDedupe && err == nil {
 			time.Sleep(2 * time.Second)
-			e.ExecuteDedupe(task)
+			e.ExecuteAutoDedupe(task, eligibleDirs)
 		}
 	}()
 
@@ -864,13 +864,13 @@ func (e *Executor) ExecuteRotationWithCallback(task *models.Task, callback Compl
 	}
 
 	e.db.Model(task).Updates(map[string]interface{}{
-		"status":                 "running",
-		"last_error":             "",
-		"last_run":               now,
-		"remote_name":            task.RemoteName,
-		"rotation_current_index": task.RotationCurrentIndex,
-		"rotation_current_round": task.RotationCurrentRound,
-		"rotation_paused_until":  nil,
+		"status":                   "running",
+		"last_error":               "",
+		"last_run":                 now,
+		"remote_name":              task.RemoteName,
+		"rotation_current_index":   task.RotationCurrentIndex,
+		"rotation_current_round":   task.RotationCurrentRound,
+		"rotation_paused_until":    nil,
 		"rotation_limited_remotes": "{}",
 	})
 	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_started","task_id":%d}`, task.ID))
@@ -984,7 +984,7 @@ func (e *Executor) runRcloneBlocking(task *models.Task, generation uint64) (*run
 		"--retries", strconv.Itoa(task.Retries),
 	}
 	var cleanupFilter func()
-	args, cleanupFilter, _ = prepareStableDirectoryFilter(task, args)
+	args, cleanupFilter, eligibleDirs := prepareStableDirectoryFilter(task, args)
 	defer cleanupFilter()
 	if strings.TrimSpace(task.TaskType) == "rotation" {
 		args = append(args, "--drive-stop-on-upload-limit")
@@ -1050,16 +1050,16 @@ func (e *Executor) runRcloneBlocking(task *models.Task, generation uint64) (*run
 	}
 	if task.AutoDedupe && err == nil {
 		time.Sleep(2 * time.Second)
-		e.ExecuteDedupe(task)
+		e.ExecuteAutoDedupe(task, eligibleDirs)
 	}
 	return observer, err
 }
 
 func (e *Executor) finishRotationSuccess(task *models.Task) {
 	e.db.Model(task).Updates(map[string]interface{}{
-		"status":                "idle",
-		"last_error":            "",
-		"rotation_paused_until": nil,
+		"status":                   "idle",
+		"last_error":               "",
+		"rotation_paused_until":    nil,
 		"rotation_limited_remotes": "{}",
 	})
 	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
@@ -1197,11 +1197,11 @@ func (e *Executor) ScheduleRotationResume(taskID uint, resumeAt time.Time) {
 			return
 		}
 		e.db.Model(&task).Updates(map[string]interface{}{
-			"status":                 "idle",
-			"last_error":             "",
-			"rotation_current_index": 0,
-			"rotation_current_round": 0,
-			"rotation_paused_until":  nil,
+			"status":                   "idle",
+			"last_error":               "",
+			"rotation_current_index":   0,
+			"rotation_current_round":   0,
+			"rotation_paused_until":    nil,
 			"rotation_limited_remotes": "{}",
 		})
 		task.Status = "idle"
@@ -1395,6 +1395,65 @@ func (e *Executor) ExecuteDedupe(task *models.Task) error {
 
 	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "Dedupe completed")
 	return nil
+}
+
+func (e *Executor) ExecuteAutoDedupe(task *models.Task, eligibleDirs []string) error {
+	if task == nil || task.DestType == "local" {
+		return nil
+	}
+	if strings.TrimSpace(task.SourceType) == "local" {
+		dirs := normalizeDedupeDirs(eligibleDirs)
+		if len(dirs) == 0 {
+			logger.WriteLog(
+				fmt.Sprintf("task_%d.log", task.ID),
+				"Auto dedupe skipped: no stable uploaded folders detected; avoiding full remote dedupe",
+			)
+			return nil
+		}
+		logger.WriteLog(
+			fmt.Sprintf("task_%d.log", task.ID),
+			fmt.Sprintf("Auto dedupe scoped to %d uploaded folder(s)", len(dirs)),
+		)
+		for _, dir := range dirs {
+			scoped := *task
+			scoped.RemoteDir = joinRemoteDir(task.RemoteDir, dir)
+			if err := e.ExecuteDedupe(&scoped); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return e.ExecuteDedupe(task)
+}
+
+func normalizeDedupeDirs(dirs []string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		cleaned := strings.Trim(filepath.ToSlash(strings.TrimSpace(dir)), "/")
+		if cleaned == "" || cleaned == "." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+			continue
+		}
+		if _, ok := seen[cleaned]; ok {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		out = append(out, cleaned)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func joinRemoteDir(base string, rel string) string {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	rel = strings.Trim(filepath.ToSlash(strings.TrimSpace(rel)), "/")
+	if base == "" {
+		return rel
+	}
+	if rel == "" {
+		return base
+	}
+	return base + "/" + rel
 }
 
 func (e *Executor) StopTask(taskID uint) error {
