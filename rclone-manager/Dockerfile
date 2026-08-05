@@ -16,7 +16,9 @@ RUN npm run build
 
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates rclone bash curl tzdata nginx supervisor fuse3 \
+RUN apk add --no-cache ca-certificates bash curl tzdata nginx supervisor fuse3 unzip \
+    && curl -fsSL https://rclone.org/install.sh | bash \
+    && rclone version \
     && mkdir -p /run/nginx /var/log/nginx /app/data /app/logs \
     && printf 'user_allow_other\n' > /etc/fuse.conf
 

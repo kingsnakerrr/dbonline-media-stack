@@ -18,7 +18,9 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server
 
 FROM alpine:latest
 
-RUN apk add --no-cache ca-certificates rclone bash curl tzdata fuse3 \
+RUN apk add --no-cache ca-certificates bash curl tzdata fuse3 unzip \
+    && curl -fsSL https://rclone.org/install.sh | bash \
+    && rclone version \
     && mkdir -p /app/data /app/logs \
     && printf 'user_allow_other\n' > /etc/fuse.conf
 

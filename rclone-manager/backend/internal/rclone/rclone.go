@@ -1362,7 +1362,13 @@ func (e *Executor) ExecuteDedupe(task *models.Task) error {
 		fmt.Sprintf("%s:%s", task.RemoteName, task.RemoteDir),
 		"--config", getRcloneConfig(task),
 		"--dedupe-mode", "newest",
-		"-q",
+		"--fast-list",
+		"--timeout", "2m",
+		"--contimeout", "30s",
+		"--retries", "3",
+		"--low-level-retries", "5",
+		"--stats", "10s",
+		"-vv",
 	}
 
 	timeout := defaultDedupeTimeout
@@ -1381,7 +1387,26 @@ func (e *Executor) ExecuteDedupe(task *models.Task) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "rclone", args...)
-	output, err := cmd.CombinedOutput()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+
+	if err := cmd.Start(); err != nil {
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("Dedupe failed to start: %v", err))
+		return err
+	}
+
+	done := make(chan struct{}, 2)
+	streamDedupeOutput(task.ID, stdout, done)
+	streamDedupeOutput(task.ID, stderr, done)
+	err = cmd.Wait()
+	<-done
+	<-done
 
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
@@ -1389,12 +1414,31 @@ func (e *Executor) ExecuteDedupe(task *models.Task) error {
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), message)
 			return fmt.Errorf(message)
 		}
-		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("Dedupe failed: %v - %s", err, string(output)))
+		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("Dedupe failed: %v", err))
 		return err
 	}
 
 	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "Dedupe completed")
 	return nil
+}
+
+func streamDedupeOutput(taskID uint, reader io.Reader, done chan<- struct{}) {
+	go func() {
+		defer func() { done <- struct{}{} }()
+		scanner := bufio.NewScanner(reader)
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			logger.WriteLog(fmt.Sprintf("task_%d.log", taskID), fmt.Sprintf("Dedupe: %s", line))
+		}
+		if err := scanner.Err(); err != nil {
+			logger.WriteLog(fmt.Sprintf("task_%d.log", taskID), fmt.Sprintf("Dedupe log read error: %v", err))
+		}
+	}()
 }
 
 func (e *Executor) ExecuteAutoDedupe(task *models.Task, eligibleDirs []string) error {
