@@ -1096,6 +1096,28 @@ func deleteOpenlistConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "OpenList config deleted"})
 }
 
+type remoteQuotaLimitInfo struct {
+	Reason string `json:"reason"`
+	Time   string `json:"time"`
+}
+
+type remoteStatus struct {
+	Name            string  `json:"name"`
+	Type            string  `json:"type"`
+	Status          string  `json:"status"`
+	StatusText      string  `json:"status_text"`
+	Severity        string  `json:"severity"`
+	Reason          string  `json:"reason"`
+	Time            string  `json:"time"`
+	TaskID          uint    `json:"task_id"`
+	TaskName        string  `json:"task_name"`
+	Active          bool    `json:"active"`
+	UploadedBytes24 int64   `json:"uploaded_bytes_24h"`
+	QuotaBytes      int64   `json:"quota_bytes"`
+	RemainingBytes  int64   `json:"remaining_bytes"`
+	QuotaPercent    float64 `json:"quota_percent"`
+}
+
 // Rclone handlers
 func listRemotes(c *gin.Context) {
 	configPath := "/root/.config/rclone/rclone.conf"
@@ -1159,30 +1181,20 @@ func listRemoteDetails(c *gin.Context) {
 }
 
 func listRemoteStatuses(c *gin.Context) {
-	type limitInfo struct {
-		Reason string `json:"reason"`
-		Time   string `json:"time"`
-	}
-	type remoteStatus struct {
-		Name     string `json:"name"`
-		Type     string `json:"type"`
-		Status   string `json:"status"`
-		Code     string `json:"code"`
-		Reason   string `json:"reason"`
-		Time     string `json:"time"`
-		TaskID   uint   `json:"task_id"`
-		TaskName string `json:"task_name"`
-		Active   bool   `json:"active"`
-	}
-
+	const googleDriveDailyUploadQuota int64 = 750 * 1024 * 1024 * 1024
+	uploadedByRemote := recentUploadedBytesByRemote(24 * time.Hour)
 	remotes := readRcloneRemoteDetails()
 	statuses := make(map[string]*remoteStatus, len(remotes))
 	for _, remote := range remotes {
+		uploaded := uploadedByRemote[strings.ToLower(remote.Name)]
 		statuses[remote.Name] = &remoteStatus{
-			Name:   remote.Name,
-			Type:   remote.Type,
-			Status: "ok",
+			Name:            remote.Name,
+			Type:            remote.Type,
+			Status:          "ok",
+			UploadedBytes24: uploaded,
+			QuotaBytes:      googleDriveDailyUploadQuota,
 		}
+		applyGoogleDriveQuotaStatus(statuses[remote.Name])
 	}
 
 	var tasks []models.Task
@@ -1194,10 +1206,14 @@ func listRemoteStatuses(c *gin.Context) {
 				continue
 			}
 			if _, ok := statuses[remote]; !ok {
+				uploaded := uploadedByRemote[strings.ToLower(remote)]
 				statuses[remote] = &remoteStatus{
-					Name:   remote,
-					Status: "ok",
+					Name:            remote,
+					Status:          "ok",
+					UploadedBytes24: uploaded,
+					QuotaBytes:      googleDriveDailyUploadQuota,
 				}
+				applyGoogleDriveQuotaStatus(statuses[remote])
 			}
 		}
 		if task.Status == "running" && task.RemoteName != "" {
@@ -1208,7 +1224,7 @@ func listRemoteStatuses(c *gin.Context) {
 			}
 		}
 
-		limited := make(map[string]limitInfo)
+		limited := make(map[string]remoteQuotaLimitInfo)
 		if strings.TrimSpace(task.RotationLimitedRemotes) != "" {
 			_ = json.Unmarshal([]byte(task.RotationLimitedRemotes), &limited)
 		}
@@ -1222,7 +1238,10 @@ func listRemoteStatuses(c *gin.Context) {
 				statuses[remote] = status
 			}
 			status.Status = "limited"
-			status.Code = detectRemoteStatusCode(info.Reason)
+			status.StatusText = "已触发 Google 750G 上传限制"
+			status.Severity = "red"
+			status.RemainingBytes = 0
+			status.QuotaPercent = 100
 			status.Reason = info.Reason
 			status.Time = info.Time
 			status.TaskID = task.ID
@@ -1239,6 +1258,75 @@ func listRemoteStatuses(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{"remotes": out})
+}
+
+func recentUploadedBytesByRemote(window time.Duration) map[string]int64 {
+	type row struct {
+		DestStorage string
+		Total       int64
+	}
+	rows := make([]row, 0)
+	cutoff := time.Now().Add(-window)
+	db.Model(&models.OutputLog{}).
+		Select("lower(dest_storage) as dest_storage, coalesce(sum(file_size), 0) as total").
+		Where("progress = ? AND status = ? AND date >= ? AND dest_storage <> ''", 100, true, cutoff).
+		Group("lower(dest_storage)").
+		Scan(&rows)
+
+	result := make(map[string]int64, len(rows))
+	for _, row := range rows {
+		result[strings.ToLower(strings.TrimSpace(row.DestStorage))] = row.Total
+	}
+	return result
+}
+
+func applyGoogleDriveQuotaStatus(status *remoteStatus) {
+	if status == nil {
+		return
+	}
+	if status.QuotaBytes <= 0 {
+		status.QuotaBytes = 750 * 1024 * 1024 * 1024
+	}
+	if status.UploadedBytes24 < 0 {
+		status.UploadedBytes24 = 0
+	}
+	status.RemainingBytes = status.QuotaBytes - status.UploadedBytes24
+	if status.RemainingBytes < 0 {
+		status.RemainingBytes = 0
+	}
+	status.QuotaPercent = float64(status.UploadedBytes24) / float64(status.QuotaBytes) * 100
+	switch {
+	case status.UploadedBytes24 >= status.QuotaBytes:
+		status.Status = "limited"
+		status.StatusText = fmt.Sprintf("已传 %s，达到/超过 750G", formatBytesShort(status.UploadedBytes24))
+		status.Severity = "red"
+	case status.QuotaPercent >= 90:
+		status.Status = "warning"
+		status.StatusText = fmt.Sprintf("已传 %s，接近 750G", formatBytesShort(status.UploadedBytes24))
+		status.Severity = "yellow"
+	case status.UploadedBytes24 > 0:
+		status.Status = "ok"
+		status.StatusText = fmt.Sprintf("已传 %s，剩余约 %s", formatBytesShort(status.UploadedBytes24), formatBytesShort(status.RemainingBytes))
+		status.Severity = "green"
+	default:
+		status.Status = "ok"
+		status.StatusText = "正常，最近 24 小时无上传记录"
+		status.Severity = "green"
+	}
+	if status.Active && status.Severity == "green" {
+		status.StatusText = "当前使用，" + status.StatusText
+	}
+}
+
+func formatBytesShort(bytes int64) string {
+	if bytes <= 0 {
+		return "0G"
+	}
+	value := float64(bytes) / 1024 / 1024 / 1024
+	if value >= 100 {
+		return fmt.Sprintf("%.0fG", value)
+	}
+	return fmt.Sprintf("%.1fG", value)
 }
 
 func readRcloneRemoteDetails() []struct {

@@ -469,17 +469,29 @@ const Dashboard = () => {
 };
 
 const RemoteStatusCard = ({ remote }) => {
-  const isLimited = remote.status === 'limited';
+  const severity = remote.severity || (remote.status === 'limited' ? 'red' : 'green');
+  const isLimited = severity === 'red';
+  const isWarning = severity === 'yellow';
   const isActive = remote.active;
+  const uploaded = Number(remote.uploaded_bytes_24h || 0);
+  const quota = Number(remote.quota_bytes || 750 * 1024 * 1024 * 1024);
+  const percent = Math.max(0, Math.min(100, Number(remote.quota_percent || 0)));
+  const statusText = remote.status_text || '\u6b63\u5e38';
   const badgeClass = isLimited
     ? 'bg-red-100 text-red-700 border-red-200'
-    : isActive
-      ? 'bg-green-100 text-green-700 border-green-200'
-      : 'bg-slate-100 text-slate-600 border-slate-200';
-  const badgeText = isLimited ? '限额' : isActive ? '当前使用' : '正常';
+    : isWarning
+      ? 'bg-yellow-100 text-yellow-700 border-yellow-200'
+      : 'bg-green-100 text-green-700 border-green-200';
+  const badgeText = isLimited ? '\u5df2\u8d85 750G' : isWarning ? '\u63a5\u8fd1 750G' : (isActive ? '\u5f53\u524d\u4f7f\u7528' : '\u6b63\u5e38');
+  const cardClass = isLimited
+    ? 'border-red-200 bg-red-50/80'
+    : isWarning
+      ? 'border-yellow-200 bg-yellow-50/80'
+      : 'border-green-200 bg-green-50/70';
+  const barClass = isLimited ? 'bg-red-500' : isWarning ? 'bg-yellow-500' : 'bg-green-500';
 
   return (
-    <div className={`rounded-xl border p-3 ${isLimited ? 'border-red-200 bg-red-50/60' : isActive ? 'border-green-200 bg-green-50/60' : 'border-gray-200 bg-gray-50/60'}`}>
+    <div className={`rounded-xl border p-3 ${cardClass}`}>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="font-semibold text-gray-900 text-sm truncate">{remote.name}</div>
@@ -489,14 +501,31 @@ const RemoteStatusCard = ({ remote }) => {
           {badgeText}
         </span>
       </div>
-      <div className="mt-2 space-y-1 text-xs text-gray-500">
-        <div>状态码：<span className={isLimited ? 'text-red-600 font-medium' : 'text-gray-700'}>{remote.code || '-'}</span></div>
-        {remote.time && <div>时间：{remote.time}</div>}
-        {remote.task_name && <div className="truncate">任务：{remote.task_name}</div>}
-        {remote.reason && <div className="truncate" title={remote.reason}>原因：{remote.reason}</div>}
+      <div className="mt-3 space-y-2 text-xs text-gray-600">
+        <div className={`font-medium ${isLimited ? 'text-red-700' : isWarning ? 'text-yellow-700' : 'text-green-700'}`}>
+          {statusText}
+        </div>
+        <div className="h-1.5 rounded-full bg-white/80 overflow-hidden">
+          <div className={`h-full rounded-full transition-all duration-300 ${barClass}`} style={{ width: `${percent}%` }} />
+        </div>
+        <div className="flex items-center justify-between text-[11px] text-gray-500">
+          <span>\u6700\u8fd1 24 \u5c0f\u65f6</span>
+          <span>{formatBytes(uploaded)} / {formatBytes(quota)}</span>
+        </div>
+        {remote.time && <div>\u9650\u989d\u65f6\u95f4\uff1a{remote.time}</div>}
+        {remote.task_name && <div className="truncate">\u5173\u8054\u4efb\u52a1\uff1a{remote.task_name}</div>}
+        {remote.reason && <div className="truncate" title={remote.reason}>\u9650\u5236\u539f\u56e0\uff1a{remote.reason}</div>}
       </div>
     </div>
   );
+};
+
+const formatBytes = (bytes) => {
+  const value = Number(bytes || 0);
+  if (value <= 0) return '0G';
+  const gb = value / 1024 / 1024 / 1024;
+  if (gb >= 100) return `${gb.toFixed(0)}G`;
+  return `${gb.toFixed(1)}G`;
 };
 
 const StatCard = ({ icon: Icon, label, value, color }) => {
