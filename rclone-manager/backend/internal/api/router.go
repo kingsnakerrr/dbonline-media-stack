@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -1429,29 +1430,80 @@ func readRcloneRemoteDetails() []struct {
 
 func startRemoteQuotaRecoveryLoop() {
 	time.Sleep(30 * time.Second)
-	recoverExpiredRemoteQuotaStates()
-	ticker := time.NewTicker(5 * time.Minute)
+	probeLimitedRemoteQuotaStates()
+	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		recoverExpiredRemoteQuotaStates()
+		probeLimitedRemoteQuotaStates()
 	}
 }
 
-func recoverExpiredRemoteQuotaStates() {
+func probeLimitedRemoteQuotaStates() {
 	var states []models.RemoteQuotaState
 	db.Where("status = ?", "limited").Find(&states)
-	now := time.Now()
 	for _, state := range states {
-		if state.QuotaErrorAt == nil || now.Before(state.QuotaErrorAt.Add(24*time.Hour)) {
-			continue
-		}
+		probeRemoteQuotaRecovery(&state)
+	}
+}
+
+func probeRemoteQuotaRecovery(state *models.RemoteQuotaState) {
+	if state == nil {
+		return
+	}
+	remote := strings.TrimSpace(state.RemoteName)
+	if remote == "" {
+		return
+	}
+	now := time.Now()
+	tmp, err := os.CreateTemp("", "rclone-quota-probe-*.txt")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	_, _ = tmp.WriteString("quota probe\n")
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	remotePath := fmt.Sprintf("%s:__rclone_quota_probe__/probe-%d.txt", remote, now.Unix())
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "rclone", "copyto", tmpPath, remotePath, "--config", "/root/.config/rclone/rclone.conf", "--drive-stop-on-upload-limit", "--retries", "1", "--low-level-retries", "1").CombinedOutput()
+	msg := strings.TrimSpace(string(output))
+	state.LastProbeAt = &now
+	if err == nil {
+		_ = exec.Command("rclone", "deletefile", remotePath, "--config", "/root/.config/rclone/rclone.conf").Run()
 		state.Status = "ok"
 		state.Reason = ""
-		state.LastProbeAt = nil
-		state.LastProbeStatus = "time_window_elapsed"
+		state.LastProbeStatus = "recovered"
 		state.RecoveredAt = &now
 		_ = db.Save(state).Error
+		return
 	}
+	if isQuotaProbeError(msg) || isQuotaProbeError(err.Error()) {
+		state.Status = "limited"
+		state.LastProbeStatus = "still_limited"
+		// Keep the original quota_error_at so the dashboard recovery estimate stays
+		// anchored to the first real upload-limit hit, not to each background check.
+		if strings.TrimSpace(state.Reason) == "" {
+			if msg != "" {
+				state.Reason = msg
+			} else {
+				state.Reason = err.Error()
+			}
+		}
+	} else {
+		state.LastProbeStatus = "check_failed"
+	}
+	_ = db.Save(state).Error
+}
+
+func isQuotaProbeError(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "user rate limit exceeded") ||
+		strings.Contains(lower, "userratelimitexceeded") ||
+		strings.Contains(lower, "upload limit") ||
+		strings.Contains(lower, "quota") ||
+		strings.Contains(lower, "403")
 }
 
 func detectRemoteStatusCode(reason string) string {
