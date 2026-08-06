@@ -509,15 +509,12 @@ const RemoteStatusCard = ({ remote }) => {
           <div className={`h-full rounded-full transition-all duration-300 ${barClass}`} style={{ width: `${percent}%` }} />
         </div>
         <div className="flex items-center justify-between text-[11px] text-gray-500">
-          <span>\u6700\u8fd1 24 \u5c0f\u65f6</span>
+          <span>{'\u6700\u8fd1 24 \u5c0f\u65f6'}</span>
           <span>{formatBytes(uploaded)} / {formatBytes(quota)}</span>
         </div>
-        {remote.time && <div>\u9650\u989d\u65f6\u95f4\uff1a{remote.time}</div>}
-        {remote.estimated_recover_at && <div>\u9884\u8ba1\u6062\u590d\uff1a{remote.estimated_recover_at}</div>}
-        {remote.last_probe_at && <div>\u6700\u8fd1\u63a2\u6d4b\uff1a{remote.last_probe_at}</div>}
-        {remote.last_probe_status && <div className="truncate">\u63a2\u6d4b\u7ed3\u679c\uff1a{remote.last_probe_status}</div>}
-        {remote.task_name && <div className="truncate">\u5173\u8054\u4efb\u52a1\uff1a{remote.task_name}</div>}
-        {remote.reason && <div className="truncate" title={remote.reason}>\u9650\u5236\u539f\u56e0\uff1a{remote.reason}</div>}
+        {remote.time && <div>{'\u9650\u989d\u65f6\u95f4\uff1a'}{remote.time}</div>}
+        {remote.estimated_recover_at && <div>{'\u9884\u8ba1\u6062\u590d\uff1a'}{remote.estimated_recover_at}</div>}
+        {remote.task_name && <div className="truncate">{'\u5173\u8054\u4efb\u52a1\uff1a'}{remote.task_name}</div>}
       </div>
     </div>
   );

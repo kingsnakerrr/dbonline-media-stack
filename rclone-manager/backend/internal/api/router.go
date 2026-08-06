@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -89,7 +88,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// Init mount manager and auto-mount enabled mount configs
 	mountMgr = mountsvc.NewManager(db, cfg.MountRoot, cfg.DataDir)
 	go mountMgr.RestoreAndStartEnabled()
-	go startRemoteQuotaProbeLoop()
+	go startRemoteQuotaRecoveryLoop()
 
 	// Load existing tasks and start watchers/schedules
 	var tasks []models.Task
@@ -1428,82 +1427,31 @@ func readRcloneRemoteDetails() []struct {
 	return remotes
 }
 
-func startRemoteQuotaProbeLoop() {
+func startRemoteQuotaRecoveryLoop() {
 	time.Sleep(30 * time.Second)
-	probeLimitedRemotes()
+	recoverExpiredRemoteQuotaStates()
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
-		probeLimitedRemotes()
+		recoverExpiredRemoteQuotaStates()
 	}
 }
 
-func probeLimitedRemotes() {
+func recoverExpiredRemoteQuotaStates() {
 	var states []models.RemoteQuotaState
 	db.Where("status = ?", "limited").Find(&states)
-	for _, state := range states {
-		probeRemoteQuota(&state)
-	}
-}
-
-func probeRemoteQuota(state *models.RemoteQuotaState) {
-	if state == nil {
-		return
-	}
-	remote := strings.TrimSpace(state.RemoteName)
-	if remote == "" {
-		return
-	}
 	now := time.Now()
-	tmp, err := os.CreateTemp("", "rclone-quota-probe-*.txt")
-	if err != nil {
-		return
-	}
-	tmpPath := tmp.Name()
-	_, _ = tmp.WriteString("quota probe\n")
-	_ = tmp.Close()
-	defer os.Remove(tmpPath)
-
-	remotePath := fmt.Sprintf("%s:__rclone_quota_probe__/probe-%d.txt", remote, now.Unix())
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	output, err := exec.CommandContext(ctx, "rclone", "copyto", tmpPath, remotePath, "--config", "/root/.config/rclone/rclone.conf", "--drive-stop-on-upload-limit", "--retries", "1", "--low-level-retries", "1").CombinedOutput()
-	msg := strings.TrimSpace(string(output))
-	if err == nil {
-		_ = exec.Command("rclone", "deletefile", remotePath, "--config", "/root/.config/rclone/rclone.conf").Run()
+	for _, state := range states {
+		if state.QuotaErrorAt == nil || now.Before(state.QuotaErrorAt.Add(24*time.Hour)) {
+			continue
+		}
 		state.Status = "ok"
 		state.Reason = ""
-		state.LastProbeAt = &now
-		state.LastProbeStatus = "recovered"
+		state.LastProbeAt = nil
+		state.LastProbeStatus = "time_window_elapsed"
 		state.RecoveredAt = &now
 		_ = db.Save(state).Error
-		return
 	}
-
-	state.LastProbeAt = &now
-	if isQuotaProbeError(msg) || isQuotaProbeError(err.Error()) {
-		state.Status = "limited"
-		if msg != "" {
-			state.Reason = msg
-		} else {
-			state.Reason = err.Error()
-		}
-		state.LastProbeStatus = "still_limited"
-	} else if msg != "" {
-		state.LastProbeStatus = msg
-	} else {
-		state.LastProbeStatus = err.Error()
-	}
-	_ = db.Save(state).Error
-}
-
-func isQuotaProbeError(text string) bool {
-	lower := strings.ToLower(text)
-	return strings.Contains(lower, "user rate limit exceeded") ||
-		strings.Contains(lower, "userratelimitexceeded") ||
-		strings.Contains(lower, "upload limit") ||
-		strings.Contains(lower, "quota") ||
-		strings.Contains(lower, "403")
 }
 
 func detectRemoteStatusCode(reason string) string {
