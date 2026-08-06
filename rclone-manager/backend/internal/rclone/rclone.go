@@ -1079,6 +1079,7 @@ func (e *Executor) finishRotationWithError(task *models.Task, message string) {
 }
 
 func (e *Executor) advanceRotationSmart(task *models.Task, remotes []string, remote string, reason string) bool {
+	e.markRemoteQuotaLimited(remote, reason)
 	limited := parseRotationLimitedRemotes(task.RotationLimitedRemotes)
 	limited[remote] = rotationLimitInfo{
 		Reason: reason,
@@ -1128,6 +1129,39 @@ func (e *Executor) advanceRotationSmart(task *models.Task, remotes []string, rem
 		"last_error":               "",
 	})
 	return true
+}
+
+func (e *Executor) markRemoteQuotaLimited(remote string, reason string) {
+	if e == nil || e.db == nil {
+		return
+	}
+	remote = strings.TrimSpace(remote)
+	if remote == "" {
+		return
+	}
+	now := time.Now()
+	var state models.RemoteQuotaState
+	err := e.db.Where("lower(remote_name) = ?", strings.ToLower(remote)).First(&state).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		state = models.RemoteQuotaState{
+			RemoteName:      remote,
+			Status:          "limited",
+			Reason:          reason,
+			QuotaErrorAt:    &now,
+			LastProbeStatus: "quota_error",
+		}
+		_ = e.db.Create(&state).Error
+		return
+	}
+	if err != nil {
+		return
+	}
+	state.Status = "limited"
+	state.Reason = reason
+	state.QuotaErrorAt = &now
+	state.RecoveredAt = nil
+	state.LastProbeStatus = "quota_error"
+	_ = e.db.Save(&state).Error
 }
 
 func (e *Executor) advanceRotation(task *models.Task, remoteCount int, reason string) bool {

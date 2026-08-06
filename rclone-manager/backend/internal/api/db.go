@@ -55,6 +55,7 @@ func InitDB(dataDir string) error {
 		&models.SystemSetting{},
 		&models.User{},
 		&models.OutputLog{},
+		&models.RemoteQuotaState{},
 		&models.OpenlistConfig{},
 		&models.MountConfig{},
 	)

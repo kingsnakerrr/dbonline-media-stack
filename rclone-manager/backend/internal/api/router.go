@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -88,6 +89,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	// Init mount manager and auto-mount enabled mount configs
 	mountMgr = mountsvc.NewManager(db, cfg.MountRoot, cfg.DataDir)
 	go mountMgr.RestoreAndStartEnabled()
+	go startRemoteQuotaProbeLoop()
 
 	// Load existing tasks and start watchers/schedules
 	var tasks []models.Task
@@ -1112,6 +1114,9 @@ type remoteStatus struct {
 	TaskID          uint    `json:"task_id"`
 	TaskName        string  `json:"task_name"`
 	Active          bool    `json:"active"`
+	QuotaErrorAt    string  `json:"quota_error_at"`
+	LastProbeAt     string  `json:"last_probe_at"`
+	LastProbeStatus string  `json:"last_probe_status"`
 	UploadedBytes24 int64   `json:"uploaded_bytes_24h"`
 	QuotaBytes      int64   `json:"quota_bytes"`
 	RemainingBytes  int64   `json:"remaining_bytes"`
@@ -1248,6 +1253,7 @@ func listRemoteStatuses(c *gin.Context) {
 			status.TaskName = task.Name
 		}
 	}
+	applyPersistentQuotaStates(statuses)
 
 	out := make([]remoteStatus, 0, len(statuses))
 	for _, status := range statuses {
@@ -1280,6 +1286,45 @@ func recentUploadedBytesByRemote(window time.Duration) map[string]int64 {
 	return result
 }
 
+func applyPersistentQuotaStates(statuses map[string]*remoteStatus) {
+	var states []models.RemoteQuotaState
+	db.Find(&states)
+	for _, state := range states {
+		remote := strings.TrimSpace(state.RemoteName)
+		if remote == "" {
+			continue
+		}
+		status, ok := statuses[remote]
+		if !ok {
+			status = &remoteStatus{
+				Name:       remote,
+				Status:     "ok",
+				QuotaBytes: 750 * 1024 * 1024 * 1024,
+			}
+			applyGoogleDriveQuotaStatus(status)
+			statuses[remote] = status
+		}
+		status.LastProbeStatus = state.LastProbeStatus
+		if state.LastProbeAt != nil {
+			status.LastProbeAt = state.LastProbeAt.Format("2006-01-02 15:04:05")
+		}
+		if state.Status == "limited" {
+			status.Status = "limited"
+			status.StatusText = "\u5df2\u5b9e\u9645\u89e6\u53d1 Google 750G \u4e0a\u4f20\u9650\u5236"
+			status.Severity = "red"
+			status.RemainingBytes = 0
+			if status.QuotaPercent < 100 {
+				status.QuotaPercent = 100
+			}
+			status.Reason = state.Reason
+			if state.QuotaErrorAt != nil {
+				status.QuotaErrorAt = state.QuotaErrorAt.Format("2006-01-02 15:04:05")
+				status.Time = status.QuotaErrorAt
+			}
+		}
+	}
+}
+
 func applyGoogleDriveQuotaStatus(status *remoteStatus) {
 	if status == nil {
 		return
@@ -1298,23 +1343,23 @@ func applyGoogleDriveQuotaStatus(status *remoteStatus) {
 	switch {
 	case status.UploadedBytes24 >= status.QuotaBytes:
 		status.Status = "limited"
-		status.StatusText = fmt.Sprintf("已传 %s，达到/超过 750G", formatBytesShort(status.UploadedBytes24))
+		status.StatusText = fmt.Sprintf("\u5df2\u4f20 %s\uff0c\u8fbe\u5230/\u8d85\u8fc7 750G", formatBytesShort(status.UploadedBytes24))
 		status.Severity = "red"
 	case status.QuotaPercent >= 90:
 		status.Status = "warning"
-		status.StatusText = fmt.Sprintf("已传 %s，接近 750G", formatBytesShort(status.UploadedBytes24))
+		status.StatusText = fmt.Sprintf("\u5df2\u4f20 %s\uff0c\u63a5\u8fd1 750G", formatBytesShort(status.UploadedBytes24))
 		status.Severity = "yellow"
 	case status.UploadedBytes24 > 0:
 		status.Status = "ok"
-		status.StatusText = fmt.Sprintf("已传 %s，剩余约 %s", formatBytesShort(status.UploadedBytes24), formatBytesShort(status.RemainingBytes))
+		status.StatusText = fmt.Sprintf("\u5df2\u4f20 %s\uff0c\u5269\u4f59\u7ea6 %s", formatBytesShort(status.UploadedBytes24), formatBytesShort(status.RemainingBytes))
 		status.Severity = "green"
 	default:
 		status.Status = "ok"
-		status.StatusText = "正常，最近 24 小时无上传记录"
+		status.StatusText = "\u6b63\u5e38\uff0c\u6700\u8fd1 24 \u5c0f\u65f6\u65e0\u4e0a\u4f20\u8bb0\u5f55"
 		status.Severity = "green"
 	}
 	if status.Active && status.Severity == "green" {
-		status.StatusText = "当前使用，" + status.StatusText
+		status.StatusText = "\u5f53\u524d\u4f7f\u7528\uff0c" + status.StatusText
 	}
 }
 
@@ -1373,6 +1418,84 @@ func readRcloneRemoteDetails() []struct {
 		}
 	}
 	return remotes
+}
+
+func startRemoteQuotaProbeLoop() {
+	time.Sleep(30 * time.Second)
+	probeLimitedRemotes()
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		probeLimitedRemotes()
+	}
+}
+
+func probeLimitedRemotes() {
+	var states []models.RemoteQuotaState
+	db.Where("status = ?", "limited").Find(&states)
+	for _, state := range states {
+		probeRemoteQuota(&state)
+	}
+}
+
+func probeRemoteQuota(state *models.RemoteQuotaState) {
+	if state == nil {
+		return
+	}
+	remote := strings.TrimSpace(state.RemoteName)
+	if remote == "" {
+		return
+	}
+	now := time.Now()
+	tmp, err := os.CreateTemp("", "rclone-quota-probe-*.txt")
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	_, _ = tmp.WriteString("quota probe\n")
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	remotePath := fmt.Sprintf("%s:__rclone_quota_probe__/probe-%d.txt", remote, now.Unix())
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "rclone", "copyto", tmpPath, remotePath, "--config", "/root/.config/rclone/rclone.conf", "--drive-stop-on-upload-limit", "--retries", "1", "--low-level-retries", "1").CombinedOutput()
+	msg := strings.TrimSpace(string(output))
+	if err == nil {
+		_ = exec.Command("rclone", "deletefile", remotePath, "--config", "/root/.config/rclone/rclone.conf").Run()
+		state.Status = "ok"
+		state.Reason = ""
+		state.LastProbeAt = &now
+		state.LastProbeStatus = "recovered"
+		state.RecoveredAt = &now
+		_ = db.Save(state).Error
+		return
+	}
+
+	state.LastProbeAt = &now
+	if isQuotaProbeError(msg) || isQuotaProbeError(err.Error()) {
+		state.Status = "limited"
+		if msg != "" {
+			state.Reason = msg
+		} else {
+			state.Reason = err.Error()
+		}
+		state.LastProbeStatus = "still_limited"
+	} else if msg != "" {
+		state.LastProbeStatus = msg
+	} else {
+		state.LastProbeStatus = err.Error()
+	}
+	_ = db.Save(state).Error
+}
+
+func isQuotaProbeError(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "user rate limit exceeded") ||
+		strings.Contains(lower, "userratelimitexceeded") ||
+		strings.Contains(lower, "upload limit") ||
+		strings.Contains(lower, "quota") ||
+		strings.Contains(lower, "403")
 }
 
 func detectRemoteStatusCode(reason string) string {

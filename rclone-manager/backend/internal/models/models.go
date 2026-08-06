@@ -181,6 +181,19 @@ type SystemSetting struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type RemoteQuotaState struct {
+	ID              uint       `json:"id" gorm:"primaryKey"`
+	RemoteName      string     `json:"remote_name" gorm:"uniqueIndex;not null"`
+	Status          string     `json:"status" gorm:"default:'ok'"`
+	Reason          string     `json:"reason" gorm:"type:text"`
+	QuotaErrorAt    *time.Time `json:"quota_error_at"`
+	LastProbeAt     *time.Time `json:"last_probe_at"`
+	LastProbeStatus string     `json:"last_probe_status" gorm:"default:''"`
+	RecoveredAt     *time.Time `json:"recovered_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
 type User struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
 	Username  string    `json:"username" gorm:"uniqueIndex;not null"`
