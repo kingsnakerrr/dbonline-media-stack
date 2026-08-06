@@ -1269,21 +1269,53 @@ func listRemoteStatuses(c *gin.Context) {
 }
 
 func recentUploadedBytesByRemote(window time.Duration) map[string]int64 {
+	type quotaStateRow struct {
+		RemoteName  string
+		RecoveredAt *time.Time
+	}
+	cutoff := time.Now().Add(-window)
+
+	var quotaStates []quotaStateRow
+	db.Model(&models.RemoteQuotaState{}).
+		Select("remote_name, recovered_at").
+		Where("recovered_at IS NOT NULL").
+		Scan(&quotaStates)
+
+	resetAfter := make(map[string]time.Time, len(quotaStates))
+	for _, state := range quotaStates {
+		if state.RecoveredAt == nil {
+			continue
+		}
+		remote := strings.ToLower(strings.TrimSpace(state.RemoteName))
+		if remote == "" {
+			continue
+		}
+		if state.RecoveredAt.After(cutoff) {
+			resetAfter[remote] = *state.RecoveredAt
+		}
+	}
+
 	type row struct {
 		DestStorage string
-		Total       int64
+		FileSize    int64
+		Date        time.Time
 	}
 	rows := make([]row, 0)
-	cutoff := time.Now().Add(-window)
 	db.Model(&models.OutputLog{}).
-		Select("lower(dest_storage) as dest_storage, coalesce(sum(file_size), 0) as total").
+		Select("lower(dest_storage) as dest_storage, file_size, date").
 		Where("progress = ? AND status = ? AND date >= ? AND dest_storage <> ''", 100, true, cutoff).
-		Group("lower(dest_storage)").
 		Scan(&rows)
 
 	result := make(map[string]int64, len(rows))
 	for _, row := range rows {
-		result[strings.ToLower(strings.TrimSpace(row.DestStorage))] = row.Total
+		remote := strings.ToLower(strings.TrimSpace(row.DestStorage))
+		if remote == "" {
+			continue
+		}
+		if resetAt, ok := resetAfter[remote]; ok && row.Date.Before(resetAt) {
+			continue
+		}
+		result[remote] += row.FileSize
 	}
 	return result
 }
