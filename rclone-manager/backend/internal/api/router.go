@@ -1115,6 +1115,8 @@ type remoteStatus struct {
 	TaskName        string  `json:"task_name"`
 	Active          bool    `json:"active"`
 	QuotaErrorAt    string  `json:"quota_error_at"`
+	EstimatedRecoverAt string `json:"estimated_recover_at"`
+	RecoverInSeconds int64 `json:"recover_in_seconds"`
 	LastProbeAt     string  `json:"last_probe_at"`
 	LastProbeStatus string  `json:"last_probe_status"`
 	UploadedBytes24 int64   `json:"uploaded_bytes_24h"`
@@ -1320,6 +1322,12 @@ func applyPersistentQuotaStates(statuses map[string]*remoteStatus) {
 			if state.QuotaErrorAt != nil {
 				status.QuotaErrorAt = state.QuotaErrorAt.Format("2006-01-02 15:04:05")
 				status.Time = status.QuotaErrorAt
+				estimated := state.QuotaErrorAt.Add(24 * time.Hour)
+				status.EstimatedRecoverAt = estimated.Format("2006-01-02 15:04:05")
+				remaining := time.Until(estimated)
+				if remaining > 0 {
+					status.RecoverInSeconds = int64(remaining.Seconds())
+				}
 			}
 		}
 	}
