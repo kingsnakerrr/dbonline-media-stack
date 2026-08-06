@@ -509,7 +509,7 @@ const RemoteStatusCard = ({ remote }) => {
           <div className={`h-full rounded-full transition-all duration-300 ${barClass}`} style={{ width: `${percent}%` }} />
         </div>
         <div className="flex items-center justify-between text-[11px] text-gray-500">
-          <span>{'\u6700\u8fd1 24 \u5c0f\u65f6'}</span>
+          <span>{'\u672c\u7cfb\u7edf\u8bb0\u5f55\u6700\u8fd1 24 \u5c0f\u65f6'}</span>
           <span>{formatBytes(uploaded)} / {formatBytes(quota)}</span>
         </div>
         {remote.time && <div>{'\u9650\u989d\u65f6\u95f4\uff1a'}{remote.time}</div>}

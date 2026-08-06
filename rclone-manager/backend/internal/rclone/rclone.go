@@ -1156,9 +1156,12 @@ func (e *Executor) markRemoteQuotaLimited(remote string, reason string) {
 	if err != nil {
 		return
 	}
+	wasAlreadyLimited := strings.EqualFold(strings.TrimSpace(state.Status), "limited") && state.QuotaErrorAt != nil
 	state.Status = "limited"
 	state.Reason = reason
-	state.QuotaErrorAt = &now
+	if !wasAlreadyLimited {
+		state.QuotaErrorAt = &now
+	}
 	state.RecoveredAt = nil
 	state.LastProbeStatus = "quota_error"
 	_ = e.db.Save(&state).Error
@@ -1482,28 +1485,10 @@ func (e *Executor) ExecuteAutoDedupe(task *models.Task, eligibleDirs []string) e
 	if task == nil || task.DestType == "local" {
 		return nil
 	}
-	if strings.TrimSpace(task.SourceType) == "local" {
-		dirs := normalizeDedupeDirs(eligibleDirs)
-		if len(dirs) == 0 {
-			logger.WriteLog(
-				fmt.Sprintf("task_%d.log", task.ID),
-				"Auto dedupe skipped: no stable uploaded folders detected; avoiding full remote dedupe",
-			)
-			return nil
-		}
-		logger.WriteLog(
-			fmt.Sprintf("task_%d.log", task.ID),
-			fmt.Sprintf("Auto dedupe scoped to %d uploaded folder(s)", len(dirs)),
-		)
-		for _, dir := range dirs {
-			scoped := *task
-			scoped.RemoteDir = joinRemoteDir(task.RemoteDir, dir)
-			if err := e.ExecuteDedupe(&scoped); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
+	logger.WriteLog(
+		fmt.Sprintf("task_%d.log", task.ID),
+		"Auto dedupe target directory after transfer",
+	)
 	return e.ExecuteDedupe(task)
 }
 
