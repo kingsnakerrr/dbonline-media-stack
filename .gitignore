@@ -3,3 +3,5 @@ data/
 install-info.txt
 *.log
 *.tmp
+__pycache__/
+*.pyc

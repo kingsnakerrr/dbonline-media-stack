@@ -68,6 +68,9 @@ SENTINEL = env("MOUNT_SENTINEL", ".qb-autoremove-mounted")
 POLL_SECONDS = env_int("POLL_SECONDS", 60, 5)
 QUIET_SECONDS = env_int("QUIET_SECONDS", 3600, 60)
 MIN_COMPLETED_AGE_SECONDS = env_int("MIN_COMPLETED_AGE_SECONDS", 600, 0)
+MAX_INCOMPLETE_AGE_SECONDS = env_int(
+    "MAX_INCOMPLETE_AGE_SECONDS", 10 * 24 * 60 * 60, 0
+)
 FALLBACK_MOVED_PERCENT = env_float("FALLBACK_MOVED_PERCENT", 90, 1, 100)
 DRY_RUN = env_bool("DRY_RUN", True)
 DELETE_REMAINING_FILES = env_bool("DELETE_REMAINING_FILES", True)
@@ -448,6 +451,48 @@ def torrent_is_completed(torrent: dict, now: float) -> bool:
     return str(torrent.get("state", "")).casefold() not in BUSY_STATES
 
 
+def matches_whitelist(torrent: dict) -> bool:
+    """Re-check qB's category/tag response before any destructive request."""
+    if QB_CATEGORY and str(torrent.get("category") or "") != QB_CATEGORY:
+        return False
+    if QB_TAG:
+        tags = {
+            tag.strip()
+            for tag in str(torrent.get("tags") or "").split(",")
+            if tag.strip()
+        }
+        if QB_TAG not in tags:
+            return False
+    return True
+
+
+def stale_incomplete_reason(torrent: dict, now: float) -> str | None:
+    """Return a reason when an incomplete whitelisted torrent is too old."""
+    if MAX_INCOMPLETE_AGE_SECONDS <= 0:
+        return None
+    progress = float(torrent.get("progress", 0) or 0)
+    if progress >= 0.999999:
+        return None
+    added_on = int(torrent.get("added_on", 0) or 0)
+    if added_on <= 0:
+        return None
+    age = now - added_on
+    if age < MAX_INCOMPLETE_AGE_SECONDS:
+        return None
+    return (
+        f"未完成任务已添加 {age / 86400:.1f} 天，"
+        f"进度 {progress * 100:.1f}%（上限 {MAX_INCOMPLETE_AGE_SECONDS / 86400:.1f} 天）"
+    )
+
+
+def validate_delete_scope(torrent: dict) -> None:
+    """Require the torrent save path to stay inside the configured download root."""
+    save_path = str(torrent.get("save_path") or "")
+    if not save_path:
+        raise ValueError("任务没有 save_path")
+    map_qb_path(save_path)
+
+
 def update_observation(entry: dict, selected: list[FileEntry], now: float) -> None:
     missing = sorted(item.name for item in selected if not item.exists)
     previous = entry.get("missing")
@@ -528,6 +573,42 @@ def run_once(client: QBClient, state: dict[str, dict]) -> None:
             continue
         seen.add(torrent_hash)
 
+        # qB already filters the API query, but never trust that filter alone for
+        # deletion. This keeps both cleanup paths strictly inside DBOnline's
+        # configured category/tag whitelist.
+        if not matches_whitelist(torrent):
+            state.pop(torrent_hash, None)
+            log.error("任务 %s 不符合分类/标签白名单，跳过", name)
+            continue
+
+        stale_reason = stale_incomplete_reason(torrent, now)
+        if stale_reason:
+            try:
+                validate_delete_scope(torrent)
+            except ValueError as exc:
+                state.pop(torrent_hash, None)
+                log.error("过期未完成任务 %s 路径异常：%s；跳过", name, exc)
+                continue
+
+            if DRY_RUN:
+                log.warning(
+                    "[DRY-RUN] 符合过期未完成删除条件：%s；%s；deleteFiles=%s",
+                    name,
+                    stale_reason,
+                    DELETE_REMAINING_FILES,
+                )
+                continue
+
+            client.delete_torrent(torrent_hash)
+            state.pop(torrent_hash, None)
+            log.warning(
+                "已删除超过期限的未完成种子%s：%s；%s",
+                "及已下载文件" if DELETE_REMAINING_FILES else "（保留已下载文件）",
+                name,
+                stale_reason,
+            )
+            continue
+
         if not torrent_is_completed(torrent, now):
             state.pop(torrent_hash, None)
             continue
@@ -590,12 +671,14 @@ def validate_config() -> None:
 def main() -> None:
     validate_config()
     log.warning(
-        "启动：category=%r tag=%r dry_run=%s delete_files=%s quiet=%ds fallback=%.1f%%",
+        "启动：category=%r tag=%r dry_run=%s delete_files=%s quiet=%ds "
+        "incomplete_max=%.1f天 fallback=%.1f%%",
         QB_CATEGORY,
         QB_TAG,
         DRY_RUN,
         DELETE_REMAINING_FILES,
         QUIET_SECONDS,
+        MAX_INCOMPLETE_AGE_SECONDS / 86400,
         FALLBACK_MOVED_PERCENT,
     )
     client = QBClient()

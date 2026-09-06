@@ -58,6 +58,7 @@ qB 使用 `userdocs/qbittorrent-nox-static` 的 `5.1.4` 静态二进制，自建
 - DHT/PEX/LSD 开启
 - 队列关闭
 - 连接数优化
+- 可选的 DBOnline 种子清理器：MDC-NG 移走正片后清理残留，并删除添加超过10天仍未完成的 DBOnline 任务及其已下载文件
 
 DBOnline 连接 qB 时请使用容器内地址：
 
