@@ -18,6 +18,7 @@ from app.core.context import Context, MediaInfo
 from app.core.event import Event, eventmanager
 from app.core.metainfo import MetaInfo
 from app.core.module import ModuleManager
+from app.db.downloadhistory_oper import DownloadHistoryOper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, MediaType, MessageChannel, NotificationType, SystemConfigKey
@@ -28,7 +29,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "60分钟推送电影_自用"
     plugin_desc = "每小时从新片、近期口碑、经典热门和随机发现中筛选 20 部电影推送到 Telegram。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.5.0"
+    plugin_version = "0.5.1"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -66,6 +67,7 @@ class SmartMoviePush(_PluginBase):
     _daily_messages_key = "daily_messages"
     _download_queue_key = "download_queue"
     _download_history_key = "download_history"
+    _history_backfill_key = "download_history_backfilled_v1"
     _candidate_cursor_key = "candidate_cursor"
 
     def init_plugin(self, config: dict = None):
@@ -88,6 +90,10 @@ class SmartMoviePush(_PluginBase):
         self._min_votes = max(0, int(config.get("min_votes", 100)))
         self._max_active_downloads = max(1, min(int(config.get("max_active_downloads") or 20), 100))
         self._max_searches = max(20, min(int(config.get("max_searches") or 80), 200))
+
+        # 旧版本只把下载写进 MoviePilot 下载历史，没有保存到插件页面。
+        # 升级时自动补录一次；失败不会写完成标记，下次加载会继续尝试。
+        self._backfill_download_history()
 
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -151,6 +157,8 @@ class SmartMoviePush(_PluginBase):
              "methods": ["GET"], "summary": "清空等候下载"},
             {"path": "/clear_download_history", "endpoint": self._api_clear_download_history,
              "methods": ["GET"], "summary": "清空下载记录"},
+            {"path": "/backfill_download_history", "endpoint": self._api_backfill_download_history,
+             "methods": ["GET"], "summary": "重新补录插件旧下载记录"},
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -428,8 +436,11 @@ class SmartMoviePush(_PluginBase):
                 {"component": "VCard", "props": {"variant": "outlined", "class": "pa-4 mb-4"}, "content": [
                     {"component": "div", "props": {"class": "d-flex align-center justify-space-between mb-3"}, "content": [
                         {"component": "div", "props": {"class": "text-h6"},
-                         "text": f"插件已提交下载（{len(download_history)}）"},
-                        action_button("清空记录", "clear_download_history", "warning"),
+                         "text": f"插件下载记录（{len(download_history)}）"},
+                        {"component": "div", "content": [
+                            action_button("补录旧记录", "backfill_download_history", "primary"),
+                            action_button("清空记录", "clear_download_history", "warning"),
+                        ]},
                     ]},
                     *([{"component": "VAlert", "props": {"type": "info", "variant": "tonal"},
                         "text": "目前还没有下载记录。"}]
@@ -521,6 +532,16 @@ class SmartMoviePush(_PluginBase):
         count = len(self._load_download_history())
         self.save_data(self._download_history_key, [])
         return {"success": True, "message": f"已清空 {count} 条下载记录"}
+
+    def _api_backfill_download_history(self) -> dict:
+        result = self._backfill_download_history(force=True)
+        return {
+            "success": bool(result.get("success")),
+            "message": (
+                f"历史补录完成：新增 {result.get('added', 0)} 条，当前共 {result.get('total', 0)} 条"
+                if result.get("success") else f"历史补录失败：{result.get('error', '未知错误')}"
+            ),
+        }
 
     def get_dashboard(self, key: str, **kwargs):
         return None
@@ -748,6 +769,72 @@ class SmartMoviePush(_PluginBase):
     def _load_download_history(self) -> List[dict]:
         value = self.get_data(self._download_history_key)
         return value if isinstance(value, list) else []
+
+    @staticmethod
+    def _download_history_identity(item: dict) -> str:
+        tmdb_id = item.get("tmdb_id")
+        if tmdb_id not in (None, ""):
+            return f"tmdb:{tmdb_id}"
+        title = " ".join(str(item.get("title") or "").lower().split())
+        return f"title:{title}"
+
+    def _backfill_download_history(self, force: bool = False) -> dict:
+        """从 MoviePilot 下载历史补回本插件旧版本提交的电影。"""
+        if not force and self.get_data(self._history_backfill_key):
+            return {"success": True, "added": 0, "total": len(self._load_download_history())}
+
+        plugin_usernames = {
+            "60分钟推送电影_自用",
+            "Telegram 智能电影推荐",
+            "智能电影推荐队列",
+        }
+        try:
+            records = []
+            oper = DownloadHistoryOper()
+            # 下载历史按新到旧分页；设置安全上限，避免异常数据库无限扫描。
+            for page in range(1, 101):
+                batch = oper.list_by_page(page=page, count=200) or []
+                if not batch:
+                    break
+                records.extend(item for item in batch if getattr(item, "username", None) in plugin_usernames)
+                if len(batch) < 200:
+                    break
+
+            history = self._load_download_history()
+            identities = {self._download_history_identity(item) for item in history}
+            added = 0
+            # 数据库返回新到旧，倒序写入可保持页面上的时间顺序。
+            for record in reversed(records):
+                title = str(getattr(record, "title", "") or "").strip()
+                year = str(getattr(record, "year", "") or "").strip()
+                display_title = title
+                if year and year not in title:
+                    display_title = f"{title} ({year})"
+                item = {
+                    "tmdb_id": getattr(record, "tmdbid", None),
+                    "title": display_title or f"TMDB {getattr(record, 'tmdbid', '')}",
+                    "download_id": str(getattr(record, "download_hash", "") or ""),
+                    "submitted_at": str(getattr(record, "date", "") or ""),
+                    "backfilled": True,
+                }
+                identity = self._download_history_identity(item)
+                if identity in identities:
+                    continue
+                identities.add(identity)
+                history.append(item)
+                added += 1
+
+            history.sort(key=lambda item: str(item.get("submitted_at") or ""))
+            self.save_data(self._download_history_key, history[-1000:])
+            self.save_data(self._history_backfill_key, {
+                "completed_at": datetime.now().isoformat(timespec="seconds"),
+                "matched": len(records),
+            })
+            logger.info(f"智能电影推荐历史补录完成：匹配 {len(records)} 条，新增 {added} 条")
+            return {"success": True, "added": added, "total": len(history[-1000:])}
+        except Exception as err:
+            logger.error(f"智能电影推荐历史补录失败：{err}")
+            return {"success": False, "added": 0, "total": len(self._load_download_history()), "error": str(err)}
 
     def _active_download_count(self) -> int:
         """MoviePilot 仅返回带其内置标签且处于下载中的任务。"""
