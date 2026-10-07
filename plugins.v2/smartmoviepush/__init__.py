@@ -29,7 +29,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "60分钟推送电影_自用"
     plugin_desc = "每小时从新片、近期口碑、经典热门和随机发现中筛选 20 部电影推送到 Telegram。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.5.2"
+    plugin_version = "0.5.3"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1025,6 +1025,54 @@ class SmartMoviePush(_PluginBase):
     def _remove_daily_record(self, key: str) -> None:
         records = [item for item in self._load_daily_messages() if str(item.get("key")) != str(key)]
         self.save_data(self._daily_messages_key, records)
+
+    def _delete_download_messages(self, tmdb_id: Any) -> Tuple[int, int]:
+        """删除指定影片仍保留在 Telegram 中的全部插件推送消息。"""
+        target = str(tmdb_id or "")
+        if not target:
+            return 0, 0
+        retained = []
+        deleted = 0
+        failed = 0
+        for item in self._load_daily_messages():
+            if str(item.get("tmdb_id") or "") != target:
+                retained.append(item)
+                continue
+            if self._delete_telegram_message(
+                source=item.get("source"),
+                message_id=item.get("message_id"),
+                chat_id=item.get("chat_id"),
+            ):
+                deleted += 1
+            else:
+                # 删除失败时保留记录，午夜清理会再次尝试。
+                retained.append(item)
+                failed += 1
+        self.save_data(self._daily_messages_key, retained)
+        return deleted, failed
+
+    @eventmanager.register(EventType.TransferComplete)
+    def transfer_complete(self, event: Event):
+        """影片下载并整理完成后，撤回该影片所有插件 Telegram 推送。"""
+        data = event.event_data or {}
+        media = data.get("mediainfo")
+        tmdb_id = getattr(media, "tmdb_id", None) if media else None
+        download_hash = str(data.get("download_hash") or "")
+        if not tmdb_id and download_hash:
+            history = next(
+                (item for item in reversed(self._load_download_history())
+                 if str(item.get("download_id") or "") == download_hash),
+                None,
+            )
+            tmdb_id = history.get("tmdb_id") if history else None
+        if not tmdb_id:
+            return
+        deleted, failed = self._delete_download_messages(tmdb_id)
+        if deleted or failed:
+            logger.info(
+                f"影片整理完成，清理 Telegram 推送：TMDB {tmdb_id}，"
+                f"已删除 {deleted} 条，待重试 {failed} 条"
+            )
 
     def cleanup_daily_messages(self) -> None:
         """午夜撤回以前的推荐；未点击的电影同时解除推送去重，可在以后随机再次出现。"""
