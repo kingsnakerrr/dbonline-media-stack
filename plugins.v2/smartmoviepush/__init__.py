@@ -29,7 +29,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "60分钟推送电影_自用"
     plugin_desc = "每小时从新片、近期口碑、经典热门和随机发现中筛选 20 部电影推送到 Telegram。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.5.1"
+    plugin_version = "0.5.2"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -67,7 +67,7 @@ class SmartMoviePush(_PluginBase):
     _daily_messages_key = "daily_messages"
     _download_queue_key = "download_queue"
     _download_history_key = "download_history"
-    _history_backfill_key = "download_history_backfilled_v1"
+    _history_backfill_key = "download_history_backfilled_v2"
     _candidate_cursor_key = "candidate_cursor"
 
     def init_plugin(self, config: dict = None):
@@ -783,11 +783,6 @@ class SmartMoviePush(_PluginBase):
         if not force and self.get_data(self._history_backfill_key):
             return {"success": True, "added": 0, "total": len(self._load_download_history())}
 
-        plugin_usernames = {
-            "60分钟推送电影_自用",
-            "Telegram 智能电影推荐",
-            "智能电影推荐队列",
-        }
         try:
             records = []
             oper = DownloadHistoryOper()
@@ -796,11 +791,18 @@ class SmartMoviePush(_PluginBase):
                 batch = oper.list_by_page(page=page, count=200) or []
                 if not batch:
                     break
-                records.extend(item for item in batch if getattr(item, "username", None) in plugin_usernames)
+                for item in batch:
+                    note = getattr(item, "note", None)
+                    # 只认 download_single() 写入数据库的插件专属来源；
+                    # username 可能由界面或调用方传入，不能用于判断归属。
+                    if isinstance(note, dict) and note.get("source") == self.__class__.__name__:
+                        records.append(item)
                 if len(batch) < 200:
                     break
 
-            history = self._load_download_history()
+            # 丢弃上一版按 username 补录的项目，再按专属 source 重新构建。
+            # 插件运行期间直接记录的项目没有 backfilled 标记，会被保留。
+            history = [item for item in self._load_download_history() if not item.get("backfilled")]
             identities = {self._download_history_identity(item) for item in history}
             added = 0
             # 数据库返回新到旧，倒序写入可保持页面上的时间顺序。
