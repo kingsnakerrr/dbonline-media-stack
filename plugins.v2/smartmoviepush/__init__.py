@@ -3,6 +3,7 @@ import html
 import math
 import random
 import shutil
+import subprocess
 import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -32,7 +33,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "60分钟推送电影_自用"
     plugin_desc = "每小时从新片、近期口碑、经典热门和随机发现中筛选 20 部电影推送到 Telegram。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.7.0"
+    plugin_version = "0.7.1"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -80,6 +81,7 @@ class SmartMoviePush(_PluginBase):
     _history_backfill_key = "download_history_backfilled_v2"
     _candidate_cursor_key = "candidate_cursor"
     _disk_guard_state_key = "disk_guard_state"
+    _disk_scan_key = "disk_usage_scan"
     _disk_guard_lock = threading.Lock()
 
     def init_plugin(self, config: dict = None):
@@ -651,6 +653,55 @@ class SmartMoviePush(_PluginBase):
             "waiting_count": len(state.get("waiting") or []),
         }
 
+    def _scan_disk_usage(self) -> dict:
+        """使用 du 统计同一文件系统内的顶层目录，避免把云盘挂载算进本地硬盘。"""
+        started = datetime.now()
+        try:
+            result = subprocess.run(
+                ["du", "-x", "-B1", "-d1", self._disk_guard_path],
+                capture_output=True,
+                text=True,
+                timeout=240,
+                check=False,
+            )
+            if result.returncode not in {0, 1}:
+                raise RuntimeError((result.stderr or result.stdout or "du 执行失败").strip())
+            rows = []
+            for line in result.stdout.splitlines():
+                size_text, separator, path = line.partition("\t")
+                if not separator:
+                    continue
+                try:
+                    size = int(size_text.strip())
+                except ValueError:
+                    continue
+                if path.rstrip("/") == self._disk_guard_path.rstrip("/"):
+                    continue
+                rows.append({"path": path, "bytes": size, "gb": self._bytes_to_gb(size)})
+            rows.sort(key=lambda item: item["bytes"], reverse=True)
+            usage = shutil.disk_usage(self._disk_guard_path)
+            scan = {
+                "success": True,
+                "scanned_at": datetime.now().isoformat(timespec="seconds"),
+                "duration_seconds": round((datetime.now() - started).total_seconds(), 1),
+                "path": self._disk_guard_path,
+                "total_gb": self._bytes_to_gb(usage.total),
+                "used_gb": self._bytes_to_gb(usage.used),
+                "free_gb": self._bytes_to_gb(usage.free),
+                "directories": rows,
+                "warning": (result.stderr or "").strip()[:1000],
+            }
+        except Exception as err:
+            scan = {
+                "success": False,
+                "scanned_at": datetime.now().isoformat(timespec="seconds"),
+                "path": self._disk_guard_path,
+                "error": str(err),
+                "directories": [],
+            }
+        self.save_data(self._disk_scan_key, scan)
+        return scan
+
     def _disk_guard_blocks_new(self) -> bool:
         if not self._disk_guard_enabled:
             return False
@@ -932,6 +983,7 @@ class SmartMoviePush(_PluginBase):
                 "sources": self._telegram_sources(),
             },
             "disk_guard": self._disk_guard_status(),
+            "disk_scan": self.get_data(self._disk_scan_key) or {},
         }
 
     def _api_ui_status(self) -> dict:
@@ -985,6 +1037,15 @@ class SmartMoviePush(_PluginBase):
             result = self._ack_disk_guard(str(payload.get("incident_id") or ""))
         elif action == "disk_guard_resume":
             result = self._resume_disk_guard_waiting()
+        elif action == "disk_usage_scan":
+            scan = self._scan_disk_usage()
+            result = {
+                "success": bool(scan.get("success")),
+                "message": (
+                    f"扫描完成：已用 {scan.get('used_gb')}G，剩余 {scan.get('free_gb')}G"
+                    if scan.get("success") else f"扫描失败：{scan.get('error')}"
+                ),
+            }
         else:
             result = {"success": False, "message": "未知操作"}
         result["data"] = self._ui_status_data()
