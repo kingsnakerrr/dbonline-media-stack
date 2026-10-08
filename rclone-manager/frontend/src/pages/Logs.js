@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { FileText, Trash2, RotateCcw, Search, List, ChevronLeft, ChevronRight, LayoutList, HardDrive, CheckCircle2, RefreshCw } from 'lucide-react';
-import { getTaskLogs, getOutputLogs, deleteOutputLog, cleanOutputLogs } from '../services/api';
+import { FileText, Trash2, RotateCcw, Search, List, ChevronLeft, ChevronRight, LayoutList, HardDrive, CheckCircle2, RefreshCw, Clock, Gauge, Upload } from 'lucide-react';
+import { getTaskRuns, getOutputLogs, deleteOutputLog, cleanOutputLogs } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 
 const Logs = () => {
   const [activeTab, setActiveTab] = useState('records');
-  const [logs, setLogs] = useState([]);
+  const [taskRuns, setTaskRuns] = useState([]);
+  const [taskRunsTotal, setTaskRunsTotal] = useState(0);
+  const [taskRunsPage, setTaskRunsPage] = useState(1);
   const [tasks, setTasks] = useState([]);
   const [selectedTask, setSelectedTask] = useState('');
   const [search, setSearch] = useState('');
@@ -30,19 +32,20 @@ const Logs = () => {
     }
   }, []);
 
-  const loadTaskLog = useCallback(async (taskId) => {
-    if (!taskId) return;
+  const loadTaskRuns = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await getTaskLogs(taskId, 500);
-      const content = res.data.logs[0] || '';
-      setLogs(content.split('\n').filter(l => l.trim()));
+      const res = await getTaskRuns(taskRunsPage, 20, selectedTask);
+      setTaskRuns(res.data?.list || []);
+      setTaskRunsTotal(res.data?.total || 0);
     } catch (err) {
       toast.error('加载任务日志失败');
+      setTaskRuns([]);
+      setTaskRunsTotal(0);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [taskRunsPage, selectedTask]);
 
   const loadOutputLogs = useCallback(async () => {
     setLoading(true);
@@ -71,13 +74,11 @@ const Logs = () => {
 
   useEffect(() => {
     if (activeTab === 'task') {
-      if (selectedTask) {
-        loadTaskLog(selectedTask);
-      }
+      loadTaskRuns();
     } else if (activeTab === 'records') {
       loadOutputLogs();
     }
-  }, [activeTab, selectedTask, loadTaskLog, loadOutputLogs]);
+  }, [activeTab, selectedTask, loadTaskRuns, loadOutputLogs]);
 
   // WebSocket for real-time file progress
   useEffect(() => {
@@ -92,9 +93,11 @@ const Logs = () => {
           if (!fileName) return;
           setTransferProgress(prev => ({
             ...prev,
-            [`${data.task_id}_${fileName}`]: { ...data, file_name: fileName }
+            [`${data.task_id}_${fileName}`]: { ...data, file_name: fileName, last_update: Date.now() }
           }));
-        } else if (data.type === 'task_complete' || data.type === 'task_error') {
+        } else if (data.type === 'task_started') {
+          if (activeTab === 'task') loadTaskRuns();
+        } else if (data.type === 'task_complete' || data.type === 'task_error' || data.type === 'task_stopped') {
           // Clear progress for completed tasks
           setTransferProgress(prev => {
             const next = { ...prev };
@@ -105,6 +108,8 @@ const Logs = () => {
           });
           if (activeTab === 'records') {
             loadOutputLogs();
+          } else if (activeTab === 'task') {
+            loadTaskRuns();
           }
         }
       } catch (e) {
@@ -115,7 +120,18 @@ const Logs = () => {
     return () => {
       ws.close();
     };
-  }, [activeTab, loadOutputLogs]);
+  }, [activeTab, loadOutputLogs, loadTaskRuns]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const cutoff = Date.now() - 30000;
+      setTransferProgress(prev => {
+        const next = Object.fromEntries(Object.entries(prev).filter(([, item]) => (item.last_update || 0) >= cutoff));
+        return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+      });
+    }, 5000);
+    return () => clearInterval(timer);
+  }, []);
 
   const handleDeleteOutputLog = async (id) => {
     if (!window.confirm('确定删除这条记录吗？')) return;
@@ -142,9 +158,7 @@ const Logs = () => {
 
   const handleRefresh = () => {
     if (activeTab === 'task') {
-      if (selectedTask) {
-        loadTaskLog(selectedTask);
-      }
+      loadTaskRuns();
     } else if (activeTab === 'records') {
       loadOutputLogs();
       loadTaskList();
@@ -152,9 +166,10 @@ const Logs = () => {
     toast.success('已刷新');
   };
 
-  const filteredLogs = logs.filter(line =>
-    line.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredRuns = taskRuns.filter(run => {
+    const haystack = `${run.task_name || ''} ${run.status || ''} ${run.error || ''}`.toLowerCase();
+    return haystack.includes(search.toLowerCase());
+  });
 
   const formatFileSize = (bytes) => {
     if (!bytes || bytes <= 0) return '-';
@@ -162,6 +177,11 @@ const Logs = () => {
     if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB';
     if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(2) + ' MB';
     return (bytes / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  };
+
+  const formatTransferSpeed = (bytes) => {
+    if (!bytes || bytes <= 0) return '0 B/s';
+    return `${formatFileSize(bytes)}/s`;
   };
 
   const formatDate = (dateStr) => {
@@ -176,6 +196,25 @@ const Logs = () => {
     const ss = String(d.getSeconds()).padStart(2, '0');
     return `${yyyy}-${mm}-${dd}\n${hh}:${mi}:${ss}`;
   };
+
+  const formatDuration = (seconds) => {
+    const total = Math.max(0, Number(seconds) || 0);
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    if (hours > 0) return `${hours}小时 ${minutes}分 ${secs}秒`;
+    if (minutes > 0) return `${minutes}分 ${secs}秒`;
+    return `${secs}秒`;
+  };
+
+  const taskRunStatus = (status) => ({
+    running: { text: '运行中', className: 'bg-blue-100 text-blue-700' },
+    completed: { text: '已完成', className: 'bg-green-100 text-green-700' },
+    failed: { text: '失败', className: 'bg-red-100 text-red-700' },
+    stopped: { text: '已停止', className: 'bg-gray-100 text-gray-600' },
+    paused: { text: '额度暂停', className: 'bg-amber-100 text-amber-700' },
+    interrupted: { text: '服务中断', className: 'bg-orange-100 text-orange-700' },
+  }[status] || { text: status || '未知', className: 'bg-gray-100 text-gray-600' });
 
   const taskCount = tasks.length;
 
@@ -326,11 +365,11 @@ const Logs = () => {
                     value={selectedTask}
                     onChange={(e) => {
                       setSelectedTask(e.target.value);
-                      loadTaskLog(e.target.value);
+                      setTaskRunsPage(1);
                     }}
                     className="px-3 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
                   >
-                    <option value="">选择任务</option>
+                    <option value="">全部任务</option>
                     {tasks.map(task => (
                       <option key={task.id} value={task.id}>{task.name}</option>
                     ))}
@@ -357,7 +396,7 @@ const Logs = () => {
                     <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
                     正在传输 ({activeTransfers.length})
                   </h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
                     {activeTransfers.map((t, idx) => (
                       <div key={`${t.task_id}_${t.file_name}_${idx}`} className="bg-blue-50 rounded-lg p-3 border border-blue-100">
                         <div className="flex items-center gap-2 mb-2">
@@ -597,51 +636,106 @@ const Logs = () => {
               )}
             </div>
           ) : (
-            /* Raw log viewer (task tab) */
+            /* Per-run task summaries */
             <>
-              {/* Search */}
               <div className="relative mb-4">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                 <input
                   type="text"
-                  placeholder="搜索日志内容..."
+                  placeholder="搜索任务名称、状态或错误..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   className="w-full pl-10 pr-4 py-2 bg-white border border-gray-300 text-gray-800 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder-gray-400"
                 />
               </div>
 
-              {/* Log content */}
-              <div className="bg-gray-50 rounded-lg h-[400px] md:h-[600px] overflow-auto font-mono text-sm border border-gray-200">
-                {loading ? (
-                  <div className="flex items-center justify-center h-full text-gray-400">
-                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+              {loading ? (
+                <div className="flex items-center justify-center h-64 text-gray-400">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+                </div>
+              ) : filteredRuns.length === 0 ? (
+                <div className="flex items-center justify-center h-64 text-gray-400">
+                  <div className="text-center">
+                    <FileText className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                    <p>暂无运行汇总</p>
+                    <p className="text-xs mt-1">更新后首次执行任务时会自动生成记录</p>
                   </div>
-                ) : filteredLogs.length === 0 ? (
-                  <div className="flex items-center justify-center h-full text-gray-400">
-                    <div className="text-center">
-                      <FileText className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                      <p>暂无日志</p>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="divide-y divide-gray-200">
-                    {filteredLogs.map((line, idx) => (
-                      <div
-                        key={idx}
-                        className={`px-3 md:px-4 py-2 text-xs md:text-sm ${
-                          line.includes('ERROR') ? 'text-red-600 bg-red-50' :
-                          line.includes('WARN') ? 'text-amber-600 bg-amber-50' :
-                          line.includes('Transferred') || line.includes('success') ? 'text-green-600 bg-green-50' :
-                          'text-gray-700'
-                        }`}
-                      >
-                        {line}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                  {filteredRuns.map((run) => {
+                    const runStatus = taskRunStatus(run.status);
+                    return (
+                      <div key={run.id} className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="font-semibold text-gray-900 truncate" title={run.task_name}>{run.task_name || `任务#${run.task_id}`}</div>
+                            <div className="text-xs text-gray-400 mt-1">运行记录 #{run.id}</div>
+                          </div>
+                          <span className={`px-2.5 py-1 rounded-full text-xs font-medium whitespace-nowrap ${runStatus.className}`}>
+                            {runStatus.text}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mt-4">
+                          <div className="rounded-lg bg-gray-50 p-3">
+                            <div className="flex items-center gap-1.5 text-xs text-gray-400"><Clock className="w-3.5 h-3.5" />开始</div>
+                            <div className="text-xs font-medium text-gray-700 mt-1 whitespace-pre-line">{formatDate(run.started_at)}</div>
+                          </div>
+                          <div className="rounded-lg bg-gray-50 p-3">
+                            <div className="flex items-center gap-1.5 text-xs text-gray-400"><Clock className="w-3.5 h-3.5" />结束 / 耗时</div>
+                            <div className="text-xs font-medium text-gray-700 mt-1">{run.ended_at ? formatDate(run.ended_at).replace('\n', ' ') : '仍在运行'}</div>
+                            <div className="text-xs text-gray-500 mt-0.5">{run.ended_at ? formatDuration(run.duration_seconds) : '-'}</div>
+                          </div>
+                          <div className="rounded-lg bg-green-50 p-3">
+                            <div className="flex items-center gap-1.5 text-xs text-green-600"><CheckCircle2 className="w-3.5 h-3.5" />成功 / 失败</div>
+                            <div className="text-sm font-semibold text-gray-800 mt-1">{run.success_count || 0} / <span className="text-red-600">{run.failed_count || 0}</span></div>
+                          </div>
+                          <div className="rounded-lg bg-blue-50 p-3">
+                            <div className="flex items-center gap-1.5 text-xs text-blue-600"><Upload className="w-3.5 h-3.5" />传输量</div>
+                            <div className="text-sm font-semibold text-gray-800 mt-1">{formatFileSize(run.total_bytes)}</div>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3 mt-3 text-sm">
+                          <div className="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2">
+                            <span className="flex items-center gap-1.5 text-gray-500"><Gauge className="w-4 h-4" />平均速度</span>
+                            <span className="font-medium text-gray-800">{formatTransferSpeed(run.average_speed)}</span>
+                          </div>
+                          <div className="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2">
+                            <span className="flex items-center gap-1.5 text-gray-500"><Gauge className="w-4 h-4" />峰值速度</span>
+                            <span className="font-medium text-gray-800">{formatTransferSpeed(run.peak_speed)}</span>
+                          </div>
+                        </div>
+                        {run.error && <div className="mt-3 text-xs text-red-600 bg-red-50 rounded-lg p-2 break-all">{run.error}</div>}
                       </div>
-                    ))}
+                    );
+                  })}
+                </div>
+              )}
+
+              {!loading && taskRunsTotal > 0 && (
+                <div className="flex items-center justify-between gap-3 px-2 py-3 border-t border-gray-100 mt-3">
+                  <div className="text-sm text-gray-500">共 {taskRunsTotal} 次运行</div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setTaskRunsPage(p => Math.max(1, p - 1))}
+                      disabled={taskRunsPage <= 1}
+                      className="p-2 bg-white border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <span className="text-sm text-gray-600">第 {taskRunsPage} 页</span>
+                    <button
+                      onClick={() => setTaskRunsPage(p => p + 1)}
+                      disabled={taskRunsPage * 20 >= taskRunsTotal}
+                      className="p-2 bg-white border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-30 disabled:cursor-not-allowed"
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
                   </div>
-                )}
-              </div>
+                </div>
+              )}
             </>
           )}
         </div>

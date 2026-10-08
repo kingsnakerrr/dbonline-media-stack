@@ -546,7 +546,7 @@ const TaskDetail = () => {
             )}
           </div>
         </div>
-        <div className="p-4 md:p-6 space-y-4">
+        <div className="p-4 md:p-6">
           {Object.keys(fileProgresses).length === 0 ? (
             <div className="text-center text-gray-400 py-4">
               <Upload className="w-8 h-8 mx-auto mb-2 opacity-40" />
@@ -554,35 +554,32 @@ const TaskDetail = () => {
               <p className="text-xs mt-1">启动任务后将显示实时进度</p>
             </div>
           ) : (
-            Object.entries(fileProgresses).map(([fileName, data]) => (
-              <div key={fileName} className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <File className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                    <span className="text-sm font-medium text-gray-700 truncate" title={fileName}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-3">
+              {Object.entries(fileProgresses).map(([fileName, data]) => (
+                <div key={fileName} className="bg-blue-50 rounded-lg p-3 border border-blue-100 min-w-0">
+                  <div className="flex items-center gap-2 mb-2 min-w-0">
+                    <File className="w-4 h-4 text-blue-500 flex-shrink-0" />
+                    <span className="text-sm font-medium text-gray-800 truncate" title={fileName}>
                       {fileName}
                     </span>
                   </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="flex-1 h-2.5 bg-gray-100 rounded-full overflow-hidden">
+                  <div className="flex items-center justify-between gap-2 text-xs mb-1">
+                    <span className="font-semibold text-blue-600">
+                      {Math.min(data.progress, 100).toFixed(1)}%
+                    </span>
+                    <span className="font-medium text-gray-500 tabular-nums">
+                      {data.speedStr || formatSpeed(data.speed || 0)}
+                    </span>
+                  </div>
+                  <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
                     <div
                       className="h-full bg-gradient-to-r from-blue-500 to-blue-400 rounded-full transition-all duration-500 ease-out"
                       style={{ width: `${Math.min(data.progress, 100)}%` }}
                     />
                   </div>
-                  <div className="flex items-center justify-end gap-2 text-xs flex-shrink-0 min-w-[9.5rem]">
-                    <span className="font-semibold text-blue-600">
-                      {Math.min(data.progress, 100).toFixed(1)}%
-                    </span>
-                    <span className="text-gray-300">·</span>
-                    <span className="font-medium text-emerald-600 tabular-nums">
-                      {data.speedStr || formatSpeed(data.speed || 0)}
-                    </span>
-                  </div>
                 </div>
-              </div>
-            ))
+              ))}
+            </div>
           )}
         </div>
       </div>

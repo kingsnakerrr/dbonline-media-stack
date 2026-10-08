@@ -52,6 +52,7 @@ func InitDB(dataDir string) error {
 	err = db.AutoMigrate(
 		&models.Task{},
 		&models.TaskLog{},
+		&models.TaskRun{},
 		&models.SystemSetting{},
 		&models.User{},
 		&models.OutputLog{},

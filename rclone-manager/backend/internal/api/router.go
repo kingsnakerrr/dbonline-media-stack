@@ -183,6 +183,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.GET("/output-logs", requireTokenQuery, getOutputLogs)
 		api.DELETE("/output-logs/:id", requireTokenQuery, deleteOutputLog)
 		api.DELETE("/output-logs/clean", requireTokenQuery, cleanOutputLogs)
+		api.GET("/task-runs", getTaskRuns)
 	}
 
 	// WebSocket
@@ -1805,6 +1806,31 @@ func getOutputLogs(c *gin.Context) {
 			List:  logs,
 			Total: total,
 		},
+	})
+}
+
+// getTaskRuns returns one summary row per complete task execution.
+func getTaskRuns(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 20
+	}
+
+	query := db.Model(&models.TaskRun{})
+	if taskID, err := strconv.Atoi(c.Query("task_id")); err == nil && taskID > 0 {
+		query = query.Where("task_id = ?", taskID)
+	}
+	var total int64
+	query.Count(&total)
+	var runs []models.TaskRun
+	query.Order("started_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&runs)
+	c.JSON(http.StatusOK, gin.H{
+		"list":  runs,
+		"total": total,
 	})
 }
 

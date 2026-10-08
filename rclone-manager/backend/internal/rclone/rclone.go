@@ -46,6 +46,7 @@ var statsLineRegex = regexp.MustCompile(`Transferred:\s+[^,]+,\s*([\d\.]+)%(?:,\
 // transferringLineRegex matches rclone per-file progress like:
 //   - filename.mkv: 22% /5.678Gi, 10.234Mi/s, 4m32s
 var transferringLineRegex = regexp.MustCompile(`\*\s+(.+?):\s*([\d\.]+)%\s*/\s*[^,]+(?:,\s*([\d\.]+)\s*([KMGTPE]?i?B|[KMGTPE]?B)/s)?`)
+var failedFileLineRegex = regexp.MustCompile(`(?i)ERROR\s*:\s*(.+?)\s*:\s*Failed\s+to\s+(?:copy|move|transfer|upload)\b`)
 
 var rotationHTTPStatusRegex = regexp.MustCompile(`\b(403|429)\b`)
 
@@ -69,6 +70,21 @@ type Executor struct {
 	logQueue          chan *models.OutputLog // async log persistence queue
 	recentRefresh     map[string]time.Time   // dir -> last refresh time (dedup)
 	refreshMu         sync.Mutex
+	runMu             sync.Mutex
+	activeRuns        map[uint]*activeRunMetrics
+}
+
+type activeRunFile struct {
+	size    int64
+	success bool
+	failed  bool
+}
+
+type activeRunMetrics struct {
+	id        uint
+	startedAt time.Time
+	peakSpeed float64
+	files     map[string]*activeRunFile
 }
 
 type runObserver struct {
@@ -129,11 +145,131 @@ func NewExecutor(hub *websocket.Hub, database *gorm.DB) *Executor {
 		db:            database,
 		logQueue:      make(chan *models.OutputLog, 1000),
 		recentRefresh: make(map[string]time.Time),
+		activeRuns:    make(map[uint]*activeRunMetrics),
 	}
 	if database != nil {
+		now := time.Now()
+		database.Model(&models.TaskRun{}).Where("ended_at IS NULL").Updates(map[string]interface{}{
+			"ended_at":         now,
+			"status":           "interrupted",
+			"error":            "服务重启，运行记录自动结束",
+			"duration_seconds": gorm.Expr("CAST((julianday(?) - julianday(started_at)) * 86400 AS INTEGER)", now),
+		})
 		go e.logWorker()
 	}
 	return e
+}
+
+func (e *Executor) beginRun(task *models.Task) {
+	if e.db == nil || task == nil {
+		return
+	}
+	startedAt := time.Now()
+	run := models.TaskRun{
+		TaskID:    task.ID,
+		TaskName:  task.Name,
+		StartedAt: startedAt,
+		Status:    "running",
+	}
+	if err := e.db.Create(&run).Error; err != nil {
+		return
+	}
+	e.runMu.Lock()
+	e.activeRuns[task.ID] = &activeRunMetrics{
+		id:        run.ID,
+		startedAt: startedAt,
+		files:     make(map[string]*activeRunFile),
+	}
+	e.runMu.Unlock()
+}
+
+func (e *Executor) observeRunSpeed(taskID uint, speed float64) {
+	if speed <= 0 {
+		return
+	}
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
+	if run := e.activeRuns[taskID]; run != nil && speed > run.peakSpeed {
+		run.peakSpeed = speed
+	}
+}
+
+func (e *Executor) observeRunFile(taskID uint, fileName string, size int64, success bool, failed bool) {
+	fileName = strings.TrimSpace(fileName)
+	if fileName == "" {
+		return
+	}
+	e.runMu.Lock()
+	defer e.runMu.Unlock()
+	run := e.activeRuns[taskID]
+	if run == nil {
+		return
+	}
+	file := run.files[fileName]
+	if file == nil {
+		file = &activeRunFile{}
+		run.files[fileName] = file
+	}
+	if size > file.size {
+		file.size = size
+	}
+	if success {
+		file.success = true
+		file.failed = false
+	} else if failed && !file.success {
+		file.failed = true
+	}
+}
+
+func (e *Executor) finishRun(taskID uint, status string, runErr error) {
+	if e.db == nil {
+		return
+	}
+	e.runMu.Lock()
+	run := e.activeRuns[taskID]
+	if run != nil {
+		delete(e.activeRuns, taskID)
+	}
+	e.runMu.Unlock()
+	if run == nil {
+		return
+	}
+
+	endedAt := time.Now()
+	duration := endedAt.Sub(run.startedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	var totalBytes int64
+	var successCount, failedCount int
+	for _, file := range run.files {
+		if file.success {
+			successCount++
+			totalBytes += file.size
+		} else if file.failed {
+			failedCount++
+		}
+	}
+	seconds := int64(duration.Seconds())
+	averageSpeed := float64(0)
+	if duration.Seconds() > 0 {
+		averageSpeed = float64(totalBytes) / duration.Seconds()
+	}
+	errorMessage := ""
+	if runErr != nil {
+		errorMessage = runErr.Error()
+	}
+	e.db.Model(&models.TaskRun{}).Where("id = ?", run.id).Updates(map[string]interface{}{
+		"ended_at":         endedAt,
+		"duration_seconds": seconds,
+		"total_bytes":      totalBytes,
+		"success_count":    successCount,
+		"failed_count":     failedCount,
+		"average_speed":    averageSpeed,
+		"peak_speed":       run.peakSpeed,
+		"status":           status,
+		"error":            errorMessage,
+	})
 }
 
 // shouldRefresh returns true if the given directory has not been refreshed
@@ -615,6 +751,7 @@ func (e *Executor) reconcileLocalSnapshot(task *models.Task, snapshot map[string
 			Date:        time.Now(),
 		}
 		e.persistLogByFileName(log)
+		e.observeRunFile(task.ID, rel, snap.Size, true, false)
 		reconciled++
 	}
 	if reconciled > 0 {
@@ -744,6 +881,7 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 	}
 
 	// Push real-time notification to all connected dashboards.
+	e.beginRun(task)
 	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_started","task_id":%d}`, task.ID))
 
 	// Wait for completion
@@ -763,10 +901,8 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 		close(stopProgress)
 
 		if err != nil {
-			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, err.Error()))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("Task failed: %v", err))
 		} else {
-			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
 			logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "Task completed successfully")
 		}
 
@@ -797,6 +933,13 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 		e.scanLogFileForTransfersFrom(task, logOffset)
 		if err == nil {
 			e.reconcileLocalSnapshot(task, snapshot, mode)
+		}
+		if err != nil {
+			e.finishRun(task.ID, "failed", err)
+			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, escapeJSON(err.Error())))
+		} else {
+			e.finishRun(task.ID, "completed", nil)
+			e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
 		}
 
 		// Refresh OpenList directories after successful transfer
@@ -869,6 +1012,7 @@ func (e *Executor) ExecuteRotationWithCallback(task *models.Task, callback Compl
 		"rotation_paused_until":    nil,
 		"rotation_limited_remotes": "{}",
 	})
+	e.beginRun(task)
 	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_started","task_id":%d}`, task.ID))
 
 	go e.runRotation(task.ID, generation, callback)
@@ -1065,6 +1209,7 @@ func (e *Executor) finishRotationSuccess(task *models.Task) {
 		"rotation_paused_until":    nil,
 		"rotation_limited_remotes": "{}",
 	})
+	e.finishRun(task.ID, "completed", nil)
 	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_complete","task_id":%d}`, task.ID))
 	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), "轮转传输完成")
 }
@@ -1074,6 +1219,7 @@ func (e *Executor) finishRotationWithError(task *models.Task, message string) {
 		"status":     "error",
 		"last_error": message,
 	})
+	e.finishRun(task.ID, "failed", errors.New(message))
 	e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, escapeJSON(message)))
 	logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("轮转传输失败: %s", message))
 }
@@ -1100,6 +1246,7 @@ func (e *Executor) advanceRotationSmart(task *models.Task, remotes []string, rem
 		})
 		e.hub.Broadcast(fmt.Sprintf(`{"type":"task_error","task_id":%d,"error":"%s"}`, task.ID, escapeJSON(message)))
 		logger.WriteLog(fmt.Sprintf("task_%d.log", task.ID), fmt.Sprintf("%s；最后错误：%s", message, reason))
+		e.finishRun(task.ID, "paused", errors.New(message))
 		e.ScheduleRotationResume(task.ID, pausedUntil)
 		return false
 	}
@@ -1534,6 +1681,7 @@ func (e *Executor) StopTask(taskID uint) error {
 	delete(e.runningTasks, taskID)
 	e.mu.Unlock()
 	e.CancelRotationResume(taskID)
+	e.finishRun(taskID, "stopped", nil)
 	if e.db != nil {
 		e.db.Model(&models.Task{}).Where("id = ?", taskID).Updates(map[string]interface{}{
 			"status":     "idle",
@@ -1597,6 +1745,7 @@ func (e *Executor) parseStatsProgress(task *models.Task, line string) {
 		if len(matches) >= 4 {
 			speed = parseRcloneSpeed(matches[2], matches[3])
 		}
+		e.observeRunSpeed(task.ID, speed)
 		msg := fmt.Sprintf(`{"type":"task_progress","task_id":%d,"progress":%.1f,"speed":%.0f}`,
 			task.ID, percentage, speed)
 		e.hub.Broadcast(msg)
@@ -1611,6 +1760,7 @@ func (e *Executor) parseStatsProgress(task *models.Task, line string) {
 		if len(matches) >= 5 {
 			speed = parseRcloneSpeed(matches[3], matches[4])
 		}
+		e.observeRunSpeed(task.ID, speed)
 		msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":0,"size":0,"speed":%.0f}`,
 			task.ID, strings.ReplaceAll(fileName, `"`, `\"`), percentage, speed)
 		e.hub.Broadcast(msg)
@@ -1626,6 +1776,9 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return
+	}
+	if failed := failedFileLineRegex.FindStringSubmatch(line); len(failed) >= 2 {
+		e.observeRunFile(task.ID, strings.TrimSpace(failed[1]), 0, false, true)
 	}
 
 	// Try to match file transfer lines like:
@@ -1698,6 +1851,7 @@ func (e *Executor) parseAndSaveLog(task *models.Task, line string) {
 			Errmsg:      errmsg,
 			Date:        time.Now(),
 		}
+		e.observeRunFile(task.ID, fileName, fileSize, status, !status)
 
 		// Non-blocking send to queue. If the queue is full we drop the log
 		// rather than stall the rclone pipe reader. In practice with a 1000
@@ -1780,6 +1934,8 @@ func (e *Executor) pollProgress(task *models.Task, stop <-chan struct{}) {
 				if name == "" {
 					continue
 				}
+				e.observeRunSpeed(task.ID, speed)
+				e.observeRunFile(task.ID, name, int64(size), false, false)
 				msg := fmt.Sprintf(`{"type":"file_progress","task_id":%d,"file_name":"%s","progress":%.1f,"bytes":%.0f,"size":%.0f,"speed":%.0f}`,
 					task.ID, strings.ReplaceAll(name, `"`, `\"`), percentage, bytesDone, size, speed)
 				e.hub.Broadcast(msg)

@@ -90,6 +90,7 @@ type Task struct {
 
 	// Cascading: when a Task is deleted, all its OutputLogs are deleted
 	OutputLogs []OutputLog `json:"-" gorm:"constraint:OnDelete:CASCADE;"`
+	TaskRuns   []TaskRun   `json:"-" gorm:"constraint:OnDelete:CASCADE;"`
 }
 
 func ParseRotationRemotes(raw string) []string {
@@ -172,6 +173,26 @@ type TaskLog struct {
 	Level     string    `json:"level"`
 	Message   string    `json:"message"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// TaskRun stores one complete execution summary, from the moment rclone starts
+// until it completes, fails, or is stopped by the user.
+type TaskRun struct {
+	ID              uint       `json:"id" gorm:"primaryKey"`
+	TaskID          uint       `json:"task_id" gorm:"index;not null"`
+	TaskName        string     `json:"task_name"`
+	StartedAt       time.Time  `json:"started_at" gorm:"index"`
+	EndedAt         *time.Time `json:"ended_at"`
+	DurationSeconds int64      `json:"duration_seconds"`
+	TotalBytes      int64      `json:"total_bytes"`
+	SuccessCount    int        `json:"success_count"`
+	FailedCount     int        `json:"failed_count"`
+	AverageSpeed    float64    `json:"average_speed"`
+	PeakSpeed       float64    `json:"peak_speed"`
+	Status          string     `json:"status" gorm:"default:running"`
+	Error           string     `json:"error" gorm:"type:text"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type SystemSetting struct {

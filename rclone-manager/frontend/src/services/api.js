@@ -38,6 +38,10 @@ export const stopTask = (id) => api.post(`/tasks/${id}/stop`);
 export const dedupeTask = (id) => api.post(`/tasks/${id}/dedupe`);
 export const getTaskLogs = (id, lines = 100) => api.get(`/tasks/${id}/logs?lines=${lines}`);
 export const getTaskStatus = (id) => api.get(`/tasks/${id}/status`);
+export const getTaskRuns = (page = 1, pageSize = 20, taskId = '') => {
+  const tid = taskId ? `&task_id=${taskId}` : '';
+  return api.get(`/task-runs?page=${page}&page_size=${pageSize}${tid}`);
+};
 
 export const getSystemStats = () => api.get('/system/stats');
 export const getRcloneStats = () => api.get('/system/rclone-stats');
