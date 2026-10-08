@@ -16,8 +16,10 @@ const pageSizes = [20, 50, 100]
 const state = ref({
   summary: {}, queue: [], history: [], suppressed: [],
   telegram: { source: '', admins_override: '', chat_id_override: '', sources: [] },
+  disk_guard: { enabled: true, active: false, free_gb: 0, threshold_gb: 300, recover_gb: 350, waiting: [] },
 })
 const telegramForm = ref({ source: '', admins_override: '', chat_id_override: '' })
+const diskForm = ref({ disk_guard_enabled: true, disk_guard_path: '/home', disk_guard_threshold_gb: 300, disk_guard_recover_gb: 350 })
 
 const unwrap = response => response?.data?.data ?? response?.data ?? response
 const envelope = response => (response?.success !== undefined ? response : (response?.data ?? response))
@@ -29,6 +31,12 @@ function applyState(data) {
     source: data.telegram?.source || '',
     admins_override: data.telegram?.admins_override || '',
     chat_id_override: data.telegram?.chat_id_override || '',
+  }
+  diskForm.value = {
+    disk_guard_enabled: data.disk_guard?.enabled !== false,
+    disk_guard_path: data.disk_guard?.path || '/home',
+    disk_guard_threshold_gb: data.disk_guard?.threshold_gb || 300,
+    disk_guard_recover_gb: data.disk_guard?.recover_gb || 350,
   }
 }
 
@@ -76,7 +84,24 @@ async function saveTelegram() {
   }
 }
 
+async function saveDiskGuard() {
+  loading.value = true
+  error.value = ''
+  message.value = ''
+  try {
+    const response = await props.api.post('plugin/SmartMoviePush/ui_config', diskForm.value)
+    const body = envelope(response)
+    message.value = body?.message || '硬盘保护设置已保存'
+    applyState(body?.data)
+  } catch (err) {
+    error.value = err?.message || '保存失败'
+  } finally {
+    loading.value = false
+  }
+}
+
 const summary = computed(() => state.value.summary || {})
+const diskGuard = computed(() => state.value.disk_guard || {})
 const queueHeaders = [
   { title: '影片', key: 'title' },
   { title: '加入时间', key: 'created_at', width: 180 },
@@ -91,6 +116,11 @@ const suppressedHeaders = [
   { title: '影片', key: 'title' },
   { title: '加入时间', key: 'added_at', width: 190 },
   { title: '操作', key: 'actions', sortable: false, width: 120 },
+]
+const diskHeaders = [
+  { title: '种子', key: 'title' },
+  { title: '分类', key: 'category', width: 130 },
+  { title: '暂停时间', key: 'added_at', width: 190 },
 ]
 
 onMounted(loadStatus)
@@ -115,6 +145,38 @@ onMounted(loadStatus)
       <VBtn class="mr-2 mb-2" variant="tonal" color="success" :loading="loading" @click="runAction('run_once')">立即试推送</VBtn>
       <VBtn class="mr-2 mb-2" variant="tonal" color="error" :loading="loading" @click="runAction('clear_cache')">清空扫描缓存</VBtn>
       <VBtn class="mb-2" variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus" />
+    </VCard>
+
+    <VCard variant="tonal" :color="diskGuard.active ? 'error' : 'success'" class="pa-4 mb-4">
+      <div class="d-flex flex-wrap align-center justify-space-between ga-3 mb-3">
+        <div>
+          <div class="text-h6">硬盘空间保护</div>
+          <div class="text-body-2 mt-1">
+            {{ diskGuard.active ? '保护中：旧下载继续，新 JAV/MP 种子暂停等候' : '正常：允许添加新种子' }}
+          </div>
+        </div>
+        <div class="text-right">
+          <div class="text-h5 font-weight-bold">剩余 {{ diskGuard.free_gb ?? 0 }}G</div>
+          <div class="text-caption">暂停等候 {{ diskGuard.waiting_count || 0 }} 个</div>
+        </div>
+      </div>
+      <VRow dense>
+        <VCol cols="12" md="3"><VSwitch v-model="diskForm.disk_guard_enabled" label="启用硬盘保护" color="success" hide-details /></VCol>
+        <VCol cols="12" md="3"><VTextField v-model="diskForm.disk_guard_path" label="检测路径" density="compact" hide-details /></VCol>
+        <VCol cols="6" md="3"><VTextField v-model.number="diskForm.disk_guard_threshold_gb" label="停止新增（G）" type="number" density="compact" hide-details /></VCol>
+        <VCol cols="6" md="3"><VTextField v-model.number="diskForm.disk_guard_recover_gb" label="允许恢复（G）" type="number" density="compact" hide-details /></VCol>
+      </VRow>
+      <div class="mt-3 d-flex flex-wrap ga-2">
+        <VBtn color="primary" variant="tonal" :loading="loading" @click="saveDiskGuard">保存设置</VBtn>
+        <VBtn variant="tonal" :loading="loading" @click="runAction('disk_guard_check')">立即检查</VBtn>
+        <VBtn v-if="diskGuard.active && !diskGuard.acked" color="warning" variant="tonal" :loading="loading" @click="runAction('disk_guard_ack', { incident_id: diskGuard.incident_id })">收到，停止提醒</VBtn>
+        <VBtn v-if="diskGuard.active" color="success" variant="tonal" :loading="loading" @click="runAction('disk_guard_resume')">空间清理后恢复添加/下载</VBtn>
+        <VBtn v-if="diskGuard.waiting_count" variant="text" @click="dialog = 'disk'">查看暂停种子</VBtn>
+      </div>
+      <div class="text-caption mt-3">
+        {{ diskGuard.active && diskGuard.recovered ? `空间已达到 ${diskGuard.recover_gb}G 恢复线，请点击上面的恢复按钮。` : `低于 ${diskGuard.threshold_gb}G 启动保护；清理到 ${diskGuard.recover_gb}G 后由你手动恢复。` }}
+      </div>
+      <VAlert v-if="diskGuard.last_error" type="warning" variant="tonal" class="mt-3">{{ diskGuard.last_error }}</VAlert>
     </VCard>
 
     <VRow dense class="mb-4">
@@ -173,6 +235,13 @@ onMounted(loadStatus)
           <VDataTable :headers="suppressedHeaders" :items="state.suppressed" :search="suppressedSearch" :items-per-page="20" :items-per-page-options="pageSizes" item-value="tmdb_id" density="compact" hover>
             <template #item.actions="{ item }"><VBtn size="small" color="warning" variant="tonal" @click="runAction('remove_suppressed', { tmdb_id: item.tmdb_id })">取消排除</VBtn></template>
           </VDataTable>
+        </VCardText>
+      </VCard>
+      <VCard v-else-if="dialog === 'disk'" title="硬盘保护暂停的 qB 种子">
+        <VDialogCloseBtn @click="dialog = ''" />
+        <VCardText>
+          <VAlert type="info" variant="tonal" class="mb-3">这里的种子没有删除；空间清理到恢复线后，在硬盘保护卡片点击“恢复添加/下载”。</VAlert>
+          <VDataTable :headers="diskHeaders" :items="diskGuard.waiting || []" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
         </VCardText>
       </VCard>
     </VDialog>

@@ -2,6 +2,7 @@ import hashlib
 import html
 import math
 import random
+import shutil
 import threading
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import Body
 
 from app.chain.download import DownloadChain
@@ -30,7 +32,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "60分钟推送电影_自用"
     plugin_desc = "每小时从新片、近期口碑、经典热门和随机发现中筛选 20 部电影推送到 Telegram。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.6.0"
+    plugin_version = "0.7.0"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -57,6 +59,10 @@ class SmartMoviePush(_PluginBase):
     _telegram_source = ""
     _telegram_admins_override = ""
     _telegram_chat_id_override = ""
+    _disk_guard_enabled = True
+    _disk_guard_path = "/home"
+    _disk_guard_threshold_gb = 300
+    _disk_guard_recover_gb = 350
     _scheduler = None
     _running_lock = threading.Lock()
     _queue_lock = threading.Lock()
@@ -73,6 +79,8 @@ class SmartMoviePush(_PluginBase):
     _download_history_key = "download_history"
     _history_backfill_key = "download_history_backfilled_v2"
     _candidate_cursor_key = "candidate_cursor"
+    _disk_guard_state_key = "disk_guard_state"
+    _disk_guard_lock = threading.Lock()
 
     def init_plugin(self, config: dict = None):
         self.stop_service()
@@ -97,6 +105,13 @@ class SmartMoviePush(_PluginBase):
         self._telegram_source = str(config.get("telegram_source") or "").strip()
         self._telegram_admins_override = str(config.get("telegram_admins_override") or "").strip()
         self._telegram_chat_id_override = str(config.get("telegram_chat_id_override") or "").strip()
+        self._disk_guard_enabled = bool(config.get("disk_guard_enabled", True))
+        self._disk_guard_path = str(config.get("disk_guard_path") or "/home").strip()
+        self._disk_guard_threshold_gb = max(1, int(config.get("disk_guard_threshold_gb") or 300))
+        self._disk_guard_recover_gb = max(
+            self._disk_guard_threshold_gb + 1,
+            int(config.get("disk_guard_recover_gb") or 350),
+        )
 
         # 旧版本只把下载写进 MoviePilot 下载历史，没有保存到插件页面。
         # 升级时自动补录一次；失败不会写完成标记，下次加载会继续尝试。
@@ -138,6 +153,10 @@ class SmartMoviePush(_PluginBase):
             "telegram_source": self._telegram_source,
             "telegram_admins_override": self._telegram_admins_override,
             "telegram_chat_id_override": self._telegram_chat_id_override,
+            "disk_guard_enabled": self._disk_guard_enabled,
+            "disk_guard_path": self._disk_guard_path,
+            "disk_guard_threshold_gb": self._disk_guard_threshold_gb,
+            "disk_guard_recover_gb": self._disk_guard_recover_gb,
         }
 
     def get_state(self) -> bool:
@@ -208,6 +227,12 @@ class SmartMoviePush(_PluginBase):
                 "name": "智能电影推荐顺序下载队列",
                 "trigger": CronTrigger.from_crontab("* * * * *", timezone=settings.TZ),
                 "func": self.process_download_queue,
+            },
+            {
+                "id": "SmartMoviePushDiskGuard",
+                "name": "JAV 与 MoviePilot 硬盘空间保护",
+                "trigger": IntervalTrigger(seconds=15, timezone=settings.TZ),
+                "func": self.disk_guard_tick,
             },
         ]
 
@@ -352,6 +377,10 @@ class SmartMoviePush(_PluginBase):
             "telegram_source": "",
             "telegram_admins_override": "",
             "telegram_chat_id_override": "",
+            "disk_guard_enabled": True,
+            "disk_guard_path": "/home",
+            "disk_guard_threshold_gb": 300,
+            "disk_guard_recover_gb": 350,
         }
 
     def get_page(self) -> Optional[List[dict]]:
@@ -579,6 +608,293 @@ class SmartMoviePush(_PluginBase):
             logger.warning(f"读取 Telegram 实例列表失败：{err}")
         return options
 
+    @staticmethod
+    def _bytes_to_gb(value: Any) -> float:
+        return round(float(value or 0) / (1024 ** 3), 1)
+
+    def _disk_free_bytes(self) -> int:
+        return int(shutil.disk_usage(self._disk_guard_path).free)
+
+    def _load_disk_guard_state(self) -> dict:
+        value = self.get_data(self._disk_guard_state_key)
+        if not isinstance(value, dict):
+            value = {}
+        return {
+            "active": bool(value.get("active")),
+            "incident_id": str(value.get("incident_id") or ""),
+            "acked": bool(value.get("acked")),
+            "activated_at": value.get("activated_at"),
+            "last_alert_at": value.get("last_alert_at"),
+            "last_checked_at": value.get("last_checked_at"),
+            "free_bytes": int(value.get("free_bytes") or 0),
+            "recovered": bool(value.get("recovered")),
+            "baseline_hashes": list(value.get("baseline_hashes") or []),
+            "waiting": list(value.get("waiting") or []),
+            "last_error": str(value.get("last_error") or ""),
+        }
+
+    def _disk_guard_status(self) -> dict:
+        state = self._load_disk_guard_state()
+        try:
+            free_bytes = self._disk_free_bytes()
+            state["free_bytes"] = free_bytes
+            state["last_error"] = ""
+        except Exception as err:
+            state["last_error"] = str(err)
+        return {
+            **state,
+            "enabled": self._disk_guard_enabled,
+            "path": self._disk_guard_path,
+            "threshold_gb": self._disk_guard_threshold_gb,
+            "recover_gb": self._disk_guard_recover_gb,
+            "free_gb": self._bytes_to_gb(state.get("free_bytes")),
+            "waiting_count": len(state.get("waiting") or []),
+        }
+
+    def _disk_guard_blocks_new(self) -> bool:
+        if not self._disk_guard_enabled:
+            return False
+        state = self._load_disk_guard_state()
+        if state.get("active"):
+            return True
+        try:
+            return self._disk_free_bytes() <= self._disk_guard_threshold_gb * (1024 ** 3)
+        except Exception as err:
+            # 无法读磁盘时宁可等候，也不能继续把未知状态的磁盘写满。
+            logger.error(f"硬盘保护无法读取 {self._disk_guard_path}：{err}")
+            return True
+
+    @staticmethod
+    def _is_guard_target(torrent: Any) -> bool:
+        category = str(getattr(torrent, "category", "") or "").upper()
+        tags = str(getattr(torrent, "tags", "") or "").upper()
+        marker = f"{category},{tags}"
+        return "DBONLINE" in marker or "DB_ONLINE" in marker or "MOVIEPILOT" in marker
+
+    def _send_disk_guard_alert(self, state: dict) -> bool:
+        free_gb = self._bytes_to_gb(state.get("free_bytes"))
+        waiting_count = len(state.get("waiting") or [])
+        recovered = bool(state.get("recovered"))
+        if recovered:
+            headline = "✅ 磁盘空间已恢复，等待后台手动恢复"
+            detail = f"剩余 {free_gb}G，已达到恢复线 {self._disk_guard_recover_gb}G。"
+        else:
+            headline = "⛔ 硬盘空间保护已启动"
+            detail = f"剩余 {free_gb}G，低于保护线 {self._disk_guard_threshold_gb}G。"
+        text = (
+            f"<b>{headline}</b>\n"
+            f"{detail}\n"
+            f"现有下载继续；新的 JAV / MoviePilot 种子只暂停等候，不删除。\n"
+            f"当前保护等候：{waiting_count} 个。\n"
+            f"点击“收到”只停止本次每 30 分钟提醒，不会解除保护。"
+        )
+        try:
+            _, result = self._send_telegram_direct(
+                title="💽 MoviePilot 硬盘保护",
+                text=text,
+                userid=self._telegram_target(),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                buttons=[[{
+                    "text": "收到",
+                    "callback_data": (
+                        f"[PLUGIN]{self.__class__.__name__}|disk_ack|{state.get('incident_id')}"
+                    ),
+                }]],
+            )
+            return bool(result)
+        except Exception as err:
+            logger.error(f"发送硬盘保护 Telegram 告警失败：{err}")
+            return False
+
+    def disk_guard_tick(self, force_alert: bool = False) -> None:
+        """低空间时保留旧下载，暂停之后新增的 JAV/MP qB 任务。"""
+        if not self._disk_guard_enabled or not self._disk_guard_lock.acquire(blocking=False):
+            return
+        try:
+            now = datetime.now()
+            state = self._load_disk_guard_state()
+            try:
+                free_bytes = self._disk_free_bytes()
+                torrents = DownloadChain().list_torrents(include_all_tags=True) or []
+            except Exception as err:
+                state["last_checked_at"] = now.isoformat(timespec="seconds")
+                state["last_error"] = str(err)
+                self.save_data(self._disk_guard_state_key, state)
+                logger.error(f"硬盘保护检查失败：{err}")
+                return
+
+            threshold = self._disk_guard_threshold_gb * (1024 ** 3)
+            recovery = self._disk_guard_recover_gb * (1024 ** 3)
+            targets = {
+                str(getattr(item, "hash", "") or ""): item
+                for item in torrents
+                if getattr(item, "hash", None) and self._is_guard_target(item)
+            }
+
+            if free_bytes <= threshold and not state.get("active"):
+                state = {
+                    "active": True,
+                    "incident_id": now.strftime("%Y%m%d%H%M%S"),
+                    "acked": False,
+                    "activated_at": now.isoformat(timespec="seconds"),
+                    "last_alert_at": None,
+                    "last_checked_at": now.isoformat(timespec="seconds"),
+                    "free_bytes": free_bytes,
+                    "recovered": False,
+                    # 触发瞬间已经存在的任务属于旧任务，允许继续下载。
+                    "baseline_hashes": list(targets.keys()),
+                    "waiting": [],
+                    "last_error": "",
+                }
+                logger.warning(
+                    f"硬盘保护启动：{self._disk_guard_path} 剩余 {self._bytes_to_gb(free_bytes)}G，"
+                    f"保留现有 JAV/MP 下载 {len(targets)} 个"
+                )
+
+            if not state.get("active"):
+                state.update({
+                    "last_checked_at": now.isoformat(timespec="seconds"),
+                    "free_bytes": free_bytes,
+                    "last_error": "",
+                })
+                self.save_data(self._disk_guard_state_key, state)
+                return
+
+            baseline = set(state.get("baseline_hashes") or [])
+            waiting = {
+                str(item.get("hash") or ""): item
+                for item in state.get("waiting") or []
+                if item.get("hash")
+            }
+            for torrent_hash, torrent in targets.items():
+                if torrent_hash in baseline:
+                    continue
+                if torrent_hash not in waiting:
+                    waiting[torrent_hash] = {
+                        "hash": torrent_hash,
+                        "title": str(getattr(torrent, "title", "") or getattr(torrent, "name", "") or torrent_hash),
+                        "category": str(getattr(torrent, "category", "") or ""),
+                        "tags": str(getattr(torrent, "tags", "") or ""),
+                        "downloader": str(getattr(torrent, "downloader", "") or ""),
+                        "added_at": now.isoformat(timespec="seconds"),
+                    }
+                    logger.warning(f"硬盘保护捕获新增种子并暂停：{waiting[torrent_hash]['title']}")
+                torrent_state = str(getattr(torrent, "state", "") or "").lower()
+                if torrent_state not in {"paused", "stopped"}:
+                    try:
+                        stopped = DownloadChain().stop_torrents(
+                            hashs=[torrent_hash],
+                            downloader=getattr(torrent, "downloader", None),
+                        )
+                    except Exception as err:
+                        stopped = False
+                        logger.error(f"硬盘保护暂停种子异常：{waiting[torrent_hash]['title']}：{err}")
+                    if not stopped:
+                        logger.error(f"硬盘保护暂停种子失败：{waiting[torrent_hash]['title']} ({torrent_hash})")
+
+            state.update({
+                "waiting": list(waiting.values()),
+                "free_bytes": free_bytes,
+                "last_checked_at": now.isoformat(timespec="seconds"),
+                "recovered": free_bytes >= recovery,
+                "last_error": "",
+            })
+            # 先保存保护状态，Telegram 临时失联也绝不能丢失等待清单。
+            self.save_data(self._disk_guard_state_key, state)
+
+            should_alert = force_alert or not state.get("acked")
+            last_alert = state.get("last_alert_at")
+            if should_alert and last_alert and not force_alert:
+                try:
+                    should_alert = now - datetime.fromisoformat(str(last_alert)) >= timedelta(minutes=30)
+                except (TypeError, ValueError):
+                    should_alert = True
+            if should_alert and self._send_disk_guard_alert(state):
+                state["last_alert_at"] = now.isoformat(timespec="seconds")
+            self.save_data(self._disk_guard_state_key, state)
+        finally:
+            self._disk_guard_lock.release()
+
+    def _ack_disk_guard(self, incident_id: str = "") -> dict:
+        state = self._load_disk_guard_state()
+        if not state.get("active"):
+            return {"success": True, "message": "当前没有硬盘保护告警"}
+        if incident_id and incident_id != state.get("incident_id"):
+            return {"success": False, "message": "这条告警已经过期"}
+        state["acked"] = True
+        self.save_data(self._disk_guard_state_key, state)
+        return {"success": True, "message": "已收到，本次低空间告警不再重复提醒"}
+
+    def _resume_disk_guard_waiting(self) -> dict:
+        """空间清理后由用户在插件后台手动恢复，绝不删除种子。"""
+        if not self._disk_guard_lock.acquire(blocking=False):
+            return {"success": False, "message": "硬盘保护正在检查，请稍后重试"}
+        try:
+            state = self._load_disk_guard_state()
+            if not state.get("active"):
+                return {"success": True, "message": "硬盘保护未启动，无需恢复"}
+            try:
+                free_bytes = self._disk_free_bytes()
+            except Exception as err:
+                return {"success": False, "message": f"读取磁盘空间失败：{err}"}
+            if free_bytes < self._disk_guard_recover_gb * (1024 ** 3):
+                return {
+                    "success": False,
+                    "message": (
+                        f"当前仅剩 {self._bytes_to_gb(free_bytes)}G，需达到 "
+                        f"{self._disk_guard_recover_gb}G 才能恢复"
+                    ),
+                }
+
+            torrents = DownloadChain().list_torrents(include_all_tags=True) or []
+            current = {
+                str(getattr(item, "hash", "") or ""): item
+                for item in torrents if getattr(item, "hash", None)
+            }
+            failed = []
+            resumed = 0
+            for item in state.get("waiting") or []:
+                torrent_hash = str(item.get("hash") or "")
+                torrent = current.get(torrent_hash)
+                if not torrent:
+                    continue
+                ok = DownloadChain().start_torrents(
+                    hashs=[torrent_hash],
+                    downloader=getattr(torrent, "downloader", None) or item.get("downloader"),
+                )
+                if ok:
+                    resumed += 1
+                else:
+                    failed.append(item)
+            if failed:
+                state["waiting"] = failed
+                state["free_bytes"] = free_bytes
+                state["last_error"] = f"有 {len(failed)} 个种子恢复失败"
+                self.save_data(self._disk_guard_state_key, state)
+                return {
+                    "success": False,
+                    "message": f"已恢复 {resumed} 个，仍有 {len(failed)} 个失败并继续保留等候",
+                }
+
+            self.save_data(self._disk_guard_state_key, {
+                "active": False,
+                "incident_id": "",
+                "acked": False,
+                "activated_at": None,
+                "last_alert_at": None,
+                "last_checked_at": datetime.now().isoformat(timespec="seconds"),
+                "free_bytes": free_bytes,
+                "recovered": True,
+                "baseline_hashes": [],
+                "waiting": [],
+                "last_error": "",
+            })
+            logger.info(f"硬盘保护已手动解除：恢复 qB 等候种子 {resumed} 个，MP 队列将继续自动提交")
+            return {"success": True, "message": f"保护已解除，恢复 {resumed} 个种子；MP 等候队列将继续"}
+        finally:
+            self._disk_guard_lock.release()
+
     def _ui_status_data(self) -> dict:
         suppressed = self._load_suppressed()
         cache = self.get_data(self._scan_cache_key)
@@ -615,17 +931,32 @@ class SmartMoviePush(_PluginBase):
                 "effective_chat_id": self._telegram_target() or "",
                 "sources": self._telegram_sources(),
             },
+            "disk_guard": self._disk_guard_status(),
         }
 
     def _api_ui_status(self) -> dict:
         return {"success": True, "data": self._ui_status_data()}
 
     def _api_ui_config(self, payload: dict = Body(default={})) -> dict:
-        self._telegram_source = str(payload.get("source") or "").strip()
-        self._telegram_admins_override = str(payload.get("admins_override") or "").strip()
-        self._telegram_chat_id_override = str(payload.get("chat_id_override") or "").strip()
+        if "source" in payload:
+            self._telegram_source = str(payload.get("source") or "").strip()
+        if "admins_override" in payload:
+            self._telegram_admins_override = str(payload.get("admins_override") or "").strip()
+        if "chat_id_override" in payload:
+            self._telegram_chat_id_override = str(payload.get("chat_id_override") or "").strip()
+        if "disk_guard_enabled" in payload:
+            self._disk_guard_enabled = bool(payload.get("disk_guard_enabled"))
+        if "disk_guard_path" in payload:
+            self._disk_guard_path = str(payload.get("disk_guard_path") or "/home").strip()
+        if "disk_guard_threshold_gb" in payload:
+            self._disk_guard_threshold_gb = max(1, int(payload.get("disk_guard_threshold_gb") or 300))
+        if "disk_guard_recover_gb" in payload:
+            self._disk_guard_recover_gb = max(
+                self._disk_guard_threshold_gb + 1,
+                int(payload.get("disk_guard_recover_gb") or 350),
+            )
         self.update_config(self._current_config())
-        return {"success": True, "message": "Telegram 设置已保存", "data": self._ui_status_data()}
+        return {"success": True, "message": "插件设置已保存", "data": self._ui_status_data()}
 
     def _api_ui_action(self, payload: dict = Body(default={})) -> dict:
         action = str(payload.get("action") or "")
@@ -647,6 +978,13 @@ class SmartMoviePush(_PluginBase):
             result = self._api_clear_cache()
         elif action == "backfill_history":
             result = self._api_backfill_download_history()
+        elif action == "disk_guard_check":
+            self.disk_guard_tick(force_alert=False)
+            result = {"success": True, "message": "硬盘保护检查完成"}
+        elif action == "disk_guard_ack":
+            result = self._ack_disk_guard(str(payload.get("incident_id") or ""))
+        elif action == "disk_guard_resume":
+            result = self._resume_disk_guard_waiting()
         else:
             result = {"success": False, "message": "未知操作"}
         result["data"] = self._ui_status_data()
@@ -989,6 +1327,8 @@ class SmartMoviePush(_PluginBase):
     def _submit_download(self, media: MediaInfo, context: Context,
                          channel: Any = None, userid: Any = None,
                          username: str = "60分钟推送电影_自用") -> Tuple[bool, Optional[str]]:
+        if self._disk_guard_blocks_new():
+            return False, "硬盘保护中，候选已保留等候，不向 qB 添加新种子"
         download_id, error = DownloadChain().download_single(
             context=context,
             channel=channel,
@@ -1005,6 +1345,11 @@ class SmartMoviePush(_PluginBase):
 
     def process_download_queue(self) -> None:
         """每分钟检查空位，严格按入队顺序提交，活动下载永不超过设置值。"""
+        if self._disk_guard_blocks_new():
+            queue_count = len(self._load_download_queue())
+            if queue_count:
+                logger.info(f"硬盘保护中：保留 {queue_count} 部 MoviePilot 候选等候，不添加新种子")
+            return
         if not self._queue_lock.acquire(blocking=False):
             return
         try:
@@ -1308,7 +1653,7 @@ class SmartMoviePush(_PluginBase):
 
     def _auto_download_movie(self, media: MediaInfo, context: Context,
                              force_queue: bool = False) -> Tuple[bool, bool]:
-        if force_queue:
+        if force_queue or self._disk_guard_blocks_new():
             self._enqueue_download(media, context)
             self._push_movie(media, context, queued=True)
             return True, False
@@ -1460,7 +1805,7 @@ class SmartMoviePush(_PluginBase):
         if "|" not in callback:
             return
         action, key = callback.split("|", 1)
-        if action not in {"download", "suppress"}:
+        if action not in {"download", "suppress", "disk_ack"}:
             return
         pending = self._load_pending()
         item = pending.get(key)
@@ -1475,6 +1820,23 @@ class SmartMoviePush(_PluginBase):
             logger.warning(f"拒绝非管理员操作电影推荐：userid={userid}, username={username}, action={action}")
             self.post_message(channel=channel, mtype=NotificationType.Manual,
                               title="无操作权限", text="只有 Telegram 管理员可以操作电影推荐。", userid=userid)
+            return
+        if action == "disk_ack":
+            result = self._ack_disk_guard(key)
+            if result.get("success") and channel and source and message_id:
+                self.chain.delete_message(
+                    channel=channel,
+                    source=source,
+                    message_id=message_id,
+                    chat_id=chat_id,
+                )
+            self.post_message(
+                channel=channel,
+                mtype=NotificationType.Manual,
+                title="硬盘保护",
+                text=result.get("message") or "已处理",
+                userid=userid,
+            )
             return
         if not item:
             self.post_message(channel=channel, mtype=NotificationType.Manual,
@@ -1527,9 +1889,12 @@ class SmartMoviePush(_PluginBase):
         media = context.media_info
         with self._queue_lock:
             active = self._active_download_count()
-            if active >= self._max_active_downloads:
+            if self._disk_guard_blocks_new() or active >= self._max_active_downloads:
                 self._enqueue_download(media, context, channel=channel, userid=userid)
-                logger.info(f"管理员确认后进入等候下载：{media.title_year}，活动任务 {active}/{self._max_active_downloads}")
+                logger.info(
+                    f"管理员确认后进入等候下载：{media.title_year}，"
+                    f"硬盘保护={self._disk_guard_blocks_new()}，活动任务 {active}/{self._max_active_downloads}"
+                )
                 return
 
             ok, error = self._submit_download(

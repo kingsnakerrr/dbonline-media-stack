@@ -1,5 +1,0 @@
-
-.list-card[data-v-ffffd50b] { cursor: pointer; transition: border-color .2s, transform .2s;
-}
-.list-card[data-v-ffffd50b]:hover { border-color: rgb(var(--v-theme-primary)); transform: translateY(-2px);
-}
