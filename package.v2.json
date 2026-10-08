@@ -2,12 +2,13 @@
   "SmartMoviePush": {
     "name": "60分钟推送电影_自用",
     "description": "动态轮换 TMDB 候选并从 M-Team 筛选电影，支持 Telegram 推荐、最多 20 部活动下载、顺序等待队列和下载记录。",
-    "version": "0.5.3",
+    "version": "0.6.0",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Telegram_A.png",
     "author": "kingsnakerrr",
     "level": 1,
     "system_version": ">=2.5.7,<3",
     "history": {
+      "v0.6.0": "详情页升级为 Vue：三个记录列表改为弹窗搜索与 20/50/100 分页，等候下载和不再推送支持单项取消，并增加可继承或覆盖 MoviePilot Telegram 设置。",
       "v0.5.3": "电影下载并整理完成后自动撤回该影片残留的插件 Telegram 推送，失败记录留待午夜重试。",
       "v0.5.2": "历史补录改为只认 note.source=SmartMoviePush，并自动清理上一版补录后重建，避免混入 MP 页面手动下载。",
       "v0.5.1": "自动从 MoviePilot 下载历史补录插件以前提交的电影，按 TMDB/片名去重，并将栏目更名为插件下载记录。",

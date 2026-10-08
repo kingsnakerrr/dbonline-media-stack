@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from fastapi import Body
 
 from app.chain.download import DownloadChain
 from app.chain.search import SearchChain
@@ -29,7 +30,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "60分钟推送电影_自用"
     plugin_desc = "每小时从新片、近期口碑、经典热门和随机发现中筛选 20 部电影推送到 Telegram。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.5.3"
+    plugin_version = "0.6.0"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -53,6 +54,9 @@ class SmartMoviePush(_PluginBase):
     _min_votes = 100
     _max_active_downloads = 20
     _max_searches = 80
+    _telegram_source = ""
+    _telegram_admins_override = ""
+    _telegram_chat_id_override = ""
     _scheduler = None
     _running_lock = threading.Lock()
     _queue_lock = threading.Lock()
@@ -90,6 +94,9 @@ class SmartMoviePush(_PluginBase):
         self._min_votes = max(0, int(config.get("min_votes", 100)))
         self._max_active_downloads = max(1, min(int(config.get("max_active_downloads") or 20), 100))
         self._max_searches = max(20, min(int(config.get("max_searches") or 80), 200))
+        self._telegram_source = str(config.get("telegram_source") or "").strip()
+        self._telegram_admins_override = str(config.get("telegram_admins_override") or "").strip()
+        self._telegram_chat_id_override = str(config.get("telegram_chat_id_override") or "").strip()
 
         # 旧版本只把下载写进 MoviePilot 下载历史，没有保存到插件页面。
         # 升级时自动补录一次；失败不会写完成标记，下次加载会继续尝试。
@@ -128,6 +135,9 @@ class SmartMoviePush(_PluginBase):
             "min_votes": self._min_votes,
             "max_active_downloads": self._max_active_downloads,
             "max_searches": self._max_searches,
+            "telegram_source": self._telegram_source,
+            "telegram_admins_override": self._telegram_admins_override,
+            "telegram_chat_id_override": self._telegram_chat_id_override,
         }
 
     def get_state(self) -> bool:
@@ -136,6 +146,10 @@ class SmartMoviePush(_PluginBase):
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
         return []
+
+    @staticmethod
+    def get_render_mode() -> Tuple[str, str]:
+        return "vue", "dist/assets"
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
@@ -159,6 +173,12 @@ class SmartMoviePush(_PluginBase):
              "methods": ["GET"], "summary": "清空下载记录"},
             {"path": "/backfill_download_history", "endpoint": self._api_backfill_download_history,
              "methods": ["GET"], "summary": "重新补录插件旧下载记录"},
+            {"path": "/ui_status", "endpoint": self._api_ui_status,
+             "methods": ["GET"], "auth": "bear", "summary": "获取插件界面数据"},
+            {"path": "/ui_config", "endpoint": self._api_ui_config,
+             "methods": ["POST"], "auth": "bear", "summary": "保存 Telegram 覆盖设置"},
+            {"path": "/ui_action", "endpoint": self._api_ui_action,
+             "methods": ["POST"], "auth": "bear", "summary": "执行插件界面操作"},
         ]
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -329,6 +349,9 @@ class SmartMoviePush(_PluginBase):
             "min_votes": 100,
             "max_active_downloads": 20,
             "max_searches": 80,
+            "telegram_source": "",
+            "telegram_admins_override": "",
+            "telegram_chat_id_override": "",
         }
 
     def get_page(self) -> Optional[List[dict]]:
@@ -542,6 +565,92 @@ class SmartMoviePush(_PluginBase):
                 if result.get("success") else f"历史补录失败：{result.get('error', '未知错误')}"
             ),
         }
+
+    def _telegram_sources(self) -> List[dict]:
+        options = [{"title": "跟随 MoviePilot 默认 Telegram", "value": ""}]
+        module = self._telegram_module()
+        if not module:
+            return options
+        try:
+            for source, conf in module.get_configs().items():
+                name = str(getattr(conf, "name", "") or source)
+                options.append({"title": name, "value": str(source)})
+        except Exception as err:
+            logger.warning(f"读取 Telegram 实例列表失败：{err}")
+        return options
+
+    def _ui_status_data(self) -> dict:
+        suppressed = self._load_suppressed()
+        cache = self.get_data(self._scan_cache_key)
+        queue = self._load_download_queue()
+        history = self._load_download_history()
+        return {
+            "summary": {
+                "enabled": self._enabled,
+                "auto_push": self._auto_push,
+                "auto_download": self._auto_download,
+                "cron": self._cron,
+                "cache_count": len(cache) if isinstance(cache, dict) else 0,
+                "queue_count": len(queue),
+                "history_count": len(history),
+                "suppressed_count": len(suppressed),
+                "active_downloads": self._active_download_count(),
+                "max_active_downloads": self._max_active_downloads,
+            },
+            "queue": list(queue),
+            "history": list(reversed(history)),
+            "suppressed": [
+                {"tmdb_id": tmdb_id, **item}
+                for tmdb_id, item in sorted(
+                    suppressed.items(),
+                    key=lambda row: str(row[1].get("added_at", "")),
+                    reverse=True,
+                )
+            ],
+            "telegram": {
+                "source": self._telegram_source,
+                "admins_override": self._telegram_admins_override,
+                "chat_id_override": self._telegram_chat_id_override,
+                "effective_admins": ", ".join(sorted(self._telegram_admins())),
+                "effective_chat_id": self._telegram_target() or "",
+                "sources": self._telegram_sources(),
+            },
+        }
+
+    def _api_ui_status(self) -> dict:
+        return {"success": True, "data": self._ui_status_data()}
+
+    def _api_ui_config(self, payload: dict = Body(default={})) -> dict:
+        self._telegram_source = str(payload.get("source") or "").strip()
+        self._telegram_admins_override = str(payload.get("admins_override") or "").strip()
+        self._telegram_chat_id_override = str(payload.get("chat_id_override") or "").strip()
+        self.update_config(self._current_config())
+        return {"success": True, "message": "Telegram 设置已保存", "data": self._ui_status_data()}
+
+    def _api_ui_action(self, payload: dict = Body(default={})) -> dict:
+        action = str(payload.get("action") or "")
+        if action == "remove_queue":
+            result = self._api_remove_queue(str(payload.get("key") or ""))
+        elif action == "clear_queue":
+            result = self._api_clear_queue()
+        elif action == "remove_suppressed":
+            result = self._api_remove_suppressed(str(payload.get("tmdb_id") or ""))
+        elif action == "clear_suppressed":
+            result = self._api_clear_suppressed()
+        elif action == "toggle_auto_push":
+            result = self._api_toggle_auto_push()
+        elif action == "toggle_download_mode":
+            result = self._api_toggle_download_mode()
+        elif action == "run_once":
+            result = self._api_run_once()
+        elif action == "clear_cache":
+            result = self._api_clear_cache()
+        elif action == "backfill_history":
+            result = self._api_backfill_download_history()
+        else:
+            result = {"success": False, "message": "未知操作"}
+        result["data"] = self._ui_status_data()
+        return result
 
     def get_dashboard(self, key: str, **kwargs):
         return None
@@ -964,6 +1073,9 @@ class SmartMoviePush(_PluginBase):
         return str(value or "").strip().lstrip("@").lower()
 
     def _telegram_admins(self) -> set:
+        if self._telegram_admins_override:
+            raw = self._telegram_admins_override.replace(";", ",")
+            return {self._normalize_admin(item) for item in raw.split(",") if item.strip()}
         admins = set()
         notifications = self.systemconfig.get(SystemConfigKey.Notifications) or []
         for notification in notifications:
@@ -988,7 +1100,15 @@ class SmartMoviePush(_PluginBase):
         module = self._telegram_module()
         if not module:
             return None, None
-        for source, conf in module.get_configs().items():
+        configs = module.get_configs()
+        if self._telegram_source:
+            conf = configs.get(self._telegram_source)
+            candidates = [(self._telegram_source, conf)] if conf else []
+        else:
+            candidates = list(configs.items())
+        for source, conf in candidates:
+            if not conf:
+                continue
             client = module.get_instance(conf.name)
             if not client:
                 continue
@@ -1107,6 +1227,8 @@ class SmartMoviePush(_PluginBase):
 
     def _telegram_target(self) -> Optional[str]:
         """读取现有 Telegram 通知配置，不在插件里复制或保存机器人凭据。"""
+        if self._telegram_chat_id_override:
+            return self._telegram_chat_id_override
         notifications = self.systemconfig.get(SystemConfigKey.Notifications) or []
         for notification in notifications:
             if not isinstance(notification, dict):
