@@ -11,6 +11,7 @@ import {
   Trash2,
   Terminal,
   Activity,
+  Gauge,
   Clock,
   CheckCircle2,
   ExternalLink,
@@ -48,6 +49,20 @@ const formatTaskDest = (task) => {
   return `☁ ${task.remote_name || ''}:${task.remote_dir || ''}`;
 };
 
+const parseSpeedToBytes = (value) => {
+  if (!value) return 0;
+  const match = String(value).trim().match(/^([\d.]+)\s*([KMGTPE]?i?B)\/s$/i);
+  if (!match) return 0;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
+  const binaryUnits = ['B', 'KIB', 'MIB', 'GIB', 'TIB', 'PIB', 'EIB'];
+  const unit = match[2].toUpperCase();
+  const binaryIndex = binaryUnits.indexOf(unit);
+  const decimalIndex = units.indexOf(unit);
+  const index = binaryIndex >= 0 ? binaryIndex : decimalIndex;
+  if (index < 0) return 0;
+  return Number(match[1]) * Math.pow(binaryIndex >= 0 ? 1024 : 1000, index);
+};
+
 const TaskDetail = () => {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -78,8 +93,10 @@ const TaskDetail = () => {
       setFileProgresses(prev => ({
         ...prev,
         [fileName]: {
+          ...prev[fileName],
           progress: percent,
           sizeStr,
+          speed: parseSpeedToBytes(speedStr),
           speedStr,
           lastUpdate: Date.now(),
         }
@@ -320,6 +337,11 @@ const TaskDetail = () => {
   const rotationCurrentRemote = rotationRemotes[task.rotation_current_index || 0] || rotationRemotes[0] || '-';
   const rotationLimitedRemotes = parseRotationLimitedRemotes(task.rotation_limited_remotes);
   const rotationLimitedEntries = Object.entries(rotationLimitedRemotes);
+  const activeTransfers = Object.values(fileProgresses);
+  const totalUploadSpeed = activeTransfers.reduce(
+    (total, item) => total + (Number(item.speed) || parseSpeedToBytes(item.speedStr)),
+    0
+  );
 
   return (
     <div className="space-y-6">
@@ -485,6 +507,12 @@ const TaskDetail = () => {
             />
           </>
         )}
+        <InfoCard
+          icon={Gauge}
+          label="总上传速度"
+          value={formatSpeed(totalUploadSpeed)}
+          sub={activeTransfers.length > 0 ? `实时汇总 ${activeTransfers.length} 个文件` : '暂无活跃传输'}
+        />
       </div>
 
       {task.task_type === 'rotation' && rotationLimitedEntries.length > 0 && (
@@ -543,9 +571,15 @@ const TaskDetail = () => {
                       style={{ width: `${Math.min(data.progress, 100)}%` }}
                     />
                   </div>
-                  <span className="text-xs font-semibold text-blue-600 w-12 text-right flex-shrink-0">
-                    {Math.min(data.progress, 100).toFixed(1)}%
-                  </span>
+                  <div className="flex items-center justify-end gap-2 text-xs flex-shrink-0 min-w-[9.5rem]">
+                    <span className="font-semibold text-blue-600">
+                      {Math.min(data.progress, 100).toFixed(1)}%
+                    </span>
+                    <span className="text-gray-300">·</span>
+                    <span className="font-medium text-emerald-600 tabular-nums">
+                      {data.speedStr || formatSpeed(data.speed || 0)}
+                    </span>
+                  </div>
                 </div>
               </div>
             ))
