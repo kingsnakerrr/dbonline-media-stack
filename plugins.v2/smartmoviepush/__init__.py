@@ -33,7 +33,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "60分钟推送电影_自用"
     plugin_desc = "每小时从新片、近期口碑、经典热门和随机发现中筛选 20 部电影推送到 Telegram。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.7.1"
+    plugin_version = "0.7.2"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -963,6 +963,9 @@ class SmartMoviePush(_PluginBase):
                 "suppressed_count": len(suppressed),
                 "active_downloads": self._active_download_count(),
                 "max_active_downloads": self._max_active_downloads,
+                "limit": self._limit,
+                "test_limit": self._test_limit,
+                "max_searches": self._max_searches,
             },
             "queue": list(queue),
             "history": list(reversed(history)),
@@ -1007,6 +1010,16 @@ class SmartMoviePush(_PluginBase):
                 self._disk_guard_threshold_gb + 1,
                 int(payload.get("disk_guard_recover_gb") or 350),
             )
+        if "limit" in payload:
+            self._limit = max(1, min(int(payload.get("limit") or 20), 50))
+        if "test_limit" in payload:
+            self._test_limit = max(1, min(int(payload.get("test_limit") or 2), 5))
+        if "max_active_downloads" in payload:
+            self._max_active_downloads = max(
+                1, min(int(payload.get("max_active_downloads") or 20), 100)
+            )
+        if "max_searches" in payload:
+            self._max_searches = max(20, min(int(payload.get("max_searches") or 80), 200))
         self.update_config(self._current_config())
         return {"success": True, "message": "插件设置已保存", "data": self._ui_status_data()}
 

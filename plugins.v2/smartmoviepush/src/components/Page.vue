@@ -20,6 +20,7 @@ const state = ref({
 })
 const telegramForm = ref({ source: '', admins_override: '', chat_id_override: '' })
 const diskForm = ref({ disk_guard_enabled: true, disk_guard_path: '/home', disk_guard_threshold_gb: 300, disk_guard_recover_gb: 350 })
+const pushForm = ref({ limit: 20, test_limit: 2, max_active_downloads: 20, max_searches: 80 })
 
 const unwrap = response => response?.data?.data ?? response?.data ?? response
 const envelope = response => (response?.success !== undefined ? response : (response?.data ?? response))
@@ -37,6 +38,12 @@ function applyState(data) {
     disk_guard_path: data.disk_guard?.path || '/home',
     disk_guard_threshold_gb: data.disk_guard?.threshold_gb || 300,
     disk_guard_recover_gb: data.disk_guard?.recover_gb || 350,
+  }
+  pushForm.value = {
+    limit: data.summary?.limit || 20,
+    test_limit: data.summary?.test_limit || 2,
+    max_active_downloads: data.summary?.max_active_downloads || 20,
+    max_searches: data.summary?.max_searches || 80,
   }
 }
 
@@ -100,6 +107,22 @@ async function saveDiskGuard() {
   }
 }
 
+async function savePushSettings() {
+  loading.value = true
+  error.value = ''
+  message.value = ''
+  try {
+    const response = await props.api.post('plugin/SmartMoviePush/ui_config', pushForm.value)
+    const body = envelope(response)
+    message.value = body?.message || '推送与下载设置已保存'
+    applyState(body?.data)
+  } catch (err) {
+    error.value = err?.message || '保存失败'
+  } finally {
+    loading.value = false
+  }
+}
+
 const summary = computed(() => state.value.summary || {})
 const diskGuard = computed(() => state.value.disk_guard || {})
 const queueHeaders = [
@@ -147,7 +170,51 @@ onMounted(loadStatus)
       <VBtn class="mb-2" variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus" />
     </VCard>
 
-    <VCard variant="tonal" :color="diskGuard.active ? 'error' : 'success'" class="pa-4 mb-4">
+    <VCard variant="outlined" class="pa-4 mb-4">
+      <div class="text-h6 mb-1">推送与下载数量</div>
+      <div class="text-caption text-medium-emphasis mb-3">定时任务每 60 分钟使用“每轮数量”；点击“立即试推送”时使用“测试数量”。</div>
+      <VRow dense>
+        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.limit" label="每60分钟下载/推送（部）" type="number" :min="1" :max="50" density="compact" /></VCol>
+        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.test_limit" label="测试下载/推送（部）" type="number" :min="1" :max="5" density="compact" /></VCol>
+        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.max_active_downloads" label="同时下载上限（部）" type="number" :min="1" :max="100" density="compact" /></VCol>
+        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.max_searches" label="每轮最多查询 M-Team" type="number" :min="20" :max="200" density="compact" /></VCol>
+      </VRow>
+      <VBtn color="primary" variant="tonal" :loading="loading" @click="savePushSettings">保存推送与下载设置</VBtn>
+    </VCard>
+
+    <VRow dense class="mb-4">
+      <VCol cols="12" md="4">
+        <VCard variant="outlined" class="pa-4 h-100 list-card" @click="dialog = 'queue'">
+          <div class="d-flex align-center justify-space-between"><div class="text-h6">等候下载</div><VIcon icon="mdi-chevron-right" /></div>
+          <div class="text-h4 mt-3">{{ state.queue.length }}</div><div class="text-caption mt-2">点击查看、搜索或取消任务</div>
+        </VCard>
+      </VCol>
+      <VCol cols="12" md="4">
+        <VCard variant="outlined" class="pa-4 h-100 list-card" @click="dialog = 'history'">
+          <div class="d-flex align-center justify-space-between"><div class="text-h6">插件下载记录</div><VIcon icon="mdi-chevron-right" /></div>
+          <div class="text-h4 mt-3">{{ state.history.length }}</div><div class="text-caption mt-2">点击查看和搜索，只读记录</div>
+        </VCard>
+      </VCol>
+      <VCol cols="12" md="4">
+        <VCard variant="outlined" class="pa-4 h-100 list-card" @click="dialog = 'suppressed'">
+          <div class="d-flex align-center justify-space-between"><div class="text-h6">不再推送列表</div><VIcon icon="mdi-chevron-right" /></div>
+          <div class="text-h4 mt-3">{{ state.suppressed.length }}</div><div class="text-caption mt-2">点击查看、搜索或取消排除</div>
+        </VCard>
+      </VCol>
+    </VRow>
+
+    <VCard variant="outlined" class="pa-4 mb-4">
+      <div class="text-h6 mb-1">Telegram 设置</div>
+      <div class="text-caption text-medium-emphasis mb-3">留空即自动使用 MoviePilot 通知设置；也可选择其他已配置的 Telegram 实例并覆盖管理员或群组。</div>
+      <VRow dense>
+        <VCol cols="12" md="4"><VSelect v-model="telegramForm.source" :items="state.telegram.sources || []" item-title="title" item-value="value" label="Telegram 机器人" /></VCol>
+        <VCol cols="12" md="4"><VTextField v-model="telegramForm.admins_override" label="管理员 ID/用户名（可选）" :placeholder="state.telegram.effective_admins || '跟随 MP'" /></VCol>
+        <VCol cols="12" md="4"><VTextField v-model="telegramForm.chat_id_override" label="通知群组/频道 Chat ID（可选）" :placeholder="state.telegram.effective_chat_id || '跟随 MP'" /></VCol>
+      </VRow>
+      <VBtn color="primary" variant="tonal" :loading="loading" @click="saveTelegram">保存 Telegram 设置</VBtn>
+    </VCard>
+
+    <VCard variant="tonal" :color="diskGuard.active ? 'error' : 'success'" class="pa-4">
       <div class="d-flex flex-wrap align-center justify-space-between ga-3 mb-3">
         <div>
           <div class="text-h6">硬盘空间保护</div>
@@ -177,38 +244,6 @@ onMounted(loadStatus)
         {{ diskGuard.active && diskGuard.recovered ? `空间已达到 ${diskGuard.recover_gb}G 恢复线，请点击上面的恢复按钮。` : `低于 ${diskGuard.threshold_gb}G 启动保护；清理到 ${diskGuard.recover_gb}G 后由你手动恢复。` }}
       </div>
       <VAlert v-if="diskGuard.last_error" type="warning" variant="tonal" class="mt-3">{{ diskGuard.last_error }}</VAlert>
-    </VCard>
-
-    <VRow dense class="mb-4">
-      <VCol cols="12" md="4">
-        <VCard variant="outlined" class="pa-4 h-100 list-card" @click="dialog = 'queue'">
-          <div class="d-flex align-center justify-space-between"><div class="text-h6">等候下载</div><VIcon icon="mdi-chevron-right" /></div>
-          <div class="text-h4 mt-3">{{ state.queue.length }}</div><div class="text-caption mt-2">点击查看、搜索或取消任务</div>
-        </VCard>
-      </VCol>
-      <VCol cols="12" md="4">
-        <VCard variant="outlined" class="pa-4 h-100 list-card" @click="dialog = 'history'">
-          <div class="d-flex align-center justify-space-between"><div class="text-h6">插件下载记录</div><VIcon icon="mdi-chevron-right" /></div>
-          <div class="text-h4 mt-3">{{ state.history.length }}</div><div class="text-caption mt-2">点击查看和搜索，只读记录</div>
-        </VCard>
-      </VCol>
-      <VCol cols="12" md="4">
-        <VCard variant="outlined" class="pa-4 h-100 list-card" @click="dialog = 'suppressed'">
-          <div class="d-flex align-center justify-space-between"><div class="text-h6">不再推送列表</div><VIcon icon="mdi-chevron-right" /></div>
-          <div class="text-h4 mt-3">{{ state.suppressed.length }}</div><div class="text-caption mt-2">点击查看、搜索或取消排除</div>
-        </VCard>
-      </VCol>
-    </VRow>
-
-    <VCard variant="outlined" class="pa-4">
-      <div class="text-h6 mb-1">Telegram 设置</div>
-      <div class="text-caption text-medium-emphasis mb-3">留空即自动使用 MoviePilot 通知设置；也可选择其他已配置的 Telegram 实例并覆盖管理员或群组。</div>
-      <VRow dense>
-        <VCol cols="12" md="4"><VSelect v-model="telegramForm.source" :items="state.telegram.sources || []" item-title="title" item-value="value" label="Telegram 机器人" /></VCol>
-        <VCol cols="12" md="4"><VTextField v-model="telegramForm.admins_override" label="管理员 ID/用户名（可选）" :placeholder="state.telegram.effective_admins || '跟随 MP'" /></VCol>
-        <VCol cols="12" md="4"><VTextField v-model="telegramForm.chat_id_override" label="通知群组/频道 Chat ID（可选）" :placeholder="state.telegram.effective_chat_id || '跟随 MP'" /></VCol>
-      </VRow>
-      <VBtn color="primary" variant="tonal" :loading="loading" @click="saveTelegram">保存 Telegram 设置</VBtn>
     </VCard>
 
     <VDialog v-model="dialog" max-width="75rem" scrollable>
