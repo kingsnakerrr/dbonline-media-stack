@@ -215,6 +215,19 @@ type RemoteQuotaState struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
+// RemoteQuotaRecovery keeps the observed recovery duration for one real
+// upload-limit period.  Predictions deliberately remain per remote/account;
+// Google documents the 750 GB limit as a per-user limit, not a shared-drive
+// or Workspace-domain reset shared by every credential.
+type RemoteQuotaRecovery struct {
+	ID              uint      `json:"id" gorm:"primaryKey"`
+	RemoteName      string    `json:"remote_name" gorm:"not null;index;uniqueIndex:idx_remote_quota_period"`
+	QuotaErrorAt    time.Time `json:"quota_error_at" gorm:"not null;uniqueIndex:idx_remote_quota_period"`
+	RecoveredAt     time.Time `json:"recovered_at" gorm:"not null;index"`
+	DurationSeconds int64     `json:"duration_seconds" gorm:"not null"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
 type User struct {
 	ID        uint      `json:"id" gorm:"primaryKey"`
 	Username  string    `json:"username" gorm:"uniqueIndex;not null"`

@@ -1118,6 +1118,11 @@ type remoteStatus struct {
 	QuotaErrorAt    string  `json:"quota_error_at"`
 	EstimatedRecoverAt string `json:"estimated_recover_at"`
 	RecoverInSeconds int64 `json:"recover_in_seconds"`
+	RecoverySampleCount int `json:"recovery_sample_count"`
+	LearnedRecoverySeconds int64 `json:"learned_recovery_seconds"`
+	LastRecoverySeconds int64 `json:"last_recovery_seconds"`
+	PredictionSource string `json:"prediction_source"`
+	NextProbeAt string `json:"next_probe_at"`
 	LastProbeAt     string  `json:"last_probe_at"`
 	LastProbeStatus string  `json:"last_probe_status"`
 	UploadedBytes24 int64   `json:"uploaded_bytes_24h"`
@@ -1342,6 +1347,7 @@ func applyPersistentQuotaStates(statuses map[string]*remoteStatus) {
 		status.LastProbeStatus = state.LastProbeStatus
 		if state.LastProbeAt != nil {
 			status.LastProbeAt = state.LastProbeAt.Format("2006-01-02 15:04:05")
+			status.NextProbeAt = state.LastProbeAt.Add(remoteQuotaProbeInterval).Format("2006-01-02 15:04:05")
 		}
 		if state.Status == "limited" {
 			status.Status = "limited"
@@ -1355,8 +1361,13 @@ func applyPersistentQuotaStates(statuses map[string]*remoteStatus) {
 			if state.QuotaErrorAt != nil {
 				status.QuotaErrorAt = state.QuotaErrorAt.Format("2006-01-02 15:04:05")
 				status.Time = status.QuotaErrorAt
-				estimated := state.QuotaErrorAt.Add(24 * time.Hour)
+				prediction := predictRemoteQuotaRecovery(remote)
+				estimated := state.QuotaErrorAt.Add(prediction.Duration)
 				status.EstimatedRecoverAt = estimated.Format("2006-01-02 15:04:05")
+				status.RecoverySampleCount = prediction.SampleCount
+				status.LearnedRecoverySeconds = int64(prediction.Duration.Seconds())
+				status.LastRecoverySeconds = int64(prediction.LastDuration.Seconds())
+				status.PredictionSource = prediction.Source
 				remaining := time.Until(estimated)
 				if remaining > 0 {
 					status.RecoverInSeconds = int64(remaining.Seconds())
@@ -1464,7 +1475,7 @@ func readRcloneRemoteDetails() []struct {
 func startRemoteQuotaRecoveryLoop() {
 	time.Sleep(30 * time.Second)
 	probeLimitedRemoteQuotaStates()
-	ticker := time.NewTicker(10 * time.Minute)
+	ticker := time.NewTicker(remoteQuotaProbeInterval)
 	defer ticker.Stop()
 	for range ticker.C {
 		probeLimitedRemoteQuotaStates()
@@ -1505,6 +1516,7 @@ func probeRemoteQuotaRecovery(state *models.RemoteQuotaState) {
 	state.LastProbeAt = &now
 	if err == nil {
 		_ = exec.Command("rclone", "deletefile", remotePath, "--config", "/root/.config/rclone/rclone.conf").Run()
+		recordRemoteQuotaRecovery(state, now)
 		state.Status = "ok"
 		state.Reason = ""
 		state.LastProbeStatus = "recovered"

@@ -477,6 +477,8 @@ const RemoteStatusCard = ({ remote }) => {
   const quota = Number(remote.quota_bytes || 750 * 1024 * 1024 * 1024);
   const percent = Math.max(0, Math.min(100, Number(remote.quota_percent || 0)));
   const statusText = remote.status_text || '\u6b63\u5e38';
+  const learnedPrediction = remote.prediction_source === 'account_history';
+  const recoverySamples = Number(remote.recovery_sample_count || 0);
   const badgeClass = isLimited
     ? 'bg-red-100 text-red-700 border-red-200'
     : isWarning
@@ -513,11 +515,42 @@ const RemoteStatusCard = ({ remote }) => {
           <span>{formatBytes(uploaded)} / {formatBytes(quota)}</span>
         </div>
         {remote.time && <div>{'\u9650\u989d\u65f6\u95f4\uff1a'}{remote.time}</div>}
-        {remote.estimated_recover_at && <div>{'\u9884\u8ba1\u6062\u590d\uff1a'}{remote.estimated_recover_at}</div>}
+        {remote.estimated_recover_at && (
+          <div>
+            {learnedPrediction ? '\u667a\u80fd\u9884\u8ba1\u6062\u590d\uff1a' : '\u5b98\u65b9 24 \u5c0f\u65f6\u53c2\u8003\uff1a'}
+            {remote.estimated_recover_at}
+          </div>
+        )}
+        {learnedPrediction && (
+          <div>
+            {'\u8be5\u8d26\u53f7\u5df2\u5b66\u4e60 '}{recoverySamples}{' \u6b21\uff0c\u6700\u8fd1\u5b9e\u9645\u8017\u65f6 '}
+            {formatDuration(remote.last_recovery_seconds)}
+          </div>
+        )}
+        {isLimited && remote.last_probe_at && (
+          <div>{'\u6700\u8fd1\u63a2\u6d4b\uff1a'}{remote.last_probe_at}{'\uff08'}{probeStatusText(remote.last_probe_status)}{'\uff09'}</div>
+        )}
+        {isLimited && remote.next_probe_at && <div>{'\u4e0b\u6b21\u63a2\u6d4b\uff1a'}{remote.next_probe_at}</div>}
         {remote.task_name && <div className="truncate">{'\u5173\u8054\u4efb\u52a1\uff1a'}{remote.task_name}</div>}
       </div>
     </div>
   );
+};
+
+const formatDuration = (seconds) => {
+  const total = Math.max(0, Number(seconds || 0));
+  if (!total) return '-';
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.round((total % 3600) / 60);
+  if (hours > 0) return `${hours}\u5c0f\u65f6${minutes ? `${minutes}\u5206` : ''}`;
+  return `${Math.max(1, minutes)}\u5206`;
+};
+
+const probeStatusText = (status) => {
+  if (status === 'still_limited') return '\u4ecd\u5728\u9650\u989d';
+  if (status === 'recovered') return '\u5df2\u786e\u8ba4\u6062\u590d';
+  if (status === 'check_failed') return '\u63a2\u6d4b\u5931\u8d25\uff0c\u7b49\u5f85\u91cd\u8bd5';
+  return '\u7b49\u5f85\u63a2\u6d4b';
 };
 
 const formatBytes = (bytes) => {
