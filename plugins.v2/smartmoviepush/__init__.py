@@ -7,11 +7,13 @@ import secrets
 import shutil
 import subprocess
 import threading
+import unicodedata
 from types import SimpleNamespace
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
+import requests
 from telebot import TeleBot, types as telegram_types
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -19,7 +21,6 @@ from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import Body
 
 from app.chain.download import DownloadChain
-from app.chain.mediaserver import MediaServerChain
 from app.chain.search import SearchChain
 from app.chain.tmdb import TmdbChain
 from app.core.config import settings
@@ -40,7 +41,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.12"
+    plugin_version = "0.9.13"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2182,49 +2183,101 @@ class SmartMoviePush(_PluginBase):
         return MediaInfo(type=MediaType.MOVIE, title=title, year=year,
                          tmdb_id=tmdb_id)
 
-    def verify_emby_ingestion(self, limit: int = 50) -> int:
-        """仅凭已启用 Emby 中的真实条目确认入库，MP 整理历史不算。"""
+    @staticmethod
+    def _emby_index_for_server(config: dict) -> Tuple[dict, dict]:
+        """一次分页读取 Emby 电影索引；避免逐部查询造成午夜统计积压。"""
+        host = str(config.get("host") or "").rstrip("/")
+        apikey = str(config.get("apikey") or "")
+        if not host or not apikey:
+            raise ValueError("Emby 地址或 API Key 缺失")
+        by_tmdb = {}
+        by_title_year = {}
+        start = 0
+        page_size = 10000
+        with requests.Session() as client:
+            while True:
+                response = client.get(
+                    f"{host}/emby/Items",
+                    params={
+                        "IncludeItemTypes": "Movie",
+                        "Recursive": "true",
+                        "Fields": "ProviderIds,ProductionYear",
+                        "StartIndex": start,
+                        "Limit": page_size,
+                        "api_key": apikey,
+                    },
+                    timeout=(5, 45),
+                )
+                response.raise_for_status()
+                payload = response.json()
+                movies = payload.get("Items") or []
+                for movie in movies:
+                    if not isinstance(movie, dict) or not movie.get("Id"):
+                        continue
+                    provider_ids = movie.get("ProviderIds") or {}
+                    tmdb_id = next(
+                        (str(value) for key, value in provider_ids.items()
+                         if str(key).lower() == "tmdb" and value), ""
+                    )
+                    if tmdb_id:
+                        by_tmdb.setdefault(tmdb_id, movie)
+                    title = " ".join(str(movie.get("Name") or "").casefold().split())
+                    year = str(movie.get("ProductionYear") or "")
+                    if title and year:
+                        by_title_year.setdefault((title, year), movie)
+                start += len(movies)
+                total = int(payload.get("TotalRecordCount") or 0)
+                if not movies or start >= total:
+                    break
+        return by_tmdb, by_title_year
+
+    def verify_emby_ingestion(self) -> int:
+        """批量按 TMDB ID 核验；只有缺 ID 时才按片名和年份匹配。"""
         history = self._load_download_history()
         pending = [item for item in history if item.get("organized_at") and not item.get("emby_ingested_at")]
         if not pending:
             return 0
-        try:
-            module = ModuleManager().get_running_module("EmbyModule")
-            configs = module.get_configs() if module else []
-            servers = [name for name, conf in (configs or {}).items()
-                       if getattr(conf, "enabled", False) and getattr(conf, "type", "") == "emby"]
-            if not servers:
-                logger.warning("Emby 入库核验暂不可用：没有已启用的 Emby 服务器")
-                return 0
-            chain = MediaServerChain()
-            now = datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")
-            checked = 0
-            found = 0
-            for item in sorted(pending, key=lambda row: str(row.get("last_emby_check_at") or ""))[:limit]:
-                media = self._emby_media_info(item)
-                if not media:
-                    continue
-                checked += 1
-                item["last_emby_check_at"] = now
-                for server in servers:
-                    try:
-                        result = chain.media_exists(mediainfo=media, server=server)
-                        if result and str(getattr(result, "server_type", "")).lower() == "emby" and getattr(result, "itemid", None):
-                            item["emby_ingested_at"] = now
-                            item["status"] = "emby_ingested"
-                            item["emby_server"] = server
-                            item["emby_item_id"] = str(result.itemid)
-                            found += 1
-                            self._append_plugin_log("Emby 已入库", f"{item.get('title')} 已在 {server} 核实")
-                            break
-                    except Exception as err:
-                        logger.warning(f"Emby 核验失败：{server} / {item.get('title')}：{err}")
-            if checked:
-                self.save_data(self._download_history_key, history[-1000:])
-            return found
-        except Exception as err:
-            logger.error(f"Emby 入库核验失败：{err}")
+        module = ModuleManager().get_running_module("EmbyModule")
+        configs = module.get_configs() if module else {}
+        servers = [(name, conf) for name, conf in (configs or {}).items()
+                   if getattr(conf, "enabled", False) and getattr(conf, "type", "") == "emby"]
+        if not servers:
+            logger.warning("Emby 入库核验暂不可用：没有已启用的 Emby 服务器")
             return 0
+        indexes = []
+        for name, conf in servers:
+            try:
+                by_tmdb, by_title_year = self._emby_index_for_server(conf.config or {})
+                indexes.append((name, by_tmdb, by_title_year))
+            except Exception as err:
+                # 不把含 API Key 的请求地址写进日志。
+                logger.warning(f"读取 Emby 电影索引失败：{name}：{type(err).__name__}")
+        if not indexes:
+            return 0
+        now = datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")
+        found = 0
+        for item in pending:
+            item["last_emby_check_at"] = now
+            tmdb_id = str(item.get("tmdb_id") or "")
+            media = self._emby_media_info(item) if not tmdb_id else None
+            fallback = (
+                (" ".join(media.title.casefold().split()), str(media.year or ""))
+                if media and media.year else None
+            )
+            for server, by_tmdb, by_title_year in indexes:
+                movie = by_tmdb.get(tmdb_id) if tmdb_id else by_title_year.get(fallback)
+                if not movie:
+                    continue
+                item["emby_ingested_at"] = now
+                item["status"] = "emby_ingested"
+                item["emby_server"] = server
+                item["emby_item_id"] = str(movie["Id"])
+                found += 1
+                self._append_plugin_log("Emby 已入库", f"{item.get('title')} 已在 {server} 核实")
+                break
+        self.save_data(self._download_history_key, history[-1000:])
+        logger.info(f"Emby 批量核验完成：待查 {len(pending)} 部，本轮确认 {found} 部")
+        return found
 
     @staticmethod
     def _parse_history_time(value: Any, timezone) -> Optional[datetime]:
@@ -2237,18 +2290,36 @@ class SmartMoviePush(_PluginBase):
             return None
 
     @staticmethod
-    def _format_daily_movie_rows(items: List[dict]) -> str:
+    def _format_daily_movie_rows(items: List[dict], start_index: int = 1) -> str:
         if not items:
             return "本日没有本插件提交下载的电影。"
+        def display_width(value: str) -> int:
+            return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in value)
+
+        def wrap(value: str, width: int) -> List[str]:
+            lines, current, used = [], "", 0
+            for char in value:
+                size = display_width(char)
+                if current and used + size > width:
+                    lines.append(current)
+                    current, used = "", 0
+                current += char
+                used += size
+            return lines + ([current] if current else [])
+
         entries = []
-        for index, item in enumerate(items, 1):
+        for index, item in enumerate(items, start_index):
             movie_title = item.get("title") or f"TMDB {item.get('tmdb_id', '')}"
             library_mark = "  ✓ 已入库" if item.get("emby_ingested_at") else ""
             entries.append(f"{index}. {movie_title}{library_mark}")
         rows = []
         for index in range(0, len(entries), 2):
-            pair = entries[index:index + 2]
-            rows.append("　│　".join(pair))
+            left = wrap(entries[index], 34)
+            right = wrap(entries[index + 1], 34) if index + 1 < len(entries) else []
+            for line_number in range(max(len(left), len(right))):
+                left_line = left[line_number] if line_number < len(left) else ""
+                right_line = right[line_number] if line_number < len(right) else ""
+                rows.append(f"{left_line}{' ' * (36 - display_width(left_line))}│  {right_line}")
         return "\n".join(rows)
 
     def send_daily_completion_summary(self) -> None:
@@ -2259,7 +2330,7 @@ class SmartMoviePush(_PluginBase):
         start = end - timedelta(days=1)
         summary_date = start.strftime("%Y.%m.%d")
         previous = self.get_data(self._daily_summary_key) or {}
-        if previous.get("date") == summary_date:
+        if previous.get("date") == summary_date and previous.get("direct_success"):
             return
 
         # 回查 MP 整理历史只补“已整理”；不能由此认定 Emby 已入库。
@@ -2267,7 +2338,9 @@ class SmartMoviePush(_PluginBase):
         history_changed = False
         transfer_oper = TransferHistoryOper()
         for item in history:
-            if item.get("organized_at") or not item.get("download_id"):
+            submitted_at = self._parse_history_time(item.get("submitted_at"), timezone)
+            if (not submitted_at or not (start <= submitted_at < end)
+                    or item.get("organized_at") or not item.get("download_id")):
                 continue
             try:
                 transfers = transfer_oper.list_by_hash(str(item.get("download_id"))) or []
@@ -2291,7 +2364,7 @@ class SmartMoviePush(_PluginBase):
                 logger.warning(f"回查插件下载整理记录失败：{item.get('title')}：{err}")
         if history_changed:
             self.save_data(self._download_history_key, history[-1000:])
-        self.verify_emby_ingestion(limit=200)
+        self.verify_emby_ingestion()
         history = self._load_download_history()
 
         downloaded = []
@@ -2306,43 +2379,58 @@ class SmartMoviePush(_PluginBase):
             seen.add(identity)
             downloaded.append(item)
         downloaded.sort(key=lambda item: str(item.get("submitted_at") or ""))
+        organized_count = sum(1 for item in downloaded if item.get("organized_at"))
         completed_count = sum(1 for item in downloaded if item.get("emby_ingested_at"))
-
-        title = (
-            f"📊 {summary_date}｜下载 {len(downloaded)} 部｜"
-            f"已入库 {completed_count} 部"
-        )
-        text = (
-            f"日期：{summary_date}\n"
-            f"本插件下载：{len(downloaded)} 部\n"
-            f"其中已入库：{completed_count} 部\n\n"
-            f"{self._format_daily_movie_rows(downloaded)}\n\n"
-            "✓ 仅标记已在 Emby 核实的电影；等待入库影片不加标记。"
-        )
-        source, result = self._send_telegram_direct(
-            title=title,
-            text=text,
-            userid=self._telegram_target(),
-            disable_web_page_preview=True,
-        )
-        success = bool(source and result)
-        if not success:
-            logger.error("每日电影统计未送达 Telegram，将在下次调度时重试")
-            return
-        self.save_data(self._daily_summary_key, {
-            "date": summary_date,
-            "count": len(downloaded),
-            "completed_count": completed_count,
-            "sent_at": now.isoformat(timespec="seconds"),
-            "direct_success": success,
-        })
-        detail = f"{summary_date} 下载 {len(downloaded)} 部，已入库 {completed_count} 部"
+        # Telegram 使用等宽 <pre>，并分批发送，分隔符在长片名换行后也保持固定列。
+        page_size = 32
+        pages = [downloaded[index:index + page_size]
+                 for index in range(0, len(downloaded), page_size)] or [[]]
+        sent_pages = min(int(previous.get("sent_pages") or 0), len(pages)) if previous.get("date") == summary_date else 0
+        for page_number in range(sent_pages, len(pages)):
+            page_items = pages[page_number]
+            rows = self._format_daily_movie_rows(page_items, page_number * page_size + 1)
+            title = (
+                f"📊 {summary_date}｜提交下载 {len(downloaded)} 部｜"
+                f"Emby 已入库 {completed_count} 部"
+            )
+            text = (
+                f"MoviePilot 已整理：{organized_count} 部｜待整理：{len(downloaded) - organized_count} 部\n"
+                f"已整理待 Emby：{max(organized_count - completed_count, 0)} 部\n"
+                f"名单 {page_number + 1}/{len(pages)}：\n"
+                f"<pre>{html.escape(rows)}</pre>\n"
+                "✓ 仅代表 Emby 已查到；提交下载不等于完成下载。"
+            )
+            source, result = self._send_telegram_direct(
+                title=title,
+                text=text,
+                userid=self._telegram_target(),
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            if not source or not result:
+                logger.error(f"每日电影统计第 {page_number + 1}/{len(pages)} 页未送达 Telegram")
+                self.save_data(self._daily_summary_key, {
+                    "date": summary_date, "count": len(downloaded),
+                    "organized_count": organized_count, "completed_count": completed_count,
+                    "sent_pages": page_number, "total_pages": len(pages),
+                    "direct_success": False,
+                })
+                return
+            self.save_data(self._daily_summary_key, {
+                "date": summary_date, "count": len(downloaded),
+                "organized_count": organized_count, "completed_count": completed_count,
+                "sent_pages": page_number + 1, "total_pages": len(pages),
+                "sent_at": now.isoformat(timespec="seconds"),
+                "direct_success": page_number + 1 == len(pages),
+            })
+        detail = (f"{summary_date} 提交下载 {len(downloaded)} 部，"
+                  f"MoviePilot 已整理 {organized_count} 部，Emby 已入库 {completed_count} 部")
         if downloaded:
             detail += "：" + "、".join(
                 f"{item.get('title') or ''}{'（已入库）' if item.get('emby_ingested_at') else ''}"
                 for item in downloaded
             )
-        self._append_plugin_log("每日统计", detail, "success" if success else "warning")
+        self._append_plugin_log("每日统计", detail, "success")
         logger.info(f"插件每日下载/入库统计已发送：{detail}")
 
     def midnight_maintenance(self) -> None:
