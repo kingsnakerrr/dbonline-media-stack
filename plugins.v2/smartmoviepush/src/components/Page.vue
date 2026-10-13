@@ -334,7 +334,7 @@ onUnmounted(() => {
       </div>
       <div class="status-item">
         <VCard variant="tonal" color="primary" class="pa-4 h-100 status-card">
-          <div class="d-flex align-center justify-space-between mb-2"><div><div class="text-caption">定时推送</div><div class="text-h6 font-weight-bold">{{ controlForm.auto_push ? '已开启' : '已暂停' }}</div></div><VSwitch v-model="controlForm.auto_push" color="primary" hide-details :disabled="!controlForm.enabled" @update:model-value="value => saveControlSettings({ auto_push: value })" /></div>
+          <div class="d-flex align-center justify-space-between mb-2"><div><div class="text-caption">定时推送</div><div class="text-h6 font-weight-bold">{{ diskGuard.active ? '硬盘保护暂停' : (controlForm.auto_push ? '已开启' : '已暂停') }}</div></div><VSwitch v-model="controlForm.auto_push" color="primary" hide-details :disabled="!controlForm.enabled" @update:model-value="value => saveControlSettings({ auto_push: value })" /></div>
           <VSelect v-model="controlForm.push_interval_minutes" :items="intervalItems" density="compact" label="推送间隔" hide-details :disabled="!controlForm.enabled" @update:model-value="value => saveControlSettings({ push_interval_minutes: value })" />
         </VCard>
       </div>
@@ -371,7 +371,7 @@ onUnmounted(() => {
         <div class="d-flex align-center justify-space-between ga-2 mb-2">
           <div class="min-w-0">
             <div class="text-subtitle-1 font-weight-bold">硬盘空间保护</div>
-            <div class="text-caption text-truncate">{{ diskGuard.active ? '保护中：新 JAV/MP 种子暂停等候' : '正常：允许添加新种子' }}</div>
+          <div class="text-caption text-truncate">{{ diskGuard.active ? '保护中：定时推送与新下载暂停，旧下载继续' : '正常：允许推送与新增下载' }}</div>
           </div>
           <div class="text-right text-no-wrap">
             <div class="text-h6 font-weight-bold">剩余 {{ diskGuard.free_gb ?? 0 }}G</div>
@@ -398,7 +398,7 @@ onUnmounted(() => {
 
     <VCard variant="outlined" class="pa-4 mb-4">
       <div class="text-h6 mb-1">推送与下载数量</div>
-      <div class="text-caption text-medium-emphasis mb-3">定时任务按上方所选间隔使用“每轮数量”；“立即运行”使用“立即运行数量”，不受定时推送开关影响，并按当前自动/手动下载模式真实执行。自动下载模式下只占用剩余下载空位；任务已满或硬盘保护启动时会取消并发送 Telegram 通知。</div>
+      <div class="text-caption text-medium-emphasis mb-3">定时任务按上方所选间隔使用“每轮数量”；“立即运行”使用“立即运行数量”，不受定时推送开关影响。硬盘保护启动后两者均暂停扫描、推荐推送和新增下载，旧下载继续；手动恢复保护后才重新运行。</div>
       <VRow dense class="settings-row push-settings-row">
         <VCol cols="6" md="3"><VTextField v-model.number="pushForm.limit" label="每轮下载/推送（部）" type="number" :min="1" :max="50" density="compact" /></VCol>
         <VCol cols="6" md="3"><VTextField v-model.number="pushForm.test_limit" label="立即运行数量（部）" type="number" :min="1" :max="5" density="compact" /></VCol>

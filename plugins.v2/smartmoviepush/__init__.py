@@ -40,7 +40,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.11"
+    plugin_version = "0.9.12"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -271,6 +271,9 @@ class SmartMoviePush(_PluginBase):
     def scheduled_run(self):
         if not self._enabled or not self._auto_push:
             logger.info("智能下载影视资源定时推送已暂停，本轮跳过")
+            return
+        if self._disk_guard_blocks_new():
+            logger.warning("硬盘空间保护中，本轮定时扫描、推荐推送和新增下载全部跳过")
             return
         now = datetime.now(tz=pytz.timezone(settings.TZ))
         minutes_today = now.hour * 60 + now.minute
@@ -615,23 +618,15 @@ class SmartMoviePush(_PluginBase):
     def _api_run_once(self) -> dict:
         if self._running_lock.locked():
             return {"success": False, "message": "任务正在运行中"}
+        if self._disk_guard_blocks_new():
+            return {"success": False, "message": "硬盘空间保护中：立即运行、推荐推送和新增下载均已暂停；旧下载继续"}
         if self._auto_download:
             blocked_message = ""
-            if self._disk_guard_blocks_new():
-                try:
-                    free_gb = self._bytes_to_gb(self._disk_free_bytes())
-                    blocked_message = (
-                        f"硬盘空间保护已启动：当前剩余 {free_gb}G，"
-                        f"保护线 {self._disk_guard_threshold_gb}G。"
-                    )
-                except Exception:
-                    blocked_message = "硬盘空间保护已启动，当前无法安全读取剩余空间。"
-            else:
-                active = self._active_download_count()
-                if active >= self._max_active_downloads:
-                    blocked_message = (
-                        f"正在下载任务已满：{active}/{self._max_active_downloads}。"
-                    )
+            active = self._active_download_count()
+            if active >= self._max_active_downloads:
+                blocked_message = (
+                    f"正在下载任务已满：{active}/{self._max_active_downloads}。"
+                )
             if blocked_message:
                 text = (
                     f"{blocked_message}\n"
@@ -2431,6 +2426,8 @@ class SmartMoviePush(_PluginBase):
 
     def _push_movie(self, media: MediaInfo, context: Context,
                     auto_downloaded: bool = False, queued: bool = False) -> None:
+        if self._disk_guard_blocks_new():
+            raise RuntimeError("硬盘空间保护中，电影推荐暂停发送")
         torrent = context.torrent_info
         key = None if auto_downloaded or queued else self._save_pending_context(media, context)
         if queued:
@@ -2475,7 +2472,9 @@ class SmartMoviePush(_PluginBase):
     def _auto_download_movie(self, media: MediaInfo, context: Context,
                              force_queue: bool = False,
                              allow_queue: bool = True) -> Tuple[bool, bool]:
-        if force_queue or self._disk_guard_blocks_new():
+        if self._disk_guard_blocks_new():
+            return False, False
+        if force_queue:
             if not allow_queue:
                 logger.warning(f"立即运行没有可用下载位，跳过且不排队：{media.title_year}")
                 return False, False
@@ -2485,6 +2484,8 @@ class SmartMoviePush(_PluginBase):
             return True, False
         ok, error = self._submit_download(media, context)
         if not ok:
+            if self._disk_guard_blocks_new():
+                return False, False
             if not allow_queue:
                 logger.error(f"立即运行提交 {media.title_year} 失败且不排队：{error or '未知错误'}")
                 return False, False
@@ -2499,6 +2500,9 @@ class SmartMoviePush(_PluginBase):
     def run_once(self, limit: Optional[int] = None, test_mode: bool = False):
         if not self._enabled:
             logger.info("智能电影推送插件已关闭，本轮不执行")
+            return
+        if self._disk_guard_blocks_new():
+            logger.warning("硬盘空间保护中，本轮电影扫描、推荐推送和新增下载全部跳过")
             return
         if not self._running_lock.acquire(blocking=False):
             logger.warning("智能电影推送已有任务运行，本轮跳过")
@@ -2527,6 +2531,9 @@ class SmartMoviePush(_PluginBase):
             def try_bucket(items: List[MediaInfo], wanted: int) -> int:
                 bucket_sent = 0
                 for media in items:
+                    if self._disk_guard_blocks_new():
+                        logger.warning("扫描期间触发硬盘保护，停止本轮电影搜索")
+                        break
                     if len(selected) >= target or bucket_sent >= wanted:
                         break
                     tmdb_id = str(media.tmdb_id)
@@ -2584,12 +2591,19 @@ class SmartMoviePush(_PluginBase):
                 f"无资源/未命中过滤 {stats['no_resource']}，异常 {stats['errors']}，选中 {len(selected)}"
             )
             logger.info(f"电影扫描完成：{diagnostic}；开始集中推送")
+            if self._disk_guard_blocks_new():
+                logger.warning("扫描完成时硬盘保护已启动，本轮候选保留在扫描缓存但不推送、不下载")
+                self.save_data(self._scan_cache_key, scan_cache)
+                return
             sent = 0
 
             def send_batch(auto_slots: int = 0, allow_queue: bool = True) -> None:
                 nonlocal sent
                 auto_submitted = 0
                 for media, best in selected:
+                    if self._disk_guard_blocks_new():
+                        logger.warning("批量推送期间触发硬盘保护，剩余电影停止推送和下载")
+                        break
                     tmdb_id = str(media.tmdb_id)
                     try:
                         # 手动“立即运行”与定时开关相互独立，但执行与定时任务
@@ -2697,6 +2711,10 @@ class SmartMoviePush(_PluginBase):
         if action == "download" and not self._enabled:
             self._reply_telegram_action("插件已关闭",
                                         "当前不会提交或加入等候下载；请先在插件页面开启“插件状态”。", chat_id)
+            return
+        if action == "download" and self._disk_guard_blocks_new():
+            self._reply_telegram_action("硬盘保护中",
+                                        "暂不接受新下载；原推荐保留，清理空间并手动恢复保护后可再点击。", chat_id)
             return
         if not item:
             self._reply_telegram_action("操作失败", "这条推荐已过期，请等待下一轮推荐。", chat_id)

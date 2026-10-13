@@ -500,7 +500,7 @@ return (_ctx, _cache) => {
                     _createElementVNode("div", _hoisted_7, [
                       _createElementVNode("div", null, [
                         _cache[52] || (_cache[52] = _createElementVNode("div", { class: "text-caption" }, "定时推送", -1)),
-                        _createElementVNode("div", _hoisted_8, _toDisplayString(controlForm.value.auto_push ? '已开启' : '已暂停'), 1)
+                        _createElementVNode("div", _hoisted_8, _toDisplayString(diskGuard.value.active ? '硬盘保护暂停' : (controlForm.value.auto_push ? '已开启' : '已暂停')), 1)
                       ]),
                       _createVNode(_component_VSwitch, {
                         modelValue: controlForm.value.auto_push,
@@ -642,7 +642,7 @@ return (_ctx, _cache) => {
                   _createElementVNode("div", _hoisted_23, [
                     _createElementVNode("div", _hoisted_24, [
                       _cache[61] || (_cache[61] = _createElementVNode("div", { class: "text-subtitle-1 font-weight-bold" }, "硬盘空间保护", -1)),
-                      _createElementVNode("div", _hoisted_25, _toDisplayString(diskGuard.value.active ? '保护中：新 JAV/MP 种子暂停等候' : '正常：允许添加新种子'), 1)
+                      _createElementVNode("div", _hoisted_25, _toDisplayString(diskGuard.value.active ? '保护中：定时推送与新下载暂停，旧下载继续' : '正常：允许推送与新增下载'), 1)
                     ]),
                     _createElementVNode("div", _hoisted_26, [
                       _createElementVNode("div", _hoisted_27, "剩余 " + _toDisplayString(diskGuard.value.free_gb ?? 0) + "G", 1),
@@ -777,7 +777,7 @@ return (_ctx, _cache) => {
             }, {
               default: _withCtx(() => [
                 _cache[72] || (_cache[72] = _createElementVNode("div", { class: "text-h6 mb-1" }, "推送与下载数量", -1)),
-                _cache[73] || (_cache[73] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, "定时任务按上方所选间隔使用“每轮数量”；“立即运行”使用“立即运行数量”，不受定时推送开关影响，并按当前自动/手动下载模式真实执行。自动下载模式下只占用剩余下载空位；任务已满或硬盘保护启动时会取消并发送 Telegram 通知。", -1)),
+                _cache[73] || (_cache[73] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, "定时任务按上方所选间隔使用“每轮数量”；“立即运行”使用“立即运行数量”，不受定时推送开关影响。硬盘保护启动后两者均暂停扫描、推荐推送和新增下载，旧下载继续；手动恢复保护后才重新运行。", -1)),
                 _createVNode(_component_VRow, {
                   dense: "",
                   class: "settings-row push-settings-row"
@@ -1375,6 +1375,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0d37ad15"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e1586c9e"]]);
 
 export { Page as default };
