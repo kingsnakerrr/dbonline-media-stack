@@ -105,7 +105,7 @@ MDC-NG 或 AVDB 需要配置 FlareSolverr 时，用这个地址。
 
 ## MoviePilot 插件
 
-仓库的 `plugins.v2/smartmoviepush` 是“智能下载影视资源_惹咪之北”插件最新版，支持 TMDB 候选筛选、多站点资源搜索、Telegram 推送、自动/手动下载、顺序等候、硬盘空间保护、每日下载与入库统计，以及首次访问随机密码保护。
+仓库的 `plugins.v2/smartmoviepush` 是“智能下载影视资源_惹咪之北”插件最新版，支持 TMDB 候选筛选、多站点资源搜索、Telegram 推送、自动/手动下载、顺序等候、硬盘空间保护、每日下载与入库统计，以及私人固定密码保护。
 
 安装和升级方法见 [`plugins.v2/smartmoviepush/README.md`](plugins.v2/smartmoviepush/README.md)。公开仓库不包含任何服务器的真实插件密码。
 

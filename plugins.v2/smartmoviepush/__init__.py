@@ -36,7 +36,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.8"
+    plugin_version = "0.9.9"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -87,6 +87,9 @@ class SmartMoviePush(_PluginBase):
     _daily_summary_key = "daily_completion_summary"
     _access_auth_key = "access_auth"
     _access_sessions_key = "access_sessions"
+    # 私人插件固定口令只以 PBKDF2 结果保存；源码和公开仓库不保存明文。
+    _fixed_access_salt = "b8631d765f4de734e9325533e34d0901"
+    _fixed_access_digest = "acc73ff2450a663885cfac29eac56483dcfe0dde476a23a89c15f51f5c791fd7"
     _history_backfill_key = "download_history_backfilled_v2"
     _candidate_cursor_key = "candidate_cursor"
     _disk_guard_state_key = "disk_guard_state"
@@ -1116,18 +1119,21 @@ class SmartMoviePush(_PluginBase):
 
     def _ensure_access_password(self) -> None:
         auth = self.get_data(self._access_auth_key)
-        if isinstance(auth, dict) and auth.get("salt") and auth.get("digest"):
+        if (
+            isinstance(auth, dict)
+            and secrets.compare_digest(str(auth.get("salt") or ""), self._fixed_access_salt)
+            and secrets.compare_digest(str(auth.get("digest") or ""), self._fixed_access_digest)
+        ):
             return
-        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-        password = "RMZB-" + "".join(secrets.choice(alphabet) for _ in range(12))
-        salt = secrets.token_hex(16)
         self.save_data(self._access_auth_key, {
-            "salt": salt,
-            "digest": self._password_digest(password, salt),
+            "salt": self._fixed_access_salt,
+            "digest": self._fixed_access_digest,
             "created_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+            "mode": "private_fixed",
         })
+        # 从旧版随机密码迁移时，让所有浏览器重新输入私人固定密码。
         self.save_data(self._access_sessions_key, [])
-        logger.warning(f"智能下载影视资源_惹咪之北首次访问密码已生成：{password}（请立即妥善保存）")
+        logger.info("智能下载影视资源_惹咪之北已启用私人固定密码保护")
 
     def _valid_access_token(self, token: Any) -> bool:
         raw_token = str(token or "").strip()
@@ -1151,7 +1157,11 @@ class SmartMoviePush(_PluginBase):
 
     def _api_auth_check(self, payload: dict = Body(default={})) -> dict:
         valid = self._valid_access_token((payload or {}).get("access_token"))
-        return {"success": valid, "unlocked": valid, "message": "已解锁" if valid else "请输入插件访问密码"}
+        return {
+            "success": valid,
+            "unlocked": valid,
+            "message": "已解锁" if valid else "首次使用请联系 @SDFSDFSF12321 获取密码",
+        }
 
     def _api_auth_unlock(self, payload: dict = Body(default={})) -> dict:
         password = str((payload or {}).get("password") or "")
@@ -1163,7 +1173,7 @@ class SmartMoviePush(_PluginBase):
         actual = self._password_digest(password, salt)
         if not secrets.compare_digest(actual, expected):
             self._append_plugin_log("访问验证", "插件访问密码输入错误", "warning")
-            return {"success": False, "message": "密码错误"}
+            return {"success": False, "message": "密码错误，请联系 @SDFSDFSF12321 获取密码"}
         token = secrets.token_urlsafe(32)
         expires_at = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(days=365)
         sessions = self.get_data(self._access_sessions_key) or []

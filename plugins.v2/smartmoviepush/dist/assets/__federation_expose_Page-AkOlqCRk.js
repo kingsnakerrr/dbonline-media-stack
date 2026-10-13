@@ -430,7 +430,7 @@ return (_ctx, _cache) => {
                 }),
                 _cache[48] || (_cache[48] = _createElementVNode("div", null, [
                   _createElementVNode("div", { class: "text-h6 font-weight-bold" }, "智能下载影视资源_惹咪之北"),
-                  _createElementVNode("div", { class: "text-body-2 text-medium-emphasis" }, "此插件受独立密码保护，验证成功后当前浏览器会记住。")
+                  _createElementVNode("div", { class: "text-body-2 text-medium-emphasis" }, "私人插件，首次使用请联系 @SDFSDFSF12321 获取密码。验证成功后当前浏览器会记住。")
                 ], -1))
               ]),
               _createVNode(_component_VTextField, {
@@ -1359,6 +1359,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-0a78a711"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-387aa2ad"]]);
 
 export { Page as default };

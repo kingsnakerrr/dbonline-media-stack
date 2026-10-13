@@ -313,7 +313,7 @@ onUnmounted(() => {
         <VAvatar color="primary" variant="tonal"><VIcon icon="mdi-lock" /></VAvatar>
         <div>
           <div class="text-h6 font-weight-bold">智能下载影视资源_惹咪之北</div>
-          <div class="text-body-2 text-medium-emphasis">此插件受独立密码保护，验证成功后当前浏览器会记住。</div>
+          <div class="text-body-2 text-medium-emphasis">私人插件，首次使用请联系 @SDFSDFSF12321 获取密码。验证成功后当前浏览器会记住。</div>
         </div>
       </div>
       <VTextField v-model="accessPassword" label="插件访问密码" type="password" autocomplete="current-password" prepend-inner-icon="mdi-key" autofocus :disabled="loading" @keyup.enter="unlockAccess" />
