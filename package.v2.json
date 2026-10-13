@@ -1,13 +1,14 @@
 {
   "SmartMoviePush": {
-    "name": "60分钟推送电影_自用",
-    "description": "动态轮换 TMDB 候选并从 M-Team 筛选电影，支持 Telegram 推荐、顺序等待队列、下载记录和低磁盘空间保护。",
-    "version": "0.7.2",
+    "name": "智能下载影视资源_惹咪之北",
+    "description": "从 TMDB 候选及已选 PT 站点筛选电影，支持 Telegram 推荐、顺序下载、磁盘保护和 Emby 入库核验。",
+    "version": "0.9.11",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Telegram_A.png",
     "author": "kingsnakerrr",
     "level": 1,
     "system_version": ">=2.5.7,<3",
     "history": {
+      "v0.9.11": "Telegram 自定义机器人与频道独立生效；MoviePilot 整理完成只进入等待 Emby 状态，每五分钟核验真实入库并修正每日统计。",
       "v0.7.2": "恢复首页的每轮下载数量、试运行数量等设置，并将硬盘空间保护移动到页面最下方。",
       "v0.7.1": "增加本地磁盘占用诊断，用于定位 qB 删除任务后仍占空间的目录。",
       "v0.7.0": "增加 300G 硬盘保护：旧下载继续，新 JAV/MP 种子暂停或候选排队，Telegram 每 30 分钟提醒并支持手动确认与恢复。",
