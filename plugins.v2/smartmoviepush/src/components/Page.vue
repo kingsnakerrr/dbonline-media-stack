@@ -98,7 +98,8 @@ async function runAction(action, extra = {}) {
     const response = await props.api.post('plugin/SmartMoviePush/ui_action', { action, ...extra, access_token: accessToken.value })
     const body = envelope(response)
     if (body?.locked) { lockLocally(); return }
-    message.value = body?.message || '操作完成'
+    if (body?.success === false) error.value = body?.message || '操作失败'
+    else message.value = body?.message || '操作完成'
     applyState(body?.data)
   } catch (err) {
     error.value = err?.message || '操作失败'
@@ -115,7 +116,8 @@ async function saveTelegram() {
     const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...telegramForm.value, access_token: accessToken.value })
     const body = envelope(response)
     if (body?.locked) { lockLocally(); return }
-    message.value = body?.message || 'Telegram 设置已保存'
+    if (body?.warning) error.value = body?.message || body.warning
+    else message.value = body?.message || 'Telegram 设置已保存'
     applyState(body?.data)
   } catch (err) {
     error.value = err?.message || '保存失败'
@@ -420,7 +422,7 @@ onUnmounted(() => {
       <div class="text-caption text-medium-emphasis mb-3">三个输入框留空即跟随 MoviePilot 的 Telegram 通知设置；需要覆盖哪一项就直接输入哪一项。</div>
       <VRow dense class="settings-row telegram-settings-row">
         <VCol cols="12" md="4">
-          <VTextField v-model="telegramForm.source" label="TG 机器人实例标识（可选）" density="compact" clearable :hint="telegramForm.source ? '' : '默认使用 MoviePilot TG 通知设置'" :persistent-hint="!telegramForm.source" />
+          <VTextField v-model="telegramForm.source" label="TG 机器人 Token 或 MP 实例名（可选）" type="password" autocomplete="off" density="compact" clearable :hint="telegramForm.source ? '' : '默认使用 MoviePilot TG 通知设置'" :persistent-hint="!telegramForm.source" />
         </VCol>
         <VCol cols="12" md="4">
           <VTextField v-model="telegramForm.admins_override" label="管理员 ID/用户名（可选）" density="compact" clearable placeholder="多个用逗号分隔" :hint="telegramForm.admins_override ? '' : '默认使用 MoviePilot TG 通知设置'" :persistent-hint="!telegramForm.admins_override" />
@@ -430,6 +432,7 @@ onUnmounted(() => {
         </VCol>
       </VRow>
       <VBtn color="primary" variant="tonal" :loading="loading" @click="saveTelegram">保存 Telegram 设置</VBtn>
+      <VBtn color="info" variant="tonal" class="ml-2" :loading="loading" @click="runAction('telegram_test')">发送测试消息</VBtn>
     </VCard>
 
     <VDialog v-model="dialogOpen" max-width="75rem" scrollable>

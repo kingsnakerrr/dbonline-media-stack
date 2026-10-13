@@ -2,20 +2,24 @@ import hashlib
 import html
 import math
 import random
+import re
 import secrets
 import shutil
 import subprocess
 import threading
+from types import SimpleNamespace
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
+from telebot import TeleBot, types as telegram_types
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import Body
 
 from app.chain.download import DownloadChain
+from app.chain.mediaserver import MediaServerChain
 from app.chain.search import SearchChain
 from app.chain.tmdb import TmdbChain
 from app.core.config import settings
@@ -28,7 +32,7 @@ from app.db.site_oper import SiteOper
 from app.db.transferhistory_oper import TransferHistoryOper
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas.types import EventType, MediaType, MessageChannel, NotificationType, SystemConfigKey
+from app.schemas.types import EventType, MediaType, MessageChannel, SystemConfigKey
 from app.utils.string import StringUtils
 
 
@@ -36,7 +40,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.9"
+    plugin_version = "0.9.11"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -65,6 +69,10 @@ class SmartMoviePush(_PluginBase):
     _telegram_source = ""
     _telegram_admins_override = ""
     _telegram_chat_id_override = ""
+    _custom_telegram_bot = None
+    _custom_telegram_token = ""
+    _custom_telegram_thread = None
+    _custom_telegram_lock = threading.RLock()
     _disk_guard_enabled = True
     _disk_guard_path = "/home"
     _disk_guard_threshold_gb = 300
@@ -135,6 +143,7 @@ class SmartMoviePush(_PluginBase):
         self._telegram_source = str(config.get("telegram_source") or "").strip()
         self._telegram_admins_override = str(config.get("telegram_admins_override") or "").strip()
         self._telegram_chat_id_override = str(config.get("telegram_chat_id_override") or "").strip()
+        self._configure_custom_telegram_bot()
         self._disk_guard_enabled = bool(config.get("disk_guard_enabled", True))
         self._disk_guard_path = str(config.get("disk_guard_path") or "/home").strip()
         self._disk_guard_threshold_gb = max(1, int(config.get("disk_guard_threshold_gb") or 300))
@@ -148,6 +157,7 @@ class SmartMoviePush(_PluginBase):
         # 旧版本只把下载写进 MoviePilot 下载历史，没有保存到插件页面。
         # 升级时自动补录一次；失败不会写完成标记，下次加载会继续尝试。
         self._backfill_download_history()
+        self._migrate_legacy_organized_history()
 
         if self._onlyonce:
             self._scheduler = BackgroundScheduler(timezone=settings.TZ)
@@ -249,6 +259,12 @@ class SmartMoviePush(_PluginBase):
                 "name": "JAV 与 MoviePilot 硬盘空间保护",
                 "trigger": IntervalTrigger(seconds=15, timezone=settings.TZ),
                 "func": self.disk_guard_tick,
+            },
+            {
+                "id": "SmartMoviePushEmbyVerification",
+                "name": "核验本插件电影是否真正进入 Emby",
+                "trigger": CronTrigger.from_crontab("*/5 * * * *", timezone=settings.TZ),
+                "func": self.verify_emby_ingestion,
             },
         ]
 
@@ -629,12 +645,7 @@ class SmartMoviePush(_PluginBase):
                     disable_web_page_preview=True,
                 )
                 if not source or not result:
-                    self.post_message(
-                        mtype=NotificationType.Plugin,
-                        title="电影推荐立即运行失败",
-                        text=text,
-                        userid=self._telegram_target(),
-                    )
+                    logger.error("电影推荐立即运行失败通知未送达 Telegram，请检查机器人和目标频道权限")
                 logger.warning(f"立即运行前置保护拦截：{blocked_message}")
                 return {"success": False, "message": blocked_message}
         threading.Thread(target=self.run_once,
@@ -1228,6 +1239,8 @@ class SmartMoviePush(_PluginBase):
             self._telegram_admins_override = str(payload.get("admins_override") or "").strip()
         if "chat_id_override" in payload:
             self._telegram_chat_id_override = str(payload.get("chat_id_override") or "").strip()
+        if any(key in payload for key in ("source", "admins_override", "chat_id_override")):
+            self._configure_custom_telegram_bot()
         if "disk_guard_enabled" in payload:
             self._disk_guard_enabled = bool(payload.get("disk_guard_enabled"))
         if "disk_guard_path" in payload:
@@ -1264,7 +1277,14 @@ class SmartMoviePush(_PluginBase):
         if "max_searches" in payload:
             self._max_searches = max(20, min(int(payload.get("max_searches") or 80), 200))
         self.update_config(self._current_config())
-        return {"success": True, "message": "插件设置已保存", "data": self._ui_status_data()}
+        delivery_warning = self._telegram_delivery_warning() if any(
+            key in payload for key in ("source", "admins_override", "chat_id_override")
+        ) else ""
+        message = "插件设置已保存"
+        if delivery_warning:
+            message += f"；Telegram 暂不可用：{delivery_warning}"
+        return {"success": True, "message": message, "warning": delivery_warning,
+                "data": self._ui_status_data()}
 
     def _api_ui_action(self, payload: dict = Body(default={})) -> dict:
         payload = dict(payload or {})
@@ -1283,6 +1303,18 @@ class SmartMoviePush(_PluginBase):
             result = self._api_toggle_auto_push()
         elif action == "toggle_download_mode":
             result = self._api_toggle_download_mode()
+        elif action == "telegram_test":
+            warning = self._telegram_delivery_warning()
+            if warning:
+                result = {"success": False, "message": warning}
+            else:
+                _, sent = self._send_telegram_direct(
+                    title="✅ 电影插件 Telegram 测试",
+                    text="机器人、通知频道与发送权限已验证。",
+                    userid=self._telegram_target(),
+                )
+                result = {"success": bool(sent), "message":
+                          "测试消息已发送到设置的频道" if sent else "发送失败，请检查机器人频道权限"}
         elif action == "run_once":
             result = self._api_run_once()
         elif action == "clear_cache":
@@ -1318,6 +1350,7 @@ class SmartMoviePush(_PluginBase):
         return None
 
     def stop_service(self):
+        self._stop_custom_telegram_bot()
         if self._scheduler:
             try:
                 self._scheduler.remove_all_jobs()
@@ -1542,6 +1575,21 @@ class SmartMoviePush(_PluginBase):
         value = self.get_data(self._download_history_key)
         return value if isinstance(value, list) else []
 
+    def _migrate_legacy_organized_history(self) -> None:
+        """旧 completed_at 只是 MP 整理事件，不能作为 Emby 入库证据。"""
+        history = self._load_download_history()
+        changed = 0
+        for item in history:
+            legacy = item.pop("completed_at", None)
+            if legacy:
+                item.setdefault("organized_at", legacy)
+                if not item.get("emby_ingested_at"):
+                    item["status"] = "organized"
+                changed += 1
+        if changed:
+            self.save_data(self._download_history_key, history[-1000:])
+            self._append_plugin_log("入库核验", f"已将 {changed} 条旧整理记录改为等待 Emby 核验")
+
     def _load_plugin_logs(self) -> List[dict]:
         value = self.get_data(self._plugin_logs_key)
         return value if isinstance(value, list) else []
@@ -1601,6 +1649,8 @@ class SmartMoviePush(_PluginBase):
                 item = {
                     "tmdb_id": getattr(record, "tmdbid", None),
                     "title": display_title or f"TMDB {getattr(record, 'tmdbid', '')}",
+                    "media_title": title,
+                    "year": year,
                     "download_id": str(getattr(record, "download_hash", "") or ""),
                     "submitted_at": str(getattr(record, "date", "") or ""),
                     "backfilled": True,
@@ -1732,6 +1782,8 @@ class SmartMoviePush(_PluginBase):
         history.append({
             "tmdb_id": media.tmdb_id,
             "title": media.title_year,
+            "media_title": media.title,
+            "year": media.year,
             "download_id": str(download_id or ""),
             "submitted_at": datetime.now().isoformat(timespec="seconds"),
         })
@@ -1856,9 +1908,151 @@ class SmartMoviePush(_PluginBase):
     def _telegram_module():
         return ModuleManager().get_running_module("TelegramModule")
 
+    @staticmethod
+    def _is_telegram_token(value: str) -> bool:
+        parts = str(value or "").split(":", 1)
+        return len(parts) == 2 and parts[0].isdigit() and bool(parts[1])
+
+    def _stop_custom_telegram_bot(self) -> None:
+        with self._custom_telegram_lock:
+            bot = self._custom_telegram_bot
+            self._custom_telegram_bot = None
+            self._custom_telegram_token = ""
+            self._custom_telegram_thread = None
+            if bot:
+                try:
+                    bot.stop_polling()
+                except Exception:
+                    pass
+
+    def _configure_custom_telegram_bot(self) -> None:
+        """独立 Token 自行接收按钮；MoviePilot 已配置的 Token 复用原实例。"""
+        token = self._telegram_source if self._is_telegram_token(self._telegram_source) else ""
+        module = self._telegram_module()
+        if token and module:
+            for conf in module.get_configs().values():
+                if str((conf.config or {}).get("TELEGRAM_TOKEN") or "") == token:
+                    token = ""
+                    break
+        with self._custom_telegram_lock:
+            if token and self._custom_telegram_bot and self._custom_telegram_token == token:
+                return
+        self._stop_custom_telegram_bot()
+        if not token:
+            return
+        try:
+            bot = TeleBot(token, threaded=False)
+
+            @bot.callback_query_handler(
+                func=lambda call: str(call.data or "").startswith(
+                    f"[PLUGIN]{self.__class__.__name__}|"
+                )
+            )
+            def handle_plugin_button(call):
+                if self._custom_telegram_bot is not bot:
+                    return
+                try:
+                    bot.answer_callback_query(call.id)
+                    self.message_action(SimpleNamespace(event_data={
+                        "plugin_id": self.__class__.__name__,
+                        "text": str(call.data).split("|", 1)[1],
+                        "channel": MessageChannel.Telegram,
+                        "source": "__custom_telegram__",
+                        "userid": str(call.from_user.id),
+                        "username": getattr(call.from_user, "username", None),
+                        "original_message_id": call.message.message_id,
+                        "original_chat_id": str(call.message.chat.id),
+                    }))
+                except Exception as err:
+                    logger.error(f"处理插件专用 Telegram 按钮失败：{err}")
+
+            def poll():
+                try:
+                    bot.infinity_polling(skip_pending=False, long_polling_timeout=20)
+                except Exception as err:
+                    logger.error(f"插件专用 Telegram 接收服务停止：{err}")
+
+            thread = threading.Thread(target=poll, daemon=True, name="SmartMoviePushTelegram")
+            with self._custom_telegram_lock:
+                self._custom_telegram_bot = bot
+                self._custom_telegram_token = token
+                self._custom_telegram_thread = thread
+            thread.start()
+        except Exception as err:
+            logger.error(f"启动插件专用 Telegram 机器人失败：{err}")
+
+    def _telegram_delivery_warning(self) -> str:
+        target = self._telegram_target()
+        if not target:
+            return "尚未设置通知频道 Chat ID"
+        if self._is_telegram_token(self._telegram_source) and self._custom_telegram_bot:
+            try:
+                bot = self._custom_telegram_bot
+                member = bot.get_chat_member(target, bot.get_me().id)
+                if member.status not in {"administrator", "creator", "member"}:
+                    return "机器人没有加入目标频道"
+                if member.status == "administrator" and getattr(member, "can_post_messages", True) is False:
+                    return "机器人没有频道发布权限"
+                return ""
+            except Exception:
+                return "机器人无法访问目标频道，请先将机器人加入频道并授予发布权限"
+        if self._telegram_source and not self._is_telegram_token(self._telegram_source):
+            module = self._telegram_module()
+            if not module or self._telegram_source not in module.get_configs():
+                return "机器人实例名不存在"
+        return ""
+
+    def _send_with_custom_bot(self, bot: TeleBot, **kwargs) -> Optional[dict]:
+        target = str(kwargs.get("userid") or self._telegram_target() or "")
+        if not target:
+            return None
+        title = str(kwargs.get("title") or "")
+        text = str(kwargs.get("text") or "")
+        is_html = kwargs.get("parse_mode") == "HTML"
+        caption = f"<b>{html.escape(title)}</b>\n{text if is_html else html.escape(text)}".strip()
+        link = kwargs.get("link")
+        if link:
+            caption += f'\n<a href="{html.escape(str(link), quote=True)}">查看详情</a>'
+        markup = None
+        if kwargs.get("buttons"):
+            markup = telegram_types.InlineKeyboardMarkup()
+            for row in kwargs["buttons"]:
+                markup.row(*[
+                    telegram_types.InlineKeyboardButton(
+                        text=str(button["text"]), callback_data=str(button["callback_data"])
+                    ) for button in row
+                ])
+        try:
+            image = kwargs.get("image")
+            if image and len(caption) <= 1024:
+                try:
+                    sent = bot.send_photo(target, image, caption=caption,
+                                          parse_mode="HTML", reply_markup=markup)
+                except Exception:
+                    sent = bot.send_message(target, caption, parse_mode="HTML",
+                                            reply_markup=markup, disable_web_page_preview=True)
+            else:
+                sent = bot.send_message(target, caption, parse_mode="HTML",
+                                        reply_markup=markup, disable_web_page_preview=True)
+            return {"success": True, "message_id": sent.message_id, "chat_id": sent.chat.id}
+        except Exception as err:
+            logger.error(f"插件专用 Telegram 发送失败：{err}")
+            return None
+
     def _send_telegram_direct(self, **kwargs) -> Tuple[Optional[str], Optional[dict]]:
         """直接调用现有 Telegram 实例，以便保存消息 ID 供午夜精确撤回。"""
         module = self._telegram_module()
+        if self._is_telegram_token(self._telegram_source):
+            if self._custom_telegram_bot:
+                result = self._send_with_custom_bot(self._custom_telegram_bot, **kwargs)
+                return ("__custom_telegram__", result) if result else (None, None)
+            if module:
+                for source, conf in module.get_configs().items():
+                    if str((conf.config or {}).get("TELEGRAM_TOKEN") or "") == self._telegram_source:
+                        client = module.get_instance(conf.name)
+                        result = client.send_msg(**kwargs) if client else None
+                        return (source, result) if result and result.get("success") else (None, None)
+            return None, None
         if not module:
             return None, None
         configs = module.get_configs()
@@ -1879,6 +2073,12 @@ class SmartMoviePush(_PluginBase):
         return None, None
 
     def _delete_telegram_message(self, source: Optional[str], message_id: Any, chat_id: Any) -> bool:
+        if source == "__custom_telegram__" and self._custom_telegram_bot and message_id:
+            try:
+                return bool(self._custom_telegram_bot.delete_message(chat_id, int(message_id)))
+            except Exception as err:
+                logger.warning(f"删除插件专用 Telegram 消息失败：{err}")
+                return False
         module = self._telegram_module()
         if not module or not message_id:
             return False
@@ -1934,7 +2134,7 @@ class SmartMoviePush(_PluginBase):
 
     @eventmanager.register(EventType.TransferComplete)
     def transfer_complete(self, event: Event):
-        """本插件影片下载并整理完成后，记录入库并撤回对应 Telegram 推送。"""
+        """仅记录 MoviePilot 整理完成；Emby 入库由定时核验确认。"""
         data = event.event_data or {}
         media = data.get("mediainfo")
         download_hash = str(data.get("download_hash") or "").strip().lower()
@@ -1953,18 +2153,83 @@ class SmartMoviePush(_PluginBase):
         title = getattr(media, "title_year", None) if media else None
         if title:
             history_item["title"] = str(title)
-        history_item["completed_at"] = datetime.now(
+        if media:
+            history_item["media_title"] = str(getattr(media, "title", "") or "")
+            history_item["year"] = str(getattr(media, "year", "") or "")
+        history_item["organized_at"] = datetime.now(
             tz=pytz.timezone(settings.TZ)
         ).isoformat(timespec="seconds")
-        history_item["status"] = "completed"
+        history_item["status"] = "organized"
         self.save_data(self._download_history_key, history[-1000:])
-        self._append_plugin_log("入库完成", f"{history_item.get('title') or f'TMDB {tmdb_id}'} 已整理入库")
+        self._append_plugin_log("整理完成", f"{history_item.get('title') or f'TMDB {tmdb_id}'} 等待 Emby 入库")
         deleted, failed = self._delete_download_messages(tmdb_id)
         if deleted or failed:
             logger.info(
                 f"影片整理完成，清理 Telegram 推送：TMDB {tmdb_id}，"
                 f"已删除 {deleted} 条，待重试 {failed} 条"
             )
+
+    @staticmethod
+    def _emby_media_info(item: dict) -> Optional[MediaInfo]:
+        title = str(item.get("media_title") or "").strip()
+        year = str(item.get("year") or "").strip()
+        if not title:
+            display = str(item.get("title") or "").strip()
+            match = re.fullmatch(r"(.+?)\s*\((\d{4})\)", display)
+            title = match.group(1).strip() if match else display
+            year = year or (match.group(2) if match else "")
+        if not title or title.startswith("TMDB "):
+            return None
+        try:
+            tmdb_id = int(item.get("tmdb_id"))
+        except (TypeError, ValueError):
+            tmdb_id = None
+        return MediaInfo(type=MediaType.MOVIE, title=title, year=year,
+                         tmdb_id=tmdb_id)
+
+    def verify_emby_ingestion(self, limit: int = 50) -> int:
+        """仅凭已启用 Emby 中的真实条目确认入库，MP 整理历史不算。"""
+        history = self._load_download_history()
+        pending = [item for item in history if item.get("organized_at") and not item.get("emby_ingested_at")]
+        if not pending:
+            return 0
+        try:
+            module = ModuleManager().get_running_module("EmbyModule")
+            configs = module.get_configs() if module else []
+            servers = [name for name, conf in (configs or {}).items()
+                       if getattr(conf, "enabled", False) and getattr(conf, "type", "") == "emby"]
+            if not servers:
+                logger.warning("Emby 入库核验暂不可用：没有已启用的 Emby 服务器")
+                return 0
+            chain = MediaServerChain()
+            now = datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")
+            checked = 0
+            found = 0
+            for item in sorted(pending, key=lambda row: str(row.get("last_emby_check_at") or ""))[:limit]:
+                media = self._emby_media_info(item)
+                if not media:
+                    continue
+                checked += 1
+                item["last_emby_check_at"] = now
+                for server in servers:
+                    try:
+                        result = chain.media_exists(mediainfo=media, server=server)
+                        if result and str(getattr(result, "server_type", "")).lower() == "emby" and getattr(result, "itemid", None):
+                            item["emby_ingested_at"] = now
+                            item["status"] = "emby_ingested"
+                            item["emby_server"] = server
+                            item["emby_item_id"] = str(result.itemid)
+                            found += 1
+                            self._append_plugin_log("Emby 已入库", f"{item.get('title')} 已在 {server} 核实")
+                            break
+                    except Exception as err:
+                        logger.warning(f"Emby 核验失败：{server} / {item.get('title')}：{err}")
+            if checked:
+                self.save_data(self._download_history_key, history[-1000:])
+            return found
+        except Exception as err:
+            logger.error(f"Emby 入库核验失败：{err}")
+            return 0
 
     @staticmethod
     def _parse_history_time(value: Any, timezone) -> Optional[datetime]:
@@ -1983,7 +2248,7 @@ class SmartMoviePush(_PluginBase):
         entries = []
         for index, item in enumerate(items, 1):
             movie_title = item.get("title") or f"TMDB {item.get('tmdb_id', '')}"
-            library_mark = "  ✓ 已入库" if item.get("completed_at") else ""
+            library_mark = "  ✓ 已入库" if item.get("emby_ingested_at") else ""
             entries.append(f"{index}. {movie_title}{library_mark}")
         rows = []
         for index in range(0, len(entries), 2):
@@ -2002,13 +2267,12 @@ class SmartMoviePush(_PluginBase):
         if previous.get("date") == summary_date:
             return
 
-        # 回查 MoviePilot 整理历史：即使插件升级/重启期间错过完成事件，也能按
-        # 本插件保存的下载哈希补齐完成时间，保证整天统计完整且不混入外部任务。
+        # 回查 MP 整理历史只补“已整理”；不能由此认定 Emby 已入库。
         history = self._load_download_history()
         history_changed = False
         transfer_oper = TransferHistoryOper()
         for item in history:
-            if item.get("completed_at") or not item.get("download_id"):
+            if item.get("organized_at") or not item.get("download_id"):
                 continue
             try:
                 transfers = transfer_oper.list_by_hash(str(item.get("download_id"))) or []
@@ -2016,20 +2280,24 @@ class SmartMoviePush(_PluginBase):
                 if not successful:
                     continue
                 transfer = min(successful, key=lambda row: str(getattr(row, "date", "") or ""))
-                completed_at = self._parse_history_time(getattr(transfer, "date", None), timezone)
-                if not completed_at:
+                organized_at = self._parse_history_time(getattr(transfer, "date", None), timezone)
+                if not organized_at:
                     continue
                 title = str(getattr(transfer, "title", "") or "").strip()
                 year = str(getattr(transfer, "year", "") or "").strip()
                 if title:
                     item["title"] = f"{title} ({year})" if year and year not in title else title
-                item["completed_at"] = completed_at.isoformat(timespec="seconds")
-                item["status"] = "completed"
+                    item["media_title"] = title
+                    item["year"] = year
+                item["organized_at"] = organized_at.isoformat(timespec="seconds")
+                item["status"] = "organized"
                 history_changed = True
             except Exception as err:
                 logger.warning(f"回查插件下载整理记录失败：{item.get('title')}：{err}")
         if history_changed:
             self.save_data(self._download_history_key, history[-1000:])
+        self.verify_emby_ingestion(limit=200)
+        history = self._load_download_history()
 
         downloaded = []
         seen = set()
@@ -2043,7 +2311,7 @@ class SmartMoviePush(_PluginBase):
             seen.add(identity)
             downloaded.append(item)
         downloaded.sort(key=lambda item: str(item.get("submitted_at") or ""))
-        completed_count = sum(1 for item in downloaded if item.get("completed_at"))
+        completed_count = sum(1 for item in downloaded if item.get("emby_ingested_at"))
 
         title = (
             f"📊 {summary_date}｜下载 {len(downloaded)} 部｜"
@@ -2054,7 +2322,7 @@ class SmartMoviePush(_PluginBase):
             f"本插件下载：{len(downloaded)} 部\n"
             f"其中已入库：{completed_count} 部\n\n"
             f"{self._format_daily_movie_rows(downloaded)}\n\n"
-            "✓ 仅标记已经由 MoviePilot 完成整理入库的电影；未入库影片不加标记。"
+            "✓ 仅标记已在 Emby 核实的电影；等待入库影片不加标记。"
         )
         source, result = self._send_telegram_direct(
             title=title,
@@ -2064,12 +2332,8 @@ class SmartMoviePush(_PluginBase):
         )
         success = bool(source and result)
         if not success:
-            self.post_message(
-                mtype=NotificationType.Plugin,
-                title=title,
-                text=text,
-                userid=self._telegram_target(),
-            )
+            logger.error("每日电影统计未送达 Telegram，将在下次调度时重试")
+            return
         self.save_data(self._daily_summary_key, {
             "date": summary_date,
             "count": len(downloaded),
@@ -2080,7 +2344,7 @@ class SmartMoviePush(_PluginBase):
         detail = f"{summary_date} 下载 {len(downloaded)} 部，已入库 {completed_count} 部"
         if downloaded:
             detail += "：" + "、".join(
-                f"{item.get('title') or ''}{'（已入库）' if item.get('completed_at') else ''}"
+                f"{item.get('title') or ''}{'（已入库）' if item.get('emby_ingested_at') else ''}"
                 for item in downloaded
             )
         self._append_plugin_log("每日统计", detail, "success" if success else "warning")
@@ -2139,6 +2403,12 @@ class SmartMoviePush(_PluginBase):
             if admins:
                 return admins.replace(";", ",").split(",", 1)[0].strip()
         return None
+
+    def _reply_telegram_action(self, title: str, text: str, chat_id: Any) -> None:
+        _, result = self._send_telegram_direct(title=title, text=text,
+                                               userid=str(chat_id or self._telegram_target() or ""))
+        if not result:
+            logger.error(f"Telegram 按钮反馈未送达：{title}")
 
     def _save_pending_context(self, media: MediaInfo, context: Context) -> str:
         torrent = context.torrent_info
@@ -2375,12 +2645,7 @@ class SmartMoviePush(_PluginBase):
                         disable_web_page_preview=True,
                     )
                     if not source or not result:
-                        self.post_message(
-                            mtype=NotificationType.Plugin,
-                            title=title.lstrip("❌⚠️ "),
-                            text=notice,
-                            userid=self._telegram_target(),
-                        )
+                        logger.error("立即运行受限通知未送达 Telegram，请检查机器人和目标频道权限")
                     logger.warning(notice.replace("\n", " "))
             else:
                 send_batch()
@@ -2389,12 +2654,13 @@ class SmartMoviePush(_PluginBase):
             self.save_data(self._pushed_key, pushed)
             logger.info(f"智能下载影视资源完成：目标 {target}，实际推送 {sent} 部，手动立即运行={test_mode}")
             if sent == 0 and not (self._auto_download and test_mode and selected):
-                self.post_message(
-                    mtype=NotificationType.Plugin,
+                _, result = self._send_telegram_direct(
                     title="智能电影推荐立即运行完成",
                     text=f"本轮未选出电影。\n{diagnostic}",
                     userid=self._telegram_target(),
                 )
+                if not result:
+                    logger.error("本轮未选出电影的通知未送达 Telegram")
         finally:
             self._running_lock.release()
 
@@ -2420,51 +2686,28 @@ class SmartMoviePush(_PluginBase):
 
         if not self._is_telegram_admin(userid, username):
             logger.warning(f"拒绝非管理员操作电影推荐：userid={userid}, username={username}, action={action}")
-            self.post_message(channel=channel, mtype=NotificationType.Manual,
-                              title="无操作权限", text="只有 Telegram 管理员可以操作电影推荐。", userid=userid)
+            self._reply_telegram_action("无操作权限", "只有 Telegram 管理员可以操作电影推荐。", chat_id)
             return
         if action == "disk_ack":
             result = self._ack_disk_guard(key)
-            if result.get("success") and channel and source and message_id:
-                self.chain.delete_message(
-                    channel=channel,
-                    source=source,
-                    message_id=message_id,
-                    chat_id=chat_id,
-                )
-            self.post_message(
-                channel=channel,
-                mtype=NotificationType.Manual,
-                title="硬盘保护",
-                text=result.get("message") or "已处理",
-                userid=userid,
-            )
+            if result.get("success") and source and message_id:
+                self._delete_telegram_message(source, message_id, chat_id)
+            self._reply_telegram_action("硬盘保护", result.get("message") or "已处理", chat_id)
             return
         if action == "download" and not self._enabled:
-            self.post_message(
-                channel=channel,
-                mtype=NotificationType.Manual,
-                title="插件已关闭",
-                text="当前不会提交或加入等候下载；请先在插件页面开启“插件状态”。",
-                userid=userid,
-            )
+            self._reply_telegram_action("插件已关闭",
+                                        "当前不会提交或加入等候下载；请先在插件页面开启“插件状态”。", chat_id)
             return
         if not item:
-            self.post_message(channel=channel, mtype=NotificationType.Manual,
-                              title="操作失败", text="这条推荐已过期，请等待下一轮推荐。", userid=userid)
+            self._reply_telegram_action("操作失败", "这条推荐已过期，请等待下一轮推荐。", chat_id)
             return
 
         # 管理员点击即视为确认：先移除任务并立即撤回原消息，不等待后续下载反馈。
         pending.pop(key, None)
         self.save_data(self._pending_key, pending)
         self._remove_daily_record(key)
-        if channel and source and message_id:
-            deleted = self.chain.delete_message(
-                channel=channel,
-                source=source,
-                message_id=message_id,
-                chat_id=chat_id,
-            )
+        if source and message_id:
+            deleted = self._delete_telegram_message(source, message_id, chat_id)
             if not deleted:
                 logger.warning(f"已接收电影推荐操作，但删除 Telegram 原消息失败：message_id={message_id}")
 
@@ -2493,15 +2736,18 @@ class SmartMoviePush(_PluginBase):
             results[0] if results else None,
         )
         if not context:
-            self.post_message(channel=channel, mtype=NotificationType.Manual,
-                              title="下载失败", text="所选站点中已找不到这条资源。", userid=userid)
+            self._reply_telegram_action("下载失败", "所选站点中已找不到这条资源。", chat_id)
             return
 
         media = context.media_info
+        # 独立机器人按钮不能把 MoviePilot 默认 TG 渠道传给下载链。
+        download_channel = None if source == "__custom_telegram__" else channel
+        download_userid = None if source == "__custom_telegram__" else userid
         with self._queue_lock:
             active = self._active_download_count()
             if self._disk_guard_blocks_new() or active >= self._max_active_downloads:
-                self._enqueue_download(media, context, channel=channel, userid=userid)
+                self._enqueue_download(media, context, channel=download_channel,
+                                       userid=download_userid)
                 logger.info(
                     f"管理员确认后进入等候下载：{media.title_year}，"
                     f"硬盘保护={self._disk_guard_blocks_new()}，活动任务 {active}/{self._max_active_downloads}"
@@ -2509,12 +2755,11 @@ class SmartMoviePush(_PluginBase):
                 return
 
             ok, error = self._submit_download(
-                media, context, channel=channel, userid=userid,
+                media, context, channel=download_channel, userid=download_userid,
                 username="Telegram 智能电影推荐",
             )
         if not ok:
-            self.post_message(channel=channel, mtype=NotificationType.Manual,
-                              title="下载提交失败", text=error or "未知错误", userid=userid)
+            self._reply_telegram_action("下载提交失败", error or "未知错误", chat_id)
             return
 
 
