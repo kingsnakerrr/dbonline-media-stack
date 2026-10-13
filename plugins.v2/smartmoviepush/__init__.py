@@ -2,6 +2,7 @@ import hashlib
 import html
 import math
 import random
+import secrets
 import shutil
 import subprocess
 import threading
@@ -23,6 +24,8 @@ from app.core.event import Event, eventmanager
 from app.core.metainfo import MetaInfo
 from app.core.module import ModuleManager
 from app.db.downloadhistory_oper import DownloadHistoryOper
+from app.db.site_oper import SiteOper
+from app.db.transferhistory_oper import TransferHistoryOper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, MediaType, MessageChannel, NotificationType, SystemConfigKey
@@ -30,10 +33,10 @@ from app.utils.string import StringUtils
 
 
 class SmartMoviePush(_PluginBase):
-    plugin_name = "60分钟推送电影_自用"
-    plugin_desc = "每小时从新片、近期口碑、经典热门和随机发现中筛选 20 部电影推送到 Telegram。"
+    plugin_name = "智能下载影视资源_惹咪之北"
+    plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.7.2"
+    plugin_version = "0.9.8"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -45,9 +48,11 @@ class SmartMoviePush(_PluginBase):
     _auto_download = False
     _onlyonce = False
     _cron = "0 * * * *"
+    _push_interval_minutes = 60
     _limit = 20
     _test_limit = 2
     _site_id = 1
+    _site_ids = [1]
     _new_count = 8
     _recent_count = 4
     _classic_count = 4
@@ -78,6 +83,10 @@ class SmartMoviePush(_PluginBase):
     _daily_messages_key = "daily_messages"
     _download_queue_key = "download_queue"
     _download_history_key = "download_history"
+    _plugin_logs_key = "plugin_logs"
+    _daily_summary_key = "daily_completion_summary"
+    _access_auth_key = "access_auth"
+    _access_sessions_key = "access_sessions"
     _history_backfill_key = "download_history_backfilled_v2"
     _candidate_cursor_key = "candidate_cursor"
     _disk_guard_state_key = "disk_guard_state"
@@ -91,10 +100,26 @@ class SmartMoviePush(_PluginBase):
         self._auto_push = bool(config.get("auto_push", False))
         self._auto_download = bool(config.get("auto_download", False))
         self._onlyonce = bool(config.get("onlyonce", False))
-        self._cron = str(config.get("cron") or "0 * * * *")
+        self._push_interval_minutes = self._normalize_push_interval(
+            config.get("push_interval_minutes") or self._interval_from_cron(config.get("cron"))
+        )
+        self._cron = self._cron_for_interval(self._push_interval_minutes)
         self._limit = max(1, min(int(config.get("limit") or 20), 50))
         self._test_limit = max(1, min(int(config.get("test_limit") or 2), 5))
-        self._site_id = int(config.get("site_id") or 1)
+        raw_site_ids = config.get("site_ids")
+        if not isinstance(raw_site_ids, list):
+            raw_site_ids = str(raw_site_ids or config.get("site_id") or 1).replace(";", ",").split(",")
+        self._site_ids = []
+        for value in raw_site_ids:
+            try:
+                site_id = int(value)
+                if site_id > 0 and site_id not in self._site_ids:
+                    self._site_ids.append(site_id)
+            except (TypeError, ValueError):
+                continue
+        if not self._site_ids:
+            self._site_ids = [1]
+        self._site_id = self._site_ids[0]
         self._new_count = max(0, int(config.get("new_count", 8)))
         self._recent_count = max(0, int(config.get("recent_count", 4)))
         self._classic_count = max(0, int(config.get("classic_count", 4)))
@@ -114,6 +139,8 @@ class SmartMoviePush(_PluginBase):
             self._disk_guard_threshold_gb + 1,
             int(config.get("disk_guard_recover_gb") or 350),
         )
+
+        self._ensure_access_password()
 
         # 旧版本只把下载写进 MoviePilot 下载历史，没有保存到插件页面。
         # 升级时自动补录一次；失败不会写完成标记，下次加载会继续尝试。
@@ -140,9 +167,11 @@ class SmartMoviePush(_PluginBase):
             "auto_download": self._auto_download,
             "onlyonce": False,
             "cron": self._cron,
+            "push_interval_minutes": self._push_interval_minutes,
             "limit": self._limit,
             "test_limit": self._test_limit,
             "site_id": self._site_id,
+            "site_ids": self._site_ids,
             "new_count": self._new_count,
             "recent_count": self._recent_count,
             "classic_count": self._classic_count,
@@ -174,28 +203,14 @@ class SmartMoviePush(_PluginBase):
 
     def get_api(self) -> List[Dict[str, Any]]:
         return [
-            {"path": "/toggle_auto_push", "endpoint": self._api_toggle_auto_push,
-             "methods": ["GET"], "summary": "切换定时推送"},
-            {"path": "/toggle_download_mode", "endpoint": self._api_toggle_download_mode,
-             "methods": ["GET"], "summary": "切换自动/手动下载"},
-            {"path": "/run_once", "endpoint": self._api_run_once,
-             "methods": ["GET"], "summary": "立即试运行"},
-            {"path": "/clear_cache", "endpoint": self._api_clear_cache,
-             "methods": ["GET"], "summary": "清空扫描缓存"},
-            {"path": "/remove_suppressed", "endpoint": self._api_remove_suppressed,
-             "methods": ["GET"], "summary": "恢复单部电影推送"},
-            {"path": "/clear_suppressed", "endpoint": self._api_clear_suppressed,
-             "methods": ["GET"], "summary": "清空不再推送列表"},
-            {"path": "/remove_queue", "endpoint": self._api_remove_queue,
-             "methods": ["GET"], "summary": "删除单个等候下载"},
-            {"path": "/clear_queue", "endpoint": self._api_clear_queue,
-             "methods": ["GET"], "summary": "清空等候下载"},
-            {"path": "/clear_download_history", "endpoint": self._api_clear_download_history,
-             "methods": ["GET"], "summary": "清空下载记录"},
-            {"path": "/backfill_download_history", "endpoint": self._api_backfill_download_history,
-             "methods": ["GET"], "summary": "重新补录插件旧下载记录"},
-            {"path": "/ui_status", "endpoint": self._api_ui_status,
-             "methods": ["GET"], "auth": "bear", "summary": "获取插件界面数据"},
+            {"path": "/auth_check", "endpoint": self._api_auth_check,
+             "methods": ["POST"], "auth": "bear", "summary": "检查插件访问密码会话"},
+            {"path": "/auth_unlock", "endpoint": self._api_auth_unlock,
+             "methods": ["POST"], "auth": "bear", "summary": "使用密码解锁插件"},
+            {"path": "/auth_lock", "endpoint": self._api_auth_lock,
+             "methods": ["POST"], "auth": "bear", "summary": "锁定当前浏览器会话"},
+            {"path": "/secure_status", "endpoint": self._api_secure_status,
+             "methods": ["POST"], "auth": "bear", "summary": "获取受密码保护的插件界面数据"},
             {"path": "/ui_config", "endpoint": self._api_ui_config,
              "methods": ["POST"], "auth": "bear", "summary": "保存 Telegram 覆盖设置"},
             {"path": "/ui_action", "endpoint": self._api_ui_action,
@@ -205,24 +220,20 @@ class SmartMoviePush(_PluginBase):
     def get_service(self) -> List[Dict[str, Any]]:
         if not self._enabled:
             return []
-        try:
-            trigger = CronTrigger.from_crontab(self._cron, timezone=settings.TZ)
-        except Exception as err:
-            logger.error(f"智能电影推送 cron 配置错误：{err}")
-            return []
         return [
             {
                 "id": "SmartMoviePushService",
-                "name": "60分钟推送电影_自用",
-                "trigger": trigger,
+                "name": "智能下载影视资源_惹咪之北",
+                # 固定每 30 分钟唤醒，再由 scheduled_run 按当前设置判断。
+                # 这样在插件页面修改间隔后立即生效，无需重启 MoviePilot。
+                "trigger": CronTrigger.from_crontab("*/30 * * * *", timezone=settings.TZ),
                 "func": self.scheduled_run,
-                "kwargs": {"limit": self._limit, "test_mode": False},
             },
             {
                 "id": "SmartMoviePushMidnightCleanup",
-                "name": "清理当天电影推荐消息",
+                "name": "发送每日入库统计并清理推荐消息",
                 "trigger": CronTrigger.from_crontab("0 0 * * *", timezone=settings.TZ),
-                "func": self.cleanup_daily_messages,
+                "func": self.midnight_maintenance,
             },
             {
                 "id": "SmartMoviePushDownloadQueue",
@@ -239,10 +250,45 @@ class SmartMoviePush(_PluginBase):
         ]
 
     def scheduled_run(self):
-        if not self._auto_push:
-            logger.info("60分钟推送电影已切换为暂停，本轮跳过")
+        if not self._enabled or not self._auto_push:
+            logger.info("智能下载影视资源定时推送已暂停，本轮跳过")
+            return
+        now = datetime.now(tz=pytz.timezone(settings.TZ))
+        minutes_today = now.hour * 60 + now.minute
+        if minutes_today % self._push_interval_minutes != 0:
             return
         self.run_once(limit=self._limit, test_mode=False)
+
+    @staticmethod
+    def _normalize_push_interval(value: Any) -> int:
+        try:
+            interval = int(value or 60)
+        except (TypeError, ValueError):
+            interval = 60
+        return interval if interval in {30, 60, 120, 180, 240, 300} else 60
+
+    @staticmethod
+    def _interval_from_cron(value: Any) -> int:
+        cron = str(value or "").strip()
+        return {
+            "*/30 * * * *": 30,
+            "0 * * * *": 60,
+            "0 */2 * * *": 120,
+            "0 */3 * * *": 180,
+            "0 */4 * * *": 240,
+            "0 */5 * * *": 300,
+        }.get(cron, 60)
+
+    @staticmethod
+    def _cron_for_interval(interval: int) -> str:
+        return {
+            30: "*/30 * * * *",
+            60: "0 * * * *",
+            120: "0 */2 * * *",
+            180: "0 */3 * * *",
+            240: "0 */4 * * *",
+            300: "0 */5 * * *",
+        }.get(interval, "0 * * * *")
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         return [
@@ -281,7 +327,7 @@ class SmartMoviePush(_PluginBase):
                                 "props": {"cols": 12, "md": 3},
                                 "content": [{
                                     "component": "VSwitch",
-                                    "props": {"model": "onlyonce", "label": "立即试推送"},
+                                    "props": {"model": "onlyonce", "label": "立即运行一次"},
                                 }],
                             },
                         ],
@@ -343,7 +389,7 @@ class SmartMoviePush(_PluginBase):
                                 "props": {"cols": 12, "md": 3},
                                 "content": [{
                                     "component": "VTextField",
-                                    "props": {"model": "test_limit", "label": "试推送数量", "type": "number"},
+                                    "props": {"model": "test_limit", "label": "立即运行数量", "type": "number"},
                                 }],
                             },
                             {
@@ -423,7 +469,7 @@ class SmartMoviePush(_PluginBase):
             "content": [
                 {"component": "VAlert", "props": {
                     "type": "info", "variant": "tonal", "class": "mb-4",
-                    "title": "60分钟推送电影_自用",
+                    "title": "智能下载影视资源_惹咪之北",
                     "text": "先完成整轮 TMDB、媒体库和 M-Team 筛选，再一次性集中推送；扫描结果保存在 MoviePilot 自带 SQLite 中。",
                 }},
                 {"component": "VRow", "props": {"dense": True, "class": "mb-4"}, "content": [
@@ -462,7 +508,7 @@ class SmartMoviePush(_PluginBase):
                                       "warning" if self._auto_push else "success"),
                         action_button("改为手动下载" if self._auto_download else "改为自动下载", "toggle_download_mode",
                                       "warning" if not self._auto_download else "primary"),
-                        action_button("立即试推送", "run_once", "success"),
+                        action_button("立即运行", "run_once", "success"),
                         action_button("清空扫描缓存", "clear_cache", "error"),
                     ]},
                     {"component": "div", "props": {"class": "text-caption text-medium-emphasis mt-2"},
@@ -550,10 +596,51 @@ class SmartMoviePush(_PluginBase):
     def _api_run_once(self) -> dict:
         if self._running_lock.locked():
             return {"success": False, "message": "任务正在运行中"}
+        if self._auto_download:
+            blocked_message = ""
+            if self._disk_guard_blocks_new():
+                try:
+                    free_gb = self._bytes_to_gb(self._disk_free_bytes())
+                    blocked_message = (
+                        f"硬盘空间保护已启动：当前剩余 {free_gb}G，"
+                        f"保护线 {self._disk_guard_threshold_gb}G。"
+                    )
+                except Exception:
+                    blocked_message = "硬盘空间保护已启动，当前无法安全读取剩余空间。"
+            else:
+                active = self._active_download_count()
+                if active >= self._max_active_downloads:
+                    blocked_message = (
+                        f"正在下载任务已满：{active}/{self._max_active_downloads}。"
+                    )
+            if blocked_message:
+                text = (
+                    f"{blocked_message}\n"
+                    "本次立即运行已取消：没有扫描、没有推送，也没有加入等候下载。\n"
+                    "请等待下载出现空位或硬盘空间恢复后再运行。"
+                )
+                source, result = self._send_telegram_direct(
+                    title="❌ 电影推荐立即运行失败",
+                    text=text,
+                    userid=self._telegram_target(),
+                    disable_web_page_preview=True,
+                )
+                if not source or not result:
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title="电影推荐立即运行失败",
+                        text=text,
+                        userid=self._telegram_target(),
+                    )
+                logger.warning(f"立即运行前置保护拦截：{blocked_message}")
+                return {"success": False, "message": blocked_message}
         threading.Thread(target=self.run_once,
                          kwargs={"limit": self._test_limit, "test_mode": True},
                          daemon=True).start()
-        return {"success": True, "message": f"已开始试推送 {self._test_limit} 部"}
+        return {
+            "success": True,
+            "message": f"已开始独立运行 {self._test_limit} 部，将按当前下载模式真实执行",
+        }
 
     def _api_clear_cache(self) -> dict:
         self.save_data(self._scan_cache_key, {})
@@ -760,6 +847,8 @@ class SmartMoviePush(_PluginBase):
 
     def disk_guard_tick(self, force_alert: bool = False) -> None:
         """低空间时保留旧下载，暂停之后新增的 JAV/MP qB 任务。"""
+        if not self._enabled:
+            return
         if not self._disk_guard_enabled or not self._disk_guard_lock.acquire(blocking=False):
             return
         try:
@@ -946,29 +1035,56 @@ class SmartMoviePush(_PluginBase):
         finally:
             self._disk_guard_lock.release()
 
+    @staticmethod
+    def _site_options() -> List[dict]:
+        """读取 MoviePilot 已配置站点，供插件页面多选。"""
+        try:
+            options = []
+            for site in SiteOper().list_order_by_pri() or []:
+                site_id = getattr(site, "id", None)
+                if not site_id:
+                    continue
+                name = str(getattr(site, "name", "") or getattr(site, "domain", "") or f"站点 {site_id}")
+                domain = str(getattr(site, "domain", "") or "")
+                options.append({
+                    "title": f"{name} · {domain}" if domain and domain not in name else name,
+                    "value": int(site_id),
+                })
+            return options
+        except Exception as err:
+            logger.warning(f"读取 MoviePilot 站点列表失败：{err}")
+            return []
+
     def _ui_status_data(self) -> dict:
         suppressed = self._load_suppressed()
         cache = self.get_data(self._scan_cache_key)
         queue = self._load_download_queue()
         history = self._load_download_history()
+        active_count, active_items = self._active_download_snapshot()
         return {
             "summary": {
                 "enabled": self._enabled,
                 "auto_push": self._auto_push,
                 "auto_download": self._auto_download,
                 "cron": self._cron,
+                "push_interval_minutes": self._push_interval_minutes,
                 "cache_count": len(cache) if isinstance(cache, dict) else 0,
                 "queue_count": len(queue),
                 "history_count": len(history),
                 "suppressed_count": len(suppressed),
-                "active_downloads": self._active_download_count(),
+                "active_downloads": active_count,
+                "active_download_items": active_items,
                 "max_active_downloads": self._max_active_downloads,
                 "limit": self._limit,
                 "test_limit": self._test_limit,
+                "site_ids": self._site_ids,
+                "site_options": self._site_options(),
+                "min_score": self._min_score,
                 "max_searches": self._max_searches,
             },
             "queue": list(queue),
             "history": list(reversed(history)),
+            "logs": list(reversed(self._load_plugin_logs())),
             "suppressed": [
                 {"tmdb_id": tmdb_id, **item}
                 for tmdb_id, item in sorted(
@@ -989,10 +1105,113 @@ class SmartMoviePush(_PluginBase):
             "disk_scan": self.get_data(self._disk_scan_key) or {},
         }
 
-    def _api_ui_status(self) -> dict:
+    @staticmethod
+    def _password_digest(password: str, salt_hex: str) -> str:
+        return hashlib.pbkdf2_hmac(
+            "sha256",
+            str(password).encode("utf-8"),
+            bytes.fromhex(salt_hex),
+            260_000,
+        ).hex()
+
+    def _ensure_access_password(self) -> None:
+        auth = self.get_data(self._access_auth_key)
+        if isinstance(auth, dict) and auth.get("salt") and auth.get("digest"):
+            return
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        password = "RMZB-" + "".join(secrets.choice(alphabet) for _ in range(12))
+        salt = secrets.token_hex(16)
+        self.save_data(self._access_auth_key, {
+            "salt": salt,
+            "digest": self._password_digest(password, salt),
+            "created_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+        })
+        self.save_data(self._access_sessions_key, [])
+        logger.warning(f"智能下载影视资源_惹咪之北首次访问密码已生成：{password}（请立即妥善保存）")
+
+    def _valid_access_token(self, token: Any) -> bool:
+        raw_token = str(token or "").strip()
+        if not raw_token:
+            return False
+        now = datetime.now(tz=pytz.timezone(settings.TZ))
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        valid = False
+        retained = []
+        for session in self.get_data(self._access_sessions_key) or []:
+            if not isinstance(session, dict):
+                continue
+            expires_at = self._parse_history_time(session.get("expires_at"), pytz.timezone(settings.TZ))
+            if not expires_at or expires_at <= now:
+                continue
+            retained.append(session)
+            if secrets.compare_digest(str(session.get("token_hash") or ""), token_hash):
+                valid = True
+        self.save_data(self._access_sessions_key, retained[-20:])
+        return valid
+
+    def _api_auth_check(self, payload: dict = Body(default={})) -> dict:
+        valid = self._valid_access_token((payload or {}).get("access_token"))
+        return {"success": valid, "unlocked": valid, "message": "已解锁" if valid else "请输入插件访问密码"}
+
+    def _api_auth_unlock(self, payload: dict = Body(default={})) -> dict:
+        password = str((payload or {}).get("password") or "")
+        auth = self.get_data(self._access_auth_key) or {}
+        salt = str(auth.get("salt") or "")
+        expected = str(auth.get("digest") or "")
+        if not salt or not expected:
+            return {"success": False, "message": "插件密码尚未初始化，请重启 MoviePilot"}
+        actual = self._password_digest(password, salt)
+        if not secrets.compare_digest(actual, expected):
+            self._append_plugin_log("访问验证", "插件访问密码输入错误", "warning")
+            return {"success": False, "message": "密码错误"}
+        token = secrets.token_urlsafe(32)
+        expires_at = datetime.now(tz=pytz.timezone(settings.TZ)) + timedelta(days=365)
+        sessions = self.get_data(self._access_sessions_key) or []
+        sessions.append({
+            "token_hash": hashlib.sha256(token.encode("utf-8")).hexdigest(),
+            "created_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+            "expires_at": expires_at.isoformat(timespec="seconds"),
+        })
+        self.save_data(self._access_sessions_key, sessions[-20:])
+        self._append_plugin_log("访问验证", "当前浏览器已成功解锁插件")
+        return {
+            "success": True,
+            "unlocked": True,
+            "access_token": token,
+            "expires_at": expires_at.isoformat(timespec="seconds"),
+            "message": "插件已解锁",
+        }
+
+    def _api_auth_lock(self, payload: dict = Body(default={})) -> dict:
+        raw_token = str((payload or {}).get("access_token") or "")
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest() if raw_token else ""
+        sessions = [
+            session for session in (self.get_data(self._access_sessions_key) or [])
+            if not secrets.compare_digest(str(session.get("token_hash") or ""), token_hash)
+        ]
+        self.save_data(self._access_sessions_key, sessions)
+        return {"success": True, "message": "插件已锁定"}
+
+    def _api_secure_status(self, payload: dict = Body(default={})) -> dict:
+        if not self._valid_access_token((payload or {}).get("access_token")):
+            return {"success": False, "locked": True, "message": "插件未解锁"}
         return {"success": True, "data": self._ui_status_data()}
 
     def _api_ui_config(self, payload: dict = Body(default={})) -> dict:
+        payload = dict(payload or {})
+        if not self._valid_access_token(payload.pop("access_token", "")):
+            return {"success": False, "locked": True, "message": "插件未解锁"}
+        if "enabled" in payload:
+            self._enabled = bool(payload.get("enabled"))
+        if "auto_push" in payload:
+            self._auto_push = bool(payload.get("auto_push"))
+        if "auto_download" in payload:
+            self._auto_download = bool(payload.get("auto_download"))
+        if "push_interval_minutes" in payload:
+            self._push_interval_minutes = self._normalize_push_interval(
+                payload.get("push_interval_minutes")
+            )
+            self._cron = self._cron_for_interval(self._push_interval_minutes)
         if "source" in payload:
             self._telegram_source = str(payload.get("source") or "").strip()
         if "admins_override" in payload:
@@ -1014,6 +1233,20 @@ class SmartMoviePush(_PluginBase):
             self._limit = max(1, min(int(payload.get("limit") or 20), 50))
         if "test_limit" in payload:
             self._test_limit = max(1, min(int(payload.get("test_limit") or 2), 5))
+        if "site_ids" in payload:
+            selected = []
+            for value in payload.get("site_ids") or []:
+                try:
+                    site_id = int(value)
+                    if site_id > 0 and site_id not in selected:
+                        selected.append(site_id)
+                except (TypeError, ValueError):
+                    continue
+            if selected:
+                self._site_ids = selected
+                self._site_id = selected[0]
+        if "min_score" in payload:
+            self._min_score = max(0.0, min(float(payload.get("min_score") or 0), 10.0))
         if "max_active_downloads" in payload:
             self._max_active_downloads = max(
                 1, min(int(payload.get("max_active_downloads") or 20), 100)
@@ -1024,6 +1257,9 @@ class SmartMoviePush(_PluginBase):
         return {"success": True, "message": "插件设置已保存", "data": self._ui_status_data()}
 
     def _api_ui_action(self, payload: dict = Body(default={})) -> dict:
+        payload = dict(payload or {})
+        if not self._valid_access_token(payload.pop("access_token", "")):
+            return {"success": False, "locked": True, "message": "插件未解锁"}
         action = str(payload.get("action") or "")
         if action == "remove_queue":
             result = self._api_remove_queue(str(payload.get("key") or ""))
@@ -1041,6 +1277,10 @@ class SmartMoviePush(_PluginBase):
             result = self._api_run_once()
         elif action == "clear_cache":
             result = self._api_clear_cache()
+        elif action == "clear_logs":
+            count = len(self._load_plugin_logs())
+            self.save_data(self._plugin_logs_key, [])
+            result = {"success": True, "message": f"已清空 {count} 条插件日志"}
         elif action == "backfill_history":
             result = self._api_backfill_download_history()
         elif action == "disk_guard_check":
@@ -1174,13 +1414,13 @@ class SmartMoviePush(_PluginBase):
             except Exception as err:
                 logger.warning(f"TMDB 趋势页读取失败：page={page}, error={err}")
         new_source = trending + discover(
-            "popularity.desc", 5.5, 30, new_floor.isoformat(), rolling_pages
+            "popularity.desc", max(5.5, self._min_score), 30, new_floor.isoformat(), rolling_pages
         )
         recent_source = discover(
-            "popularity.desc", 6.5, 200, recent_floor.isoformat(), random.sample(range(1, 41), 5)
+            "popularity.desc", max(6.5, self._min_score), 200, recent_floor.isoformat(), random.sample(range(1, 41), 5)
         )
         classic_source = discover(
-            "vote_count.desc", 7.0, 800, "", random.sample(range(1, 101), 6)
+            "vote_count.desc", max(7.0, self._min_score), 800, "", random.sample(range(1, 101), 6)
         )
         random_source = []
         for _ in range(5):
@@ -1203,14 +1443,15 @@ class SmartMoviePush(_PluginBase):
             return output
 
         new_movies = unique(new_source, lambda m: bool(
-            self._release_date(m) and new_floor <= self._release_date(m) <= today))
+            self._release_date(m) and new_floor <= self._release_date(m) <= today
+            and float(getattr(m, "vote_average", 0) or 0) >= self._min_score))
         recent_movies = unique(recent_source, lambda m: bool(
             self._release_date(m) and recent_floor <= self._release_date(m) < new_floor
-            and float(getattr(m, "vote_average", 0) or 0) >= 6.5
+            and float(getattr(m, "vote_average", 0) or 0) >= max(6.5, self._min_score)
             and self._vote_count(m) >= 100))
         classic_movies = unique(classic_source, lambda m: bool(
             self._release_date(m) and self._release_date(m) < recent_floor
-            and float(getattr(m, "vote_average", 0) or 0) >= 7.0
+            and float(getattr(m, "vote_average", 0) or 0) >= max(7.0, self._min_score)
             and self._vote_count(m) >= 500))
         random_movies = unique(random_source, lambda m: bool(
             self._release_date(m) and self._release_date(m) <= today
@@ -1274,7 +1515,7 @@ class SmartMoviePush(_PluginBase):
         results = SearchChain().search_by_id(
             tmdbid=media.tmdb_id,
             mtype=MediaType.MOVIE,
-            sites=[self._site_id],
+            sites=self._site_ids,
             cache_local=False,
         ) or []
         return results[0] if results else None
@@ -1290,6 +1531,20 @@ class SmartMoviePush(_PluginBase):
     def _load_download_history(self) -> List[dict]:
         value = self.get_data(self._download_history_key)
         return value if isinstance(value, list) else []
+
+    def _load_plugin_logs(self) -> List[dict]:
+        value = self.get_data(self._plugin_logs_key)
+        return value if isinstance(value, list) else []
+
+    def _append_plugin_log(self, category: str, message: str, level: str = "info") -> None:
+        logs = self._load_plugin_logs()
+        logs.append({
+            "created_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+            "category": str(category or "运行"),
+            "message": str(message or ""),
+            "level": str(level or "info"),
+        })
+        self.save_data(self._plugin_logs_key, logs[-1000:])
 
     @staticmethod
     def _download_history_identity(item: dict) -> str:
@@ -1368,11 +1623,85 @@ class SmartMoviePush(_PluginBase):
             logger.error(f"读取 MoviePilot 正在下载任务失败：{err}")
             return self._max_active_downloads
 
+    @staticmethod
+    def _download_value(item: Any, *keys: str) -> Any:
+        data = item if isinstance(item, dict) else None
+        for key in keys:
+            if data is not None and data.get(key) is not None:
+                return data.get(key)
+            value = getattr(item, key, None)
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _format_speed(value: Any) -> str:
+        if value in (None, ""):
+            return "-"
+        if isinstance(value, str):
+            return value
+        try:
+            speed = float(value)
+            units = ["B/s", "KB/s", "MB/s", "GB/s"]
+            index = 0
+            while speed >= 1024 and index < len(units) - 1:
+                speed /= 1024
+                index += 1
+            return f"{speed:.1f} {units[index]}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _is_plugin_download_row(self, row: Any, history: List[dict]) -> bool:
+        known_hashes = {
+            str(item.get("download_id") or "").strip().lower()
+            for item in history if item.get("download_id")
+        }
+        row_hash = str(self._download_value(
+            row, "download_hash", "hash", "torrent_hash", "infohash", "info_hash"
+        ) or "").strip().lower()
+        if row_hash:
+            return row_hash in known_hashes
+        # 不使用片名/TMDB 模糊匹配，避免把用户手动下载的同名影片算成本插件任务。
+        return str(self._download_value(row, "source", "plugin") or "") == self.__class__.__name__
+
+    def _active_download_snapshot(self) -> Tuple[int, List[dict]]:
+        """仅返回由本插件提交、当前仍在下载的任务实时摘要。"""
+        try:
+            downloads = DownloadChain().downloading() or []
+            history = self._load_download_history()
+            items = []
+            for row in downloads:
+                if not self._is_plugin_download_row(row, history):
+                    continue
+                title = self._download_value(row, "title", "name", "torrent_name") or "未命名任务"
+                progress = self._download_value(row, "progress", "percent", "completion") or 0
+                try:
+                    progress = round(float(progress), 1)
+                except (TypeError, ValueError):
+                    progress = 0
+                if 0 < progress <= 1:
+                    progress = round(progress * 100, 1)
+                speed = self._download_value(
+                    row, "dlspeed", "download_speed", "downloadSpeed", "speed"
+                )
+                items.append({
+                    "title": str(title),
+                    "progress": min(max(progress, 0), 100),
+                    "speed": self._format_speed(speed),
+                    "state": str(self._download_value(row, "state", "status") or "下载中"),
+                    "eta": str(self._download_value(row, "eta", "remaining_time") or "-"),
+                })
+            return len(items), items
+        except Exception as err:
+            logger.error(f"读取 MoviePilot 正在下载详情失败：{err}")
+            return 0, []
+
     def _enqueue_download(self, media: MediaInfo, context: Context,
                           channel: Any = None, userid: Any = None) -> bool:
         queue = self._load_download_queue()
         tmdb_id = str(media.tmdb_id)
         if any(str(item.get("tmdb_id")) == tmdb_id for item in queue):
+            logger.info(f"电影已在顺序下载队列，忽略重复入队和重复通知：{media.title_year}")
             return False
         queue.append({
             "key": hashlib.sha1(f"{tmdb_id}|{datetime.now().isoformat()}".encode()).hexdigest()[:12],
@@ -1397,10 +1726,11 @@ class SmartMoviePush(_PluginBase):
             "submitted_at": datetime.now().isoformat(timespec="seconds"),
         })
         self.save_data(self._download_history_key, history[-1000:])
+        self._append_plugin_log("提交下载", f"{media.title_year} 已提交到 MoviePilot，任务 {download_id}")
 
     def _submit_download(self, media: MediaInfo, context: Context,
                          channel: Any = None, userid: Any = None,
-                         username: str = "60分钟推送电影_自用") -> Tuple[bool, Optional[str]]:
+                         username: str = "智能下载影视资源_惹咪之北") -> Tuple[bool, Optional[str]]:
         if self._disk_guard_blocks_new():
             return False, "硬盘保护中，候选已保留等候，不向 qB 添加新种子"
         download_id, error = DownloadChain().download_single(
@@ -1419,6 +1749,8 @@ class SmartMoviePush(_PluginBase):
 
     def process_download_queue(self) -> None:
         """每分钟检查空位，严格按入队顺序提交，活动下载永不超过设置值。"""
+        if not self._enabled:
+            return
         if self._disk_guard_blocks_new():
             queue_count = len(self._load_download_queue())
             if queue_count:
@@ -1445,14 +1777,14 @@ class SmartMoviePush(_PluginBase):
                 try:
                     results = SearchChain().search_by_id(
                         tmdbid=int(item["tmdb_id"]), mtype=MediaType.MOVIE,
-                        sites=[self._site_id], cache_local=False,
+                        sites=self._site_ids, cache_local=False,
                     ) or []
                     context = next(
                         (ctx for ctx in results if self._torrent_identity(ctx) == item.get("torrent_identity")),
                         results[0] if results else None,
                     )
                     if not context:
-                        raise RuntimeError("M-Team 中已找不到可下载资源")
+                        raise RuntimeError("所选站点中已找不到可下载资源")
                     media = context.media_info
                     ok, error = self._submit_download(
                         media, context, channel=None, userid=item.get("userid"),
@@ -1592,20 +1924,31 @@ class SmartMoviePush(_PluginBase):
 
     @eventmanager.register(EventType.TransferComplete)
     def transfer_complete(self, event: Event):
-        """影片下载并整理完成后，撤回该影片所有插件 Telegram 推送。"""
+        """本插件影片下载并整理完成后，记录入库并撤回对应 Telegram 推送。"""
         data = event.event_data or {}
         media = data.get("mediainfo")
-        tmdb_id = getattr(media, "tmdb_id", None) if media else None
-        download_hash = str(data.get("download_hash") or "")
-        if not tmdb_id and download_hash:
-            history = next(
-                (item for item in reversed(self._load_download_history())
-                 if str(item.get("download_id") or "") == download_hash),
-                None,
-            )
-            tmdb_id = history.get("tmdb_id") if history else None
-        if not tmdb_id:
+        download_hash = str(data.get("download_hash") or "").strip().lower()
+        if not download_hash:
             return
+        history = self._load_download_history()
+        history_item = next(
+            (item for item in reversed(history)
+             if str(item.get("download_id") or "").strip().lower() == download_hash),
+            None,
+        )
+        # TransferComplete 是全局事件；哈希不属于插件时绝不能统计或清理消息。
+        if not history_item:
+            return
+        tmdb_id = history_item.get("tmdb_id") or (getattr(media, "tmdb_id", None) if media else None)
+        title = getattr(media, "title_year", None) if media else None
+        if title:
+            history_item["title"] = str(title)
+        history_item["completed_at"] = datetime.now(
+            tz=pytz.timezone(settings.TZ)
+        ).isoformat(timespec="seconds")
+        history_item["status"] = "completed"
+        self.save_data(self._download_history_key, history[-1000:])
+        self._append_plugin_log("入库完成", f"{history_item.get('title') or f'TMDB {tmdb_id}'} 已整理入库")
         deleted, failed = self._delete_download_messages(tmdb_id)
         if deleted or failed:
             logger.info(
@@ -1613,9 +1956,133 @@ class SmartMoviePush(_PluginBase):
                 f"已删除 {deleted} 条，待重试 {failed} 条"
             )
 
+    @staticmethod
+    def _parse_history_time(value: Any, timezone) -> Optional[datetime]:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+            if parsed.tzinfo is None:
+                return timezone.localize(parsed)
+            return parsed.astimezone(timezone)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _format_daily_movie_rows(items: List[dict]) -> str:
+        if not items:
+            return "本日没有本插件提交下载的电影。"
+        entries = []
+        for index, item in enumerate(items, 1):
+            movie_title = item.get("title") or f"TMDB {item.get('tmdb_id', '')}"
+            library_mark = "  ✓ 已入库" if item.get("completed_at") else ""
+            entries.append(f"{index}. {movie_title}{library_mark}")
+        rows = []
+        for index in range(0, len(entries), 2):
+            pair = entries[index:index + 2]
+            rows.append("　│　".join(pair))
+        return "\n".join(rows)
+
+    def send_daily_completion_summary(self) -> None:
+        """午夜统计上一自然日本插件提交的电影，并标记其中已经入库的影片。"""
+        timezone = pytz.timezone(settings.TZ)
+        now = datetime.now(tz=timezone)
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start = end - timedelta(days=1)
+        summary_date = start.strftime("%Y.%m.%d")
+        previous = self.get_data(self._daily_summary_key) or {}
+        if previous.get("date") == summary_date:
+            return
+
+        # 回查 MoviePilot 整理历史：即使插件升级/重启期间错过完成事件，也能按
+        # 本插件保存的下载哈希补齐完成时间，保证整天统计完整且不混入外部任务。
+        history = self._load_download_history()
+        history_changed = False
+        transfer_oper = TransferHistoryOper()
+        for item in history:
+            if item.get("completed_at") or not item.get("download_id"):
+                continue
+            try:
+                transfers = transfer_oper.list_by_hash(str(item.get("download_id"))) or []
+                successful = [row for row in transfers if bool(getattr(row, "status", False))]
+                if not successful:
+                    continue
+                transfer = min(successful, key=lambda row: str(getattr(row, "date", "") or ""))
+                completed_at = self._parse_history_time(getattr(transfer, "date", None), timezone)
+                if not completed_at:
+                    continue
+                title = str(getattr(transfer, "title", "") or "").strip()
+                year = str(getattr(transfer, "year", "") or "").strip()
+                if title:
+                    item["title"] = f"{title} ({year})" if year and year not in title else title
+                item["completed_at"] = completed_at.isoformat(timespec="seconds")
+                item["status"] = "completed"
+                history_changed = True
+            except Exception as err:
+                logger.warning(f"回查插件下载整理记录失败：{item.get('title')}：{err}")
+        if history_changed:
+            self.save_data(self._download_history_key, history[-1000:])
+
+        downloaded = []
+        seen = set()
+        for item in history:
+            submitted_at = self._parse_history_time(item.get("submitted_at"), timezone)
+            if not submitted_at or not (start <= submitted_at < end):
+                continue
+            identity = str(item.get("download_id") or item.get("tmdb_id") or item.get("title"))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            downloaded.append(item)
+        downloaded.sort(key=lambda item: str(item.get("submitted_at") or ""))
+        completed_count = sum(1 for item in downloaded if item.get("completed_at"))
+
+        title = (
+            f"📊 {summary_date}｜下载 {len(downloaded)} 部｜"
+            f"已入库 {completed_count} 部"
+        )
+        text = (
+            f"日期：{summary_date}\n"
+            f"本插件下载：{len(downloaded)} 部\n"
+            f"其中已入库：{completed_count} 部\n\n"
+            f"{self._format_daily_movie_rows(downloaded)}\n\n"
+            "✓ 仅标记已经由 MoviePilot 完成整理入库的电影；未入库影片不加标记。"
+        )
+        source, result = self._send_telegram_direct(
+            title=title,
+            text=text,
+            userid=self._telegram_target(),
+            disable_web_page_preview=True,
+        )
+        success = bool(source and result)
+        if not success:
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title=title,
+                text=text,
+                userid=self._telegram_target(),
+            )
+        self.save_data(self._daily_summary_key, {
+            "date": summary_date,
+            "count": len(downloaded),
+            "completed_count": completed_count,
+            "sent_at": now.isoformat(timespec="seconds"),
+            "direct_success": success,
+        })
+        detail = f"{summary_date} 下载 {len(downloaded)} 部，已入库 {completed_count} 部"
+        if downloaded:
+            detail += "：" + "、".join(
+                f"{item.get('title') or ''}{'（已入库）' if item.get('completed_at') else ''}"
+                for item in downloaded
+            )
+        self._append_plugin_log("每日统计", detail, "success" if success else "warning")
+        logger.info(f"插件每日下载/入库统计已发送：{detail}")
+
+    def midnight_maintenance(self) -> None:
+        self.send_daily_completion_summary()
+        self.cleanup_daily_messages()
+
     def cleanup_daily_messages(self) -> None:
         """午夜撤回以前的推荐；未点击的电影同时解除推送去重，可在以后随机再次出现。"""
-        today = datetime.now().date()
+        today = datetime.now(tz=pytz.timezone(settings.TZ)).date()
         records = self._load_daily_messages()
         pending = self._load_pending()
         pushed = self._load_recent_pushes()
@@ -1712,7 +2179,7 @@ class SmartMoviePush(_PluginBase):
                 "callback_data": f"[PLUGIN]{self.__class__.__name__}|suppress|{key}",
             }]]
         source, result = self._send_telegram_direct(
-            title="🎬 60分钟推送电影_自用",
+            title="🎬 智能下载影视资源_惹咪之北",
             text="\n".join(lines),
             image=media.get_poster_image(),
             link=media.detail_link,
@@ -1726,21 +2193,33 @@ class SmartMoviePush(_PluginBase):
         self._record_daily_message(key, media, source, result, auto_downloaded or queued)
 
     def _auto_download_movie(self, media: MediaInfo, context: Context,
-                             force_queue: bool = False) -> Tuple[bool, bool]:
+                             force_queue: bool = False,
+                             allow_queue: bool = True) -> Tuple[bool, bool]:
         if force_queue or self._disk_guard_blocks_new():
-            self._enqueue_download(media, context)
+            if not allow_queue:
+                logger.warning(f"立即运行没有可用下载位，跳过且不排队：{media.title_year}")
+                return False, False
+            if not self._enqueue_download(media, context):
+                return False, False
             self._push_movie(media, context, queued=True)
             return True, False
         ok, error = self._submit_download(media, context)
         if not ok:
+            if not allow_queue:
+                logger.error(f"立即运行提交 {media.title_year} 失败且不排队：{error or '未知错误'}")
+                return False, False
             logger.error(f"自动下载 {media.title_year} 暂时失败，转入队列：{error or '未知错误'}")
-            self._enqueue_download(media, context)
+            if not self._enqueue_download(media, context):
+                return False, False
             self._push_movie(media, context, queued=True)
             return True, False
         self._push_movie(media, context, auto_downloaded=True)
         return True, True
 
     def run_once(self, limit: Optional[int] = None, test_mode: bool = False):
+        if not self._enabled:
+            logger.info("智能电影推送插件已关闭，本轮不执行")
+            return
         if not self._running_lock.acquire(blocking=False):
             logger.warning("智能电影推送已有任务运行，本轮跳过")
             return
@@ -1821,21 +2300,31 @@ class SmartMoviePush(_PluginBase):
             # 扫描阶段完成后才集中发送，避免用户在漫长搜索过程中零散收到消息。
             diagnostic = (
                 f"TMDB候选 {stats['tmdb']}，已推送跳过 {stats['pushed']}，不再推送 {stats['suppressed']}，"
-                f"缓存跳过 {stats['cached']}，媒体库已有 {stats['library']}，查询M-Team {stats['searched']}，"
+                f"缓存跳过 {stats['cached']}，媒体库已有 {stats['library']}，查询站点 {stats['searched']}，"
                 f"无资源/未命中过滤 {stats['no_resource']}，异常 {stats['errors']}，选中 {len(selected)}"
             )
             logger.info(f"电影扫描完成：{diagnostic}；开始集中推送")
             sent = 0
 
-            def send_batch(auto_slots: int = 0) -> None:
+            def send_batch(auto_slots: int = 0, allow_queue: bool = True) -> None:
                 nonlocal sent
                 auto_submitted = 0
                 for media, best in selected:
                     tmdb_id = str(media.tmdb_id)
                     try:
+                        # 手动“立即运行”与定时开关相互独立，但执行与定时任务
+                        # 完全相同：自动下载模式下真实提交下载；达到并发上限
+                        # 或触发硬盘保护时进入等候队列。
                         if self._auto_download:
+                            # 手动立即运行是一次有严格数量上限的实际测试。
+                            # 没有空位的项目不能进入长期队列，否则用户只点一次
+                            # “运行 5 部”，后续却会随着空位不断继续下载。
+                            if not allow_queue and auto_submitted >= auto_slots:
+                                break
                             handled, submitted = self._auto_download_movie(
-                                media, best, force_queue=auto_submitted >= auto_slots
+                                media, best,
+                                force_queue=allow_queue and auto_submitted >= auto_slots,
+                                allow_queue=allow_queue,
                             )
                             if not handled:
                                 continue
@@ -1852,18 +2341,47 @@ class SmartMoviePush(_PluginBase):
             if self._auto_download:
                 # 锁住“读活动数→批量提交”全过程，防止手动点击和队列补位同时越过 20 部上限。
                 with self._queue_lock:
-                    slots = max(0, self._max_active_downloads - self._active_download_count())
-                    send_batch(slots)
+                    active = self._active_download_count()
+                    slots = max(0, self._max_active_downloads - active)
+                    send_batch(slots, allow_queue=not test_mode)
+                if test_mode and len(selected) > sent:
+                    skipped = len(selected) - sent
+                    if slots <= 0:
+                        notice = (
+                            f"正在下载任务已满：{active}/{self._max_active_downloads}。\n"
+                            f"本次立即运行未提交电影，选中的 {len(selected)} 部没有加入等候队列。"
+                        )
+                        title = "❌ 电影推荐立即运行失败"
+                    else:
+                        notice = (
+                            f"立即运行目标 {target} 部，当前已有 {active}/{self._max_active_downloads} 部正在下载。\n"
+                            f"本次实际提交 {sent} 部；受同时下载上限限制，另外 {skipped} 部没有加入等候队列。"
+                        )
+                        title = "⚠️ 电影推荐立即运行受限"
+                    source, result = self._send_telegram_direct(
+                        title=title,
+                        text=notice,
+                        userid=self._telegram_target(),
+                        disable_web_page_preview=True,
+                    )
+                    if not source or not result:
+                        self.post_message(
+                            mtype=NotificationType.Plugin,
+                            title=title.lstrip("❌⚠️ "),
+                            text=notice,
+                            userid=self._telegram_target(),
+                        )
+                    logger.warning(notice.replace("\n", " "))
             else:
                 send_batch()
 
             self.save_data(self._scan_cache_key, scan_cache)
             self.save_data(self._pushed_key, pushed)
-            logger.info(f"60分钟推送电影完成：目标 {target}，实际推送 {sent} 部，试运行={test_mode}")
-            if sent == 0:
+            logger.info(f"智能下载影视资源完成：目标 {target}，实际推送 {sent} 部，手动立即运行={test_mode}")
+            if sent == 0 and not (self._auto_download and test_mode and selected):
                 self.post_message(
                     mtype=NotificationType.Plugin,
-                    title="智能电影推荐试运行完成",
+                    title="智能电影推荐立即运行完成",
                     text=f"本轮未选出电影。\n{diagnostic}",
                     userid=self._telegram_target(),
                 )
@@ -1912,6 +2430,15 @@ class SmartMoviePush(_PluginBase):
                 userid=userid,
             )
             return
+        if action == "download" and not self._enabled:
+            self.post_message(
+                channel=channel,
+                mtype=NotificationType.Manual,
+                title="插件已关闭",
+                text="当前不会提交或加入等候下载；请先在插件页面开启“插件状态”。",
+                userid=userid,
+            )
+            return
         if not item:
             self.post_message(channel=channel, mtype=NotificationType.Manual,
                               title="操作失败", text="这条推荐已过期，请等待下一轮推荐。", userid=userid)
@@ -1948,7 +2475,7 @@ class SmartMoviePush(_PluginBase):
         results = SearchChain().search_by_id(
             tmdbid=int(item["tmdb_id"]),
             mtype=MediaType.MOVIE,
-            sites=[self._site_id],
+            sites=self._site_ids,
             cache_local=False,
         ) or []
         context = next(
@@ -1957,7 +2484,7 @@ class SmartMoviePush(_PluginBase):
         )
         if not context:
             self.post_message(channel=channel, mtype=NotificationType.Manual,
-                              title="下载失败", text="M-Team 中已找不到这条资源。", userid=userid)
+                              title="下载失败", text="所选站点中已找不到这条资源。", userid=userid)
             return
 
         media = context.media_info

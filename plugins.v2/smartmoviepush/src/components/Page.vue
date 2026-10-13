@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -8,26 +8,42 @@ const props = defineProps({
 const loading = ref(false)
 const error = ref('')
 const message = ref('')
+const accessReady = ref(false)
+const accessPassword = ref('')
+const accessToken = ref('')
+const accessTokenKey = 'smartmoviepush_access_token'
 const dialog = ref('')
+const dialogOpen = computed({
+  get: () => Boolean(dialog.value),
+  set: value => { if (!value) dialog.value = '' },
+})
 const queueSearch = ref('')
 const historySearch = ref('')
 const suppressedSearch = ref('')
+const logSearch = ref('')
 const pageSizes = [20, 50, 100]
 const state = ref({
-  summary: {}, queue: [], history: [], suppressed: [],
+  summary: {}, queue: [], history: [], suppressed: [], logs: [],
   telegram: { source: '', admins_override: '', chat_id_override: '', sources: [] },
   disk_guard: { enabled: true, active: false, free_gb: 0, threshold_gb: 300, recover_gb: 350, waiting: [] },
 })
 const telegramForm = ref({ source: '', admins_override: '', chat_id_override: '' })
 const diskForm = ref({ disk_guard_enabled: true, disk_guard_path: '/home', disk_guard_threshold_gb: 300, disk_guard_recover_gb: 350 })
-const pushForm = ref({ limit: 20, test_limit: 2, max_active_downloads: 20, max_searches: 80 })
+const pushForm = ref({ limit: 20, test_limit: 2, max_active_downloads: 20, max_searches: 80, site_ids: [], min_score: 6 })
+const controlForm = ref({ enabled: true, auto_push: false, auto_download: false, push_interval_minutes: 60 })
+const intervalItems = [30, 60, 120, 180, 240, 300].map(value => ({ title: `${value} 分钟`, value }))
+const downloadModeItems = [
+  { title: '自动下载', value: true },
+  { title: '手动确认', value: false },
+]
 
 const unwrap = response => response?.data?.data ?? response?.data ?? response
 const envelope = response => (response?.success !== undefined ? response : (response?.data ?? response))
 
-function applyState(data) {
+function applyState(data, syncForms = true) {
   if (!data) return
   state.value = data
+  if (!syncForms) return
   telegramForm.value = {
     source: data.telegram?.source || '',
     admins_override: data.telegram?.admins_override || '',
@@ -44,18 +60,33 @@ function applyState(data) {
     test_limit: data.summary?.test_limit || 2,
     max_active_downloads: data.summary?.max_active_downloads || 20,
     max_searches: data.summary?.max_searches || 80,
+    site_ids: data.summary?.site_ids || [],
+    min_score: data.summary?.min_score ?? 6,
+  }
+  controlForm.value = {
+    enabled: data.summary?.enabled !== false,
+    auto_push: Boolean(data.summary?.auto_push),
+    auto_download: Boolean(data.summary?.auto_download),
+    push_interval_minutes: data.summary?.push_interval_minutes || 60,
   }
 }
 
-async function loadStatus() {
-  loading.value = true
-  error.value = ''
+async function loadStatus(silent = false) {
+  if (!accessToken.value) return
+  if (!silent) loading.value = true
+  if (!silent) error.value = ''
   try {
-    applyState(unwrap(await props.api.get('plugin/SmartMoviePush/ui_status')))
+    const response = await props.api.post('plugin/SmartMoviePush/secure_status', { access_token: accessToken.value })
+    const body = envelope(response)
+    if (body?.locked || body?.success === false) {
+      lockLocally()
+      return
+    }
+    applyState(unwrap(response), !silent)
   } catch (err) {
     error.value = err?.message || '加载失败'
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -64,8 +95,9 @@ async function runAction(action, extra = {}) {
   error.value = ''
   message.value = ''
   try {
-    const response = await props.api.post('plugin/SmartMoviePush/ui_action', { action, ...extra })
+    const response = await props.api.post('plugin/SmartMoviePush/ui_action', { action, ...extra, access_token: accessToken.value })
     const body = envelope(response)
+    if (body?.locked) { lockLocally(); return }
     message.value = body?.message || '操作完成'
     applyState(body?.data)
   } catch (err) {
@@ -80,9 +112,28 @@ async function saveTelegram() {
   error.value = ''
   message.value = ''
   try {
-    const response = await props.api.post('plugin/SmartMoviePush/ui_config', telegramForm.value)
+    const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...telegramForm.value, access_token: accessToken.value })
     const body = envelope(response)
+    if (body?.locked) { lockLocally(); return }
     message.value = body?.message || 'Telegram 设置已保存'
+    applyState(body?.data)
+  } catch (err) {
+    error.value = err?.message || '保存失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function saveControlSettings(extra = {}) {
+  Object.assign(controlForm.value, extra)
+  loading.value = true
+  error.value = ''
+  message.value = ''
+  try {
+    const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...controlForm.value, access_token: accessToken.value })
+    const body = envelope(response)
+    if (body?.locked) { lockLocally(); return }
+    message.value = body?.message || '控制设置已保存'
     applyState(body?.data)
   } catch (err) {
     error.value = err?.message || '保存失败'
@@ -96,8 +147,9 @@ async function saveDiskGuard() {
   error.value = ''
   message.value = ''
   try {
-    const response = await props.api.post('plugin/SmartMoviePush/ui_config', diskForm.value)
+    const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...diskForm.value, access_token: accessToken.value })
     const body = envelope(response)
+    if (body?.locked) { lockLocally(); return }
     message.value = body?.message || '硬盘保护设置已保存'
     applyState(body?.data)
   } catch (err) {
@@ -112,8 +164,9 @@ async function savePushSettings() {
   error.value = ''
   message.value = ''
   try {
-    const response = await props.api.post('plugin/SmartMoviePush/ui_config', pushForm.value)
+    const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...pushForm.value, access_token: accessToken.value })
     const body = envelope(response)
+    if (body?.locked) { lockLocally(); return }
     message.value = body?.message || '推送与下载设置已保存'
     applyState(body?.data)
   } catch (err) {
@@ -145,8 +198,109 @@ const diskHeaders = [
   { title: '分类', key: 'category', width: 130 },
   { title: '暂停时间', key: 'added_at', width: 190 },
 ]
+const activeHeaders = [
+  { title: '影片', key: 'title' },
+  { title: '进度', key: 'progress', width: 240 },
+  { title: '实时速度', key: 'speed', width: 150 },
+  { title: '状态', key: 'state', width: 120 },
+  { title: '剩余时间', key: 'eta', width: 120 },
+]
+const logHeaders = [
+  { title: '时间', key: 'created_at', width: 210 },
+  { title: '类型', key: 'category', width: 130 },
+  { title: '内容', key: 'message' },
+]
 
-onMounted(loadStatus)
+let refreshTimer
+let messageTimer
+let errorTimer
+watch(message, value => {
+  window.clearTimeout(messageTimer)
+  if (value) messageTimer = window.setTimeout(() => { message.value = '' }, 3000)
+})
+watch(error, value => {
+  window.clearTimeout(errorTimer)
+  if (value) errorTimer = window.setTimeout(() => { error.value = '' }, 3000)
+})
+function lockLocally() {
+  window.localStorage.removeItem(accessTokenKey)
+  window.clearInterval(refreshTimer)
+  accessToken.value = ''
+  accessReady.value = false
+  dialog.value = ''
+}
+
+function startRefresh() {
+  window.clearInterval(refreshTimer)
+  refreshTimer = window.setInterval(() => loadStatus(true), 5000)
+}
+
+async function checkAccess() {
+  const token = window.localStorage.getItem(accessTokenKey) || ''
+  if (!token) return
+  loading.value = true
+  try {
+    const response = await props.api.post('plugin/SmartMoviePush/auth_check', { access_token: token })
+    const body = envelope(response)
+    if (!body?.success || !body?.unlocked) {
+      lockLocally()
+      return
+    }
+    accessToken.value = token
+    accessReady.value = true
+    await loadStatus()
+    startRefresh()
+  } catch (err) {
+    error.value = err?.message || '验证插件访问权限失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function unlockAccess() {
+  if (!accessPassword.value) {
+    error.value = '请输入插件访问密码'
+    return
+  }
+  loading.value = true
+  error.value = ''
+  try {
+    const response = await props.api.post('plugin/SmartMoviePush/auth_unlock', { password: accessPassword.value })
+    const body = envelope(response)
+    if (!body?.success || !body?.access_token) {
+      error.value = body?.message || '密码错误'
+      return
+    }
+    accessToken.value = body.access_token
+    window.localStorage.setItem(accessTokenKey, body.access_token)
+    accessPassword.value = ''
+    accessReady.value = true
+    message.value = '插件已解锁'
+    await loadStatus()
+    startRefresh()
+  } catch (err) {
+    error.value = err?.message || '解锁失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function lockAccess() {
+  try {
+    await props.api.post('plugin/SmartMoviePush/auth_lock', { access_token: accessToken.value })
+  } finally {
+    lockLocally()
+  }
+}
+
+onMounted(async () => {
+  await checkAccess()
+})
+onUnmounted(() => {
+  window.clearInterval(refreshTimer)
+  window.clearTimeout(messageTimer)
+  window.clearTimeout(errorTimer)
+})
 </script>
 
 <template>
@@ -154,100 +308,142 @@ onMounted(loadStatus)
     <VAlert v-if="error" type="error" variant="tonal" class="mb-3" closable>{{ error }}</VAlert>
     <VAlert v-if="message" type="success" variant="tonal" class="mb-3" closable>{{ message }}</VAlert>
 
-    <VRow dense class="mb-3">
-      <VCol cols="12" md="3"><VCard variant="tonal" color="success" class="pa-4 h-100"><div class="text-caption">插件状态</div><div class="text-h6 font-weight-bold">{{ summary.enabled ? '已启用' : '已关闭' }}</div></VCard></VCol>
-      <VCol cols="12" md="3"><VCard variant="tonal" color="primary" class="pa-4 h-100"><div class="text-caption">定时推送</div><div class="text-h6 font-weight-bold">{{ summary.auto_push ? summary.cron : '已暂停' }}</div></VCard></VCol>
-      <VCol cols="12" md="3"><VCard variant="tonal" color="warning" class="pa-4 h-100"><div class="text-caption">下载模式</div><div class="text-h6 font-weight-bold">{{ summary.auto_download ? '自动下载' : '手动确认' }}</div></VCard></VCol>
-      <VCol cols="12" md="3"><VCard variant="tonal" color="info" class="pa-4 h-100"><div class="text-caption">正在下载</div><div class="text-h6 font-weight-bold">{{ summary.active_downloads || 0 }}/{{ summary.max_active_downloads || 20 }}</div></VCard></VCol>
-    </VRow>
-
-    <VCard variant="outlined" class="pa-4 mb-4">
-      <div class="text-h6 mb-3">快捷控制</div>
-      <VBtn class="mr-2 mb-2" variant="tonal" :loading="loading" @click="runAction('toggle_auto_push')">{{ summary.auto_push ? '暂停定时推送' : '开启定时推送' }}</VBtn>
-      <VBtn class="mr-2 mb-2" variant="tonal" color="primary" :loading="loading" @click="runAction('toggle_download_mode')">{{ summary.auto_download ? '改为手动下载' : '改为自动下载' }}</VBtn>
-      <VBtn class="mr-2 mb-2" variant="tonal" color="success" :loading="loading" @click="runAction('run_once')">立即试推送</VBtn>
-      <VBtn class="mr-2 mb-2" variant="tonal" color="error" :loading="loading" @click="runAction('clear_cache')">清空扫描缓存</VBtn>
-      <VBtn class="mb-2" variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus" />
+    <VCard v-if="!accessReady" variant="tonal" color="primary" class="access-lock-card pa-6 mx-auto mt-8">
+      <div class="d-flex align-center ga-3 mb-4">
+        <VAvatar color="primary" variant="tonal"><VIcon icon="mdi-lock" /></VAvatar>
+        <div>
+          <div class="text-h6 font-weight-bold">智能下载影视资源_惹咪之北</div>
+          <div class="text-body-2 text-medium-emphasis">此插件受独立密码保护，验证成功后当前浏览器会记住。</div>
+        </div>
+      </div>
+      <VTextField v-model="accessPassword" label="插件访问密码" type="password" autocomplete="current-password" prepend-inner-icon="mdi-key" autofocus :disabled="loading" @keyup.enter="unlockAccess" />
+      <VBtn color="primary" block size="large" :loading="loading" @click="unlockAccess">解锁插件</VBtn>
     </VCard>
+
+    <template v-else>
+    <div class="status-grid mb-3">
+      <div class="status-item">
+        <VCard variant="tonal" :color="controlForm.enabled ? 'success' : 'secondary'" class="pa-4 h-100 status-card">
+          <div class="d-flex align-center justify-space-between ga-3">
+            <div><div class="text-caption">插件状态</div><div class="text-h6 font-weight-bold">{{ controlForm.enabled ? '已启用' : '已关闭' }}</div></div>
+            <VSwitch v-model="controlForm.enabled" color="success" hide-details :loading="loading" @update:model-value="value => saveControlSettings({ enabled: value })" />
+          </div>
+        </VCard>
+      </div>
+      <div class="status-item">
+        <VCard variant="tonal" color="primary" class="pa-4 h-100 status-card">
+          <div class="d-flex align-center justify-space-between mb-2"><div><div class="text-caption">定时推送</div><div class="text-h6 font-weight-bold">{{ controlForm.auto_push ? '已开启' : '已暂停' }}</div></div><VSwitch v-model="controlForm.auto_push" color="primary" hide-details :disabled="!controlForm.enabled" @update:model-value="value => saveControlSettings({ auto_push: value })" /></div>
+          <VSelect v-model="controlForm.push_interval_minutes" :items="intervalItems" density="compact" label="推送间隔" hide-details :disabled="!controlForm.enabled" @update:model-value="value => saveControlSettings({ push_interval_minutes: value })" />
+        </VCard>
+      </div>
+      <div class="status-item">
+        <VCard variant="tonal" color="warning" class="pa-4 h-100 status-card">
+          <div class="text-caption mb-2">下载模式</div>
+          <VSelect v-model="controlForm.auto_download" :items="downloadModeItems" density="compact" hide-details :disabled="!controlForm.enabled" @update:model-value="value => saveControlSettings({ auto_download: value })" />
+        </VCard>
+      </div>
+      <div class="status-item">
+        <VCard variant="tonal" color="info" class="pa-4 h-100 list-card status-card" @click="dialog = 'active'">
+          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">正在下载（点击看实时详情）</div><div class="text-h6 font-weight-bold">{{ summary.active_downloads || 0 }}/{{ summary.max_active_downloads || 20 }}</div></div><VIcon icon="mdi-chevron-right" /></div>
+        </VCard>
+      </div>
+      <div class="status-item">
+        <VCard variant="tonal" color="secondary" class="pa-4 h-100 list-card status-card" @click="dialog = 'queue'">
+          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">等候下载</div><div class="text-h6 font-weight-bold">{{ state.queue.length }}</div><div class="text-caption mt-1">搜索、取消任务或批量清空</div></div><VIcon icon="mdi-chevron-right" /></div>
+        </VCard>
+      </div>
+      <div class="status-item">
+        <VCard variant="tonal" color="primary" class="pa-4 h-100 list-card status-card" @click="dialog = 'history'">
+          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">插件下载记录</div><div class="text-h6 font-weight-bold">{{ state.history.length }}</div><div class="text-caption mt-1">搜索和分页查看记录</div></div><VIcon icon="mdi-chevron-right" /></div>
+        </VCard>
+      </div>
+      <div class="status-item">
+        <VCard variant="tonal" color="error" class="pa-4 h-100 list-card status-card" @click="dialog = 'suppressed'">
+          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">不再推送列表</div><div class="text-h6 font-weight-bold">{{ state.suppressed.length }}</div><div class="text-caption mt-1">搜索、取消排除或批量清空</div></div><VIcon icon="mdi-chevron-right" /></div>
+        </VCard>
+      </div>
+    </div>
+
+    <div class="status-secondary-grid mb-3">
+      <VCard variant="tonal" :color="diskGuard.active ? 'error' : 'success'" class="pa-3 disk-guard-card compact-top-card">
+        <div class="d-flex align-center justify-space-between ga-2 mb-2">
+          <div class="min-w-0">
+            <div class="text-subtitle-1 font-weight-bold">硬盘空间保护</div>
+            <div class="text-caption text-truncate">{{ diskGuard.active ? '保护中：新 JAV/MP 种子暂停等候' : '正常：允许添加新种子' }}</div>
+          </div>
+          <div class="text-right text-no-wrap">
+            <div class="text-h6 font-weight-bold">剩余 {{ diskGuard.free_gb ?? 0 }}G</div>
+            <div class="text-caption">暂停 {{ diskGuard.waiting_count || 0 }} 个</div>
+          </div>
+        </div>
+        <div class="disk-controls-grid">
+          <VSwitch v-model="diskForm.disk_guard_enabled" label="启用保护" color="success" density="compact" hide-details />
+          <VTextField v-model="diskForm.disk_guard_path" label="检测路径" density="compact" hide-details />
+          <VTextField v-model.number="diskForm.disk_guard_threshold_gb" label="停止新增（G）" type="number" density="compact" hide-details />
+          <VTextField v-model.number="diskForm.disk_guard_recover_gb" label="允许恢复（G）" type="number" density="compact" hide-details />
+        </div>
+        <div class="mt-2 d-flex align-center flex-wrap ga-2">
+          <VBtn size="small" color="primary" variant="tonal" :loading="loading" @click="saveDiskGuard">保存</VBtn>
+          <VBtn size="small" variant="tonal" :loading="loading" @click="runAction('disk_guard_check')">立即检查</VBtn>
+          <VBtn v-if="diskGuard.active && !diskGuard.acked" size="small" color="warning" variant="tonal" :loading="loading" @click="runAction('disk_guard_ack', { incident_id: diskGuard.incident_id })">收到，停止提醒</VBtn>
+          <VBtn v-if="diskGuard.active" size="small" color="success" variant="tonal" :loading="loading" @click="runAction('disk_guard_resume')">清理后恢复</VBtn>
+          <VBtn v-if="diskGuard.waiting_count" size="small" variant="text" @click="dialog = 'disk'">查看暂停种子</VBtn>
+          <span class="text-caption disk-rule-text">{{ diskGuard.active && diskGuard.recovered ? `已达到 ${diskGuard.recover_gb}G 恢复线，请手动恢复。` : `低于 ${diskGuard.threshold_gb}G 停止新增，清理到 ${diskGuard.recover_gb}G 后恢复。` }}</span>
+        </div>
+        <VAlert v-if="diskGuard.last_error" type="warning" variant="tonal" density="compact" class="mt-2">{{ diskGuard.last_error }}</VAlert>
+      </VCard>
+    </div>
 
     <VCard variant="outlined" class="pa-4 mb-4">
       <div class="text-h6 mb-1">推送与下载数量</div>
-      <div class="text-caption text-medium-emphasis mb-3">定时任务每 60 分钟使用“每轮数量”；点击“立即试推送”时使用“测试数量”。</div>
-      <VRow dense>
-        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.limit" label="每60分钟下载/推送（部）" type="number" :min="1" :max="50" density="compact" /></VCol>
-        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.test_limit" label="测试下载/推送（部）" type="number" :min="1" :max="5" density="compact" /></VCol>
+      <div class="text-caption text-medium-emphasis mb-3">定时任务按上方所选间隔使用“每轮数量”；“立即运行”使用“立即运行数量”，不受定时推送开关影响，并按当前自动/手动下载模式真实执行。自动下载模式下只占用剩余下载空位；任务已满或硬盘保护启动时会取消并发送 Telegram 通知。</div>
+      <VRow dense class="settings-row push-settings-row">
+        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.limit" label="每轮下载/推送（部）" type="number" :min="1" :max="50" density="compact" /></VCol>
+        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.test_limit" label="立即运行数量（部）" type="number" :min="1" :max="5" density="compact" /></VCol>
         <VCol cols="6" md="3"><VTextField v-model.number="pushForm.max_active_downloads" label="同时下载上限（部）" type="number" :min="1" :max="100" density="compact" /></VCol>
-        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.max_searches" label="每轮最多查询 M-Team" type="number" :min="20" :max="200" density="compact" /></VCol>
+        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.max_searches" label="每轮最多搜索候选电影" type="number" :min="20" :max="200" density="compact" hint="每部候选会同时搜索下面选中的全部站点" persistent-hint /></VCol>
+        <VCol cols="12" md="3"><VTextField v-model.number="pushForm.min_score" label="TMDB 最低评分" type="number" :min="0" :max="10" :step="0.1" density="compact" hint="默认 6 分；提高后候选更少但平均质量更高" persistent-hint /></VCol>
+        <VCol cols="12" md="3"><VSelect v-model="pushForm.site_ids" :items="summary.site_options || []" item-title="title" item-value="value" label="资源搜索站点（可多选）" multiple chips closable-chips density="compact" hint="读取 MoviePilot 已配置站点" persistent-hint /></VCol>
       </VRow>
-      <VBtn color="primary" variant="tonal" :loading="loading" @click="savePushSettings">保存推送与下载设置</VBtn>
+      <div class="d-flex flex-wrap ga-2">
+        <VBtn color="primary" variant="tonal" :loading="loading" @click="savePushSettings">保存推送与下载设置</VBtn>
+        <VBtn color="success" variant="tonal" :loading="loading" :disabled="!controlForm.enabled" @click="runAction('run_once')">立即运行</VBtn>
+        <VBtn color="error" variant="tonal" :loading="loading" @click="runAction('clear_cache')">清空扫描缓存</VBtn>
+        <VBtn color="info" variant="tonal" @click="dialog = 'logs'">查看日志</VBtn>
+        <VBtn color="secondary" variant="tonal" prepend-icon="mdi-lock" @click="lockAccess">锁定插件</VBtn>
+        <VBtn variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus()" />
+      </div>
     </VCard>
-
-    <VRow dense class="mb-4">
-      <VCol cols="12" md="4">
-        <VCard variant="outlined" class="pa-4 h-100 list-card" @click="dialog = 'queue'">
-          <div class="d-flex align-center justify-space-between"><div class="text-h6">等候下载</div><VIcon icon="mdi-chevron-right" /></div>
-          <div class="text-h4 mt-3">{{ state.queue.length }}</div><div class="text-caption mt-2">点击查看、搜索或取消任务</div>
-        </VCard>
-      </VCol>
-      <VCol cols="12" md="4">
-        <VCard variant="outlined" class="pa-4 h-100 list-card" @click="dialog = 'history'">
-          <div class="d-flex align-center justify-space-between"><div class="text-h6">插件下载记录</div><VIcon icon="mdi-chevron-right" /></div>
-          <div class="text-h4 mt-3">{{ state.history.length }}</div><div class="text-caption mt-2">点击查看和搜索，只读记录</div>
-        </VCard>
-      </VCol>
-      <VCol cols="12" md="4">
-        <VCard variant="outlined" class="pa-4 h-100 list-card" @click="dialog = 'suppressed'">
-          <div class="d-flex align-center justify-space-between"><div class="text-h6">不再推送列表</div><VIcon icon="mdi-chevron-right" /></div>
-          <div class="text-h4 mt-3">{{ state.suppressed.length }}</div><div class="text-caption mt-2">点击查看、搜索或取消排除</div>
-        </VCard>
-      </VCol>
-    </VRow>
 
     <VCard variant="outlined" class="pa-4 mb-4">
       <div class="text-h6 mb-1">Telegram 设置</div>
-      <div class="text-caption text-medium-emphasis mb-3">留空即自动使用 MoviePilot 通知设置；也可选择其他已配置的 Telegram 实例并覆盖管理员或群组。</div>
-      <VRow dense>
-        <VCol cols="12" md="4"><VSelect v-model="telegramForm.source" :items="state.telegram.sources || []" item-title="title" item-value="value" label="Telegram 机器人" /></VCol>
-        <VCol cols="12" md="4"><VTextField v-model="telegramForm.admins_override" label="管理员 ID/用户名（可选）" :placeholder="state.telegram.effective_admins || '跟随 MP'" /></VCol>
-        <VCol cols="12" md="4"><VTextField v-model="telegramForm.chat_id_override" label="通知群组/频道 Chat ID（可选）" :placeholder="state.telegram.effective_chat_id || '跟随 MP'" /></VCol>
+      <div class="text-caption text-medium-emphasis mb-3">三个输入框留空即跟随 MoviePilot 的 Telegram 通知设置；需要覆盖哪一项就直接输入哪一项。</div>
+      <VRow dense class="settings-row telegram-settings-row">
+        <VCol cols="12" md="4">
+          <VTextField v-model="telegramForm.source" label="TG 机器人实例标识（可选）" density="compact" clearable :hint="telegramForm.source ? '' : '默认使用 MoviePilot TG 通知设置'" :persistent-hint="!telegramForm.source" />
+        </VCol>
+        <VCol cols="12" md="4">
+          <VTextField v-model="telegramForm.admins_override" label="管理员 ID/用户名（可选）" density="compact" clearable placeholder="多个用逗号分隔" :hint="telegramForm.admins_override ? '' : '默认使用 MoviePilot TG 通知设置'" :persistent-hint="!telegramForm.admins_override" />
+        </VCol>
+        <VCol cols="12" md="4">
+          <VTextField v-model="telegramForm.chat_id_override" label="通知群组/频道 Chat ID（可选）" density="compact" clearable :hint="telegramForm.chat_id_override ? '' : '默认使用 MoviePilot TG 通知设置'" :persistent-hint="!telegramForm.chat_id_override" />
+        </VCol>
       </VRow>
       <VBtn color="primary" variant="tonal" :loading="loading" @click="saveTelegram">保存 Telegram 设置</VBtn>
     </VCard>
 
-    <VCard variant="tonal" :color="diskGuard.active ? 'error' : 'success'" class="pa-4">
-      <div class="d-flex flex-wrap align-center justify-space-between ga-3 mb-3">
-        <div>
-          <div class="text-h6">硬盘空间保护</div>
-          <div class="text-body-2 mt-1">
-            {{ diskGuard.active ? '保护中：旧下载继续，新 JAV/MP 种子暂停等候' : '正常：允许添加新种子' }}
-          </div>
-        </div>
-        <div class="text-right">
-          <div class="text-h5 font-weight-bold">剩余 {{ diskGuard.free_gb ?? 0 }}G</div>
-          <div class="text-caption">暂停等候 {{ diskGuard.waiting_count || 0 }} 个</div>
-        </div>
-      </div>
-      <VRow dense>
-        <VCol cols="12" md="3"><VSwitch v-model="diskForm.disk_guard_enabled" label="启用硬盘保护" color="success" hide-details /></VCol>
-        <VCol cols="12" md="3"><VTextField v-model="diskForm.disk_guard_path" label="检测路径" density="compact" hide-details /></VCol>
-        <VCol cols="6" md="3"><VTextField v-model.number="diskForm.disk_guard_threshold_gb" label="停止新增（G）" type="number" density="compact" hide-details /></VCol>
-        <VCol cols="6" md="3"><VTextField v-model.number="diskForm.disk_guard_recover_gb" label="允许恢复（G）" type="number" density="compact" hide-details /></VCol>
-      </VRow>
-      <div class="mt-3 d-flex flex-wrap ga-2">
-        <VBtn color="primary" variant="tonal" :loading="loading" @click="saveDiskGuard">保存设置</VBtn>
-        <VBtn variant="tonal" :loading="loading" @click="runAction('disk_guard_check')">立即检查</VBtn>
-        <VBtn v-if="diskGuard.active && !diskGuard.acked" color="warning" variant="tonal" :loading="loading" @click="runAction('disk_guard_ack', { incident_id: diskGuard.incident_id })">收到，停止提醒</VBtn>
-        <VBtn v-if="diskGuard.active" color="success" variant="tonal" :loading="loading" @click="runAction('disk_guard_resume')">空间清理后恢复添加/下载</VBtn>
-        <VBtn v-if="diskGuard.waiting_count" variant="text" @click="dialog = 'disk'">查看暂停种子</VBtn>
-      </div>
-      <div class="text-caption mt-3">
-        {{ diskGuard.active && diskGuard.recovered ? `空间已达到 ${diskGuard.recover_gb}G 恢复线，请点击上面的恢复按钮。` : `低于 ${diskGuard.threshold_gb}G 启动保护；清理到 ${diskGuard.recover_gb}G 后由你手动恢复。` }}
-      </div>
-      <VAlert v-if="diskGuard.last_error" type="warning" variant="tonal" class="mt-3">{{ diskGuard.last_error }}</VAlert>
-    </VCard>
-
-    <VDialog v-model="dialog" max-width="75rem" scrollable>
-      <VCard v-if="dialog === 'queue'" title="等候下载">
+    <VDialog v-model="dialogOpen" max-width="75rem" scrollable>
+      <VCard v-if="dialog === 'active'" title="正在下载 · 实时状态">
+        <VDialogCloseBtn @click="dialog = ''" />
+        <VCardText>
+          <VAlert v-if="!(summary.active_download_items || []).length" type="info" variant="tonal" class="mb-3">当前没有 MoviePilot 正在下载的任务，或下载器暂未返回详情。</VAlert>
+          <VDataTable v-else :headers="activeHeaders" :items="summary.active_download_items || []" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover>
+            <template #item.progress="{ item }"><div class="d-flex align-center ga-2"><VProgressLinear :model-value="item.progress" color="info" height="8" rounded /><span class="text-caption text-no-wrap">{{ item.progress }}%</span></div></template>
+          </VDataTable>
+          <div class="text-caption text-medium-emphasis mt-3">每 5 秒自动刷新。</div>
+        </VCardText>
+      </VCard>
+      <VCard v-else-if="dialog === 'queue'" title="等候下载">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
           <div class="d-flex ga-2 mb-3"><VTextField v-model="queueSearch" label="搜索影片" prepend-inner-icon="mdi-magnify" clearable hide-details /><VBtn color="error" variant="tonal" @click="runAction('clear_queue')">批量清空</VBtn></div>
@@ -279,11 +475,72 @@ onMounted(loadStatus)
           <VDataTable :headers="diskHeaders" :items="diskGuard.waiting || []" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
         </VCardText>
       </VCard>
+      <VCard v-else-if="dialog === 'logs'" title="插件运行日志">
+        <VDialogCloseBtn @click="dialog = ''" />
+        <VCardText>
+          <div class="d-flex ga-2 mb-3">
+            <VTextField v-model="logSearch" label="搜索日志" prepend-inner-icon="mdi-magnify" clearable hide-details />
+            <VBtn color="error" variant="tonal" @click="runAction('clear_logs')">清空日志</VBtn>
+          </div>
+          <VDataTable :headers="logHeaders" :items="state.logs || []" :search="logSearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
+        </VCardText>
+      </VCard>
     </VDialog>
+    </template>
   </VContainer>
 </template>
 
 <style scoped>
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 4px !important;
+}
+.status-item { min-width: 0; }
+.status-card {
+  min-height: 118px;
+  height: 100%;
+  overflow: hidden;
+  padding: 12px !important;
+}
+.status-card :deep(.v-field) { min-width: 0; }
+.status-card .text-caption { line-height: 1.25; }
+.status-secondary-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+.compact-top-card { grid-column: span 3; }
+.disk-controls-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 1.35fr 1fr 1fr;
+  gap: 8px;
+  align-items: center;
+}
+.disk-rule-text { margin-left: auto; opacity: .85; }
+.settings-row {
+  row-gap: 10px;
+  margin-bottom: 10px !important;
+}
+.settings-row :deep(.v-input__details) {
+  min-height: 28px;
+  padding-top: 7px;
+}
+.telegram-settings-row { margin-bottom: 4px !important; }
+.access-lock-card { max-width: 520px; }
+@media (max-width: 960px) {
+  .status-grid {
+    grid-template-columns: repeat(7, minmax(185px, 1fr));
+    overflow-x: auto;
+    padding-bottom: 6px;
+  }
+  .status-secondary-grid { grid-template-columns: 1fr; }
+  .compact-top-card { grid-column: 1; }
+  .disk-controls-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .disk-rule-text { width: 100%; margin-left: 0; }
+}
 .list-card { cursor: pointer; transition: border-color .2s, transform .2s; }
 .list-card:hover { border-color: rgb(var(--v-theme-primary)); transform: translateY(-2px); }
 </style>
