@@ -41,7 +41,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.16"
+    plugin_version = "0.9.17"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2546,8 +2546,17 @@ class SmartMoviePush(_PluginBase):
         entries = []
         for index, item in enumerate(items, start_index):
             movie_title = item.get("title") or f"TMDB {item.get('tmdb_id', '')}"
-            library_mark = "  ✓ 已入库" if item.get("emby_ingested_at") else ""
-            entries.append(f"{index}. {movie_title}{library_mark}")
+            if item.get("emby_ingested_at"):
+                stage = "✓ 已入库"
+            elif item.get("organized_at"):
+                stage = "已整理"
+            elif item.get("organize_failed_at"):
+                stage = "整理失败"
+            elif item.get("download_completed_at"):
+                stage = "待整理"
+            else:
+                stage = "未完成"
+            entries.append(f"{index}. {movie_title}  {stage}")
         rows = []
         for index in range(0, len(entries), 2):
             left = wrap(entries[index], 34)
@@ -2559,7 +2568,7 @@ class SmartMoviePush(_PluginBase):
         return "\n".join(rows)
 
     def send_daily_completion_summary(self) -> None:
-        """午夜只统计上一自然日真正完成下载的本插件电影。"""
+        """以昨日插件提交的任务为总账，逐项核对下载、整理和 Emby。"""
         timezone = pytz.timezone(settings.TZ)
         now = datetime.now(tz=timezone)
         end = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2579,41 +2588,39 @@ class SmartMoviePush(_PluginBase):
             return
         history = self._load_download_history()
 
-        downloaded_by_identity = {}
+        submitted = []
         for item in history:
-            completed_at = self._parse_history_time(item.get("download_completed_at"), timezone)
-            if not completed_at or not (start <= completed_at < end):
-                continue
-            identity = self._download_history_identity(item)
-            previous_item = downloaded_by_identity.get(identity)
-            rank = lambda value: (bool(value.get("emby_ingested_at")), bool(value.get("organized_at")),
-                                  bool(value.get("organize_failed_at")))
-            if previous_item is None or rank(item) > rank(previous_item):
-                downloaded_by_identity[identity] = item
-        downloaded = list(downloaded_by_identity.values())
-        downloaded.sort(key=lambda item: str(item.get("download_completed_at") or ""))
-        organized_count = sum(1 for item in downloaded if item.get("organized_at"))
-        completed_count = sum(1 for item in downloaded if item.get("emby_ingested_at"))
-        organized_waiting_emby = sum(1 for item in downloaded if item.get("organized_at") and not item.get("emby_ingested_at"))
-        failed_items = [item for item in downloaded if not item.get("organized_at") and item.get("organize_failed_at")]
-        awaiting_count = len(downloaded) - organized_count - len(failed_items)
+            submitted_at = self._parse_history_time(item.get("submitted_at"), timezone)
+            if submitted_at and start <= submitted_at < end:
+                submitted.append(item)
+        # 总账按插件实际提交的每条任务计数；同一影片提交两次也是两条任务。
+        submitted.sort(key=lambda item: str(item.get("submitted_at") or ""))
+        downloaded_count = sum(1 for item in submitted if item.get("download_completed_at"))
+        organized_count = sum(1 for item in submitted if item.get("organized_at"))
+        ingested_count = sum(1 for item in submitted if item.get("emby_ingested_at"))
+        failed_items = [item for item in submitted if not item.get("organized_at") and item.get("organize_failed_at")]
+        awaiting_count = sum(1 for item in submitted if item.get("download_completed_at")
+                             and not item.get("organized_at") and not item.get("organize_failed_at"))
+        organized_waiting_emby = sum(1 for item in submitted if item.get("organized_at")
+                                     and not item.get("emby_ingested_at"))
         # Telegram 使用等宽 <pre>，并分批发送，分隔符在长片名换行后也保持固定列。
         page_size = 32
-        pages = [downloaded[index:index + page_size]
-                 for index in range(0, len(downloaded), page_size)] or [[]]
+        pages = [submitted[index:index + page_size]
+                 for index in range(0, len(submitted), page_size)] or [[]]
         messages = []
         for page_number, page_items in enumerate(pages):
             rows = self._format_daily_movie_rows(page_items, page_number * page_size + 1)
             title = (
-                f"📊 {summary_date}｜完成下载 {len(downloaded)} 部｜"
-                f"Emby 已入库 {completed_count} 部"
+                f"📊 {summary_date}｜插件提交 {len(submitted)} 项｜"
+                f"下载完成 {downloaded_count} 项｜Emby 已有 {ingested_count} 项"
             )
             body = (
-                f"MoviePilot 已整理：{organized_count} 部｜整理失败：{len(failed_items)} 部｜待整理：{awaiting_count} 部\n"
-                f"已整理待 Emby：{organized_waiting_emby} 部\n"
+                f"未完成下载：{len(submitted) - downloaded_count} 项｜MP 已整理：{organized_count} 项\n"
+                f"MP 整理失败：{len(failed_items)} 项｜下载完待整理：{awaiting_count} 项\n"
+                f"已整理待 Emby：{organized_waiting_emby} 项\n"
                 f"名单 {page_number + 1}/{len(pages)}：\n"
                 f"<pre>{html.escape(rows)}</pre>\n"
-                "✓ 仅代表 Emby 当前确实查到；未完成下载的不计入本日报。"
+                "以本日插件提交的任务为总账；Emby 已有表示该影片当前可查到。"
             )
             messages.append((title, body))
         for page_number in range(0, len(failed_items), page_size):
@@ -2621,7 +2628,7 @@ class SmartMoviePush(_PluginBase):
             rows = self._format_daily_movie_rows(failed_page, page_number + 1)
             messages.append((
                 f"⚠️ {summary_date}｜MoviePilot 整理/刮削失败 {len(failed_items)} 部",
-                f"以下影片已完成下载，但 MoviePilot 有失败记录，尚无成功整理记录：\n"
+                f"以下插件任务有 MoviePilot 失败记录，尚无成功整理记录：\n"
                 f"<pre>{html.escape(rows)}</pre>\n"
                 "请到 MoviePilot 整理记录查看具体错误；无失败记录的影片归为待整理。",
             ))
@@ -2638,28 +2645,28 @@ class SmartMoviePush(_PluginBase):
             if not source or not result:
                 logger.error(f"每日电影统计第 {message_number + 1}/{len(messages)} 页未送达 Telegram")
                 self.save_data(self._daily_summary_key, {
-                    "date": summary_date, "count": len(downloaded),
-                    "organized_count": organized_count, "completed_count": completed_count,
+                    "date": summary_date, "count": len(submitted), "downloaded_count": downloaded_count,
+                    "organized_count": organized_count, "completed_count": ingested_count,
                     "failed_count": len(failed_items), "awaiting_count": awaiting_count,
                     "sent_pages": message_number, "total_pages": len(messages),
                     "direct_success": False,
                 })
                 return
             self.save_data(self._daily_summary_key, {
-                "date": summary_date, "count": len(downloaded),
-                "organized_count": organized_count, "completed_count": completed_count,
+                "date": summary_date, "count": len(submitted), "downloaded_count": downloaded_count,
+                "organized_count": organized_count, "completed_count": ingested_count,
                 "failed_count": len(failed_items), "awaiting_count": awaiting_count,
                 "sent_pages": message_number + 1, "total_pages": len(messages),
                 "sent_at": now.isoformat(timespec="seconds"),
                 "direct_success": message_number + 1 == len(messages),
             })
-        detail = (f"{summary_date} 完成下载 {len(downloaded)} 部，"
+        detail = (f"{summary_date} 插件提交 {len(submitted)} 项，下载完成 {downloaded_count} 项，"
                   f"MoviePilot 已整理 {organized_count} 部，整理失败 {len(failed_items)} 部，"
-                  f"待整理 {awaiting_count} 部，Emby 已入库 {completed_count} 部")
-        if downloaded:
+                  f"待整理 {awaiting_count} 部，Emby 已有 {ingested_count} 部")
+        if submitted:
             detail += "：" + "、".join(
                 f"{item.get('title') or ''}{'（已入库）' if item.get('emby_ingested_at') else ''}"
-                for item in downloaded
+                for item in submitted
             )
         self._append_plugin_log("每日统计", detail, "success")
         logger.info(f"插件每日下载/入库统计已发送：{detail}")
