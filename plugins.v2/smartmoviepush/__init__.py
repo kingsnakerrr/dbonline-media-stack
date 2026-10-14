@@ -2345,6 +2345,11 @@ class SmartMoviePush(_PluginBase):
                 logger.warning(f"读取 Emby 电影索引失败：{name}：{type(err).__name__}")
         if not indexes:
             return 0
+        if all(not by_tmdb and not by_title_year for _, by_tmdb, by_title_year in indexes) and any(
+            item.get("emby_ingested_at") for item in history
+        ):
+            logger.warning("Emby 返回空电影目录，但插件此前已有入库记录；本轮不清除标记也不发送日报")
+            return 0
         all_servers_loaded = len(indexes) == len(servers)
         self._last_emby_check_ok = all_servers_loaded
         # 索引请求期间可能新增或更新下载记录，避免用旧快照覆盖它们。
