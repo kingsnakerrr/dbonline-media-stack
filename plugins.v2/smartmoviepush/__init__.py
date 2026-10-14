@@ -41,7 +41,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.13"
+    plugin_version = "0.9.14"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -250,6 +250,12 @@ class SmartMoviePush(_PluginBase):
                 "func": self.midnight_maintenance,
             },
             {
+                "id": "SmartMoviePushDailySummaryRetry",
+                "name": "每日统计失败后补发",
+                "trigger": CronTrigger.from_crontab("5 * * * *", timezone=settings.TZ),
+                "func": self.send_daily_completion_summary,
+            },
+            {
                 "id": "SmartMoviePushDownloadQueue",
                 "name": "智能电影推荐顺序下载队列",
                 "trigger": CronTrigger.from_crontab("* * * * *", timezone=settings.TZ),
@@ -266,6 +272,12 @@ class SmartMoviePush(_PluginBase):
                 "name": "核验本插件电影是否真正进入 Emby",
                 "trigger": CronTrigger.from_crontab("*/5 * * * *", timezone=settings.TZ),
                 "func": self.verify_emby_ingestion,
+            },
+            {
+                "id": "SmartMoviePushDownloadCompletion",
+                "name": "核验本插件下载器任务是否真正完成",
+                "trigger": CronTrigger.from_crontab("*/5 * * * *", timezone=settings.TZ),
+                "func": self.reconcile_download_completions,
             },
         ]
 
@@ -1572,7 +1584,7 @@ class SmartMoviePush(_PluginBase):
         return value if isinstance(value, list) else []
 
     def _migrate_legacy_organized_history(self) -> None:
-        """旧 completed_at 只是 MP 整理事件，不能作为 Emby 入库证据。"""
+        """迁移旧记录：MP 整理能证明下载完成，但不能证明 Emby 入库。"""
         history = self._load_download_history()
         changed = 0
         for item in history:
@@ -1581,6 +1593,10 @@ class SmartMoviePush(_PluginBase):
                 item.setdefault("organized_at", legacy)
                 if not item.get("emby_ingested_at"):
                     item["status"] = "organized"
+                changed += 1
+            if item.get("organized_at") and not item.get("download_completed_at"):
+                item["download_completed_at"] = item["organized_at"]
+                item["download_completion_source"] = "transfer"
                 changed += 1
         if changed:
             self.save_data(self._download_history_key, history[-1000:])
@@ -1785,6 +1801,77 @@ class SmartMoviePush(_PluginBase):
         })
         self.save_data(self._download_history_key, history[-1000:])
         self._append_plugin_log("提交下载", f"{media.title_year} 已提交到 MoviePilot，任务 {download_id}")
+
+    def reconcile_download_completions(self) -> int:
+        """以下载器的完成记录为准；已移除种子的任务由成功整理记录兜底。"""
+        history = self._load_download_history()
+        timezone = pytz.timezone(settings.TZ)
+        now = datetime.now(tz=timezone)
+        recent = now - timedelta(days=2)
+        candidates = [item for item in history if item.get("download_id") and (
+            not item.get("download_completed_at") or (
+                item.get("download_completion_source") == "transfer" and
+                (self._parse_history_time(item.get("submitted_at"), timezone) or now) >= recent
+            )
+        )]
+        if not candidates:
+            return 0
+        hashes = list({str(item["download_id"]).strip().lower() for item in candidates})
+        completed = {}
+        # qB 原始接口提供 completion_on，避免午夜附近的任务被归入错误日期。
+        try:
+            module = ModuleManager().get_running_module("QbittorrentModule")
+            for server in (module.get_instances() if module else {}).values():
+                for torrent in server.get_completed_torrents(ids=hashes) or []:
+                    torrent_hash = str(torrent.get("hash") or "").strip().lower()
+                    if not torrent_hash:
+                        continue
+                    try:
+                        finished = int(torrent.get("completion_on") or 0)
+                    except (TypeError, ValueError):
+                        finished = 0
+                    completed[torrent_hash] = (
+                        datetime.fromtimestamp(finished, tz=timezone).isoformat(timespec="seconds")
+                        if finished > 0 else now.isoformat(timespec="seconds"),
+                        "qb" if finished > 0 else "observed",
+                    )
+        except Exception as err:
+            logger.warning(f"读取 qB 已完成任务失败：{type(err).__name__}")
+        # 其他下载器没有统一的完成时间字段；仅在真实进度为 100% 时记录检测时间。
+        unresolved = [torrent_hash for torrent_hash in hashes if torrent_hash not in completed]
+        if unresolved:
+            try:
+                for torrent in DownloadChain().list_torrents(
+                    hashs=unresolved, include_all_tags=True
+                ) or []:
+                    torrent_hash = str(getattr(torrent, "hash", "") or "").strip().lower()
+                    progress = float(getattr(torrent, "progress", 0) or 0)
+                    state = str(getattr(torrent, "state", "") or "").lower()
+                    if torrent_hash and state == "completed" and (progress >= 99.9 or progress == 1):
+                        completed[torrent_hash] = (now.isoformat(timespec="seconds"), "observed")
+            except Exception as err:
+                logger.warning(f"读取下载器完成状态失败：{type(err).__name__}")
+        if not completed:
+            return 0
+        # 网络请求期间可能新增下载，必须在保存前重新读取，避免覆盖新记录。
+        history = self._load_download_history()
+        changed = 0
+        for item in history:
+            result = completed.get(str(item.get("download_id") or "").strip().lower())
+            if not result:
+                continue
+            finished_at, source = result
+            if item.get("download_completed_at") and source != "qb":
+                continue
+            if item.get("download_completed_at") == finished_at and item.get("download_completion_source") == source:
+                continue
+            item["download_completed_at"] = finished_at
+            item["download_completion_source"] = source
+            changed += 1
+        if changed:
+            self.save_data(self._download_history_key, history[-1000:])
+            logger.info(f"插件下载完成核验：更新 {changed} 部")
+        return changed
 
     def _submit_download(self, media: MediaInfo, context: Context,
                          channel: Any = None, userid: Any = None,
@@ -2155,6 +2242,9 @@ class SmartMoviePush(_PluginBase):
         history_item["organized_at"] = datetime.now(
             tz=pytz.timezone(settings.TZ)
         ).isoformat(timespec="seconds")
+        if not history_item.get("download_completed_at"):
+            history_item["download_completed_at"] = history_item["organized_at"]
+            history_item["download_completion_source"] = "transfer"
         history_item["status"] = "organized"
         self.save_data(self._download_history_key, history[-1000:])
         self._append_plugin_log("整理完成", f"{history_item.get('title') or f'TMDB {tmdb_id}'} 等待 Emby 入库")
@@ -2232,10 +2322,11 @@ class SmartMoviePush(_PluginBase):
         return by_tmdb, by_title_year
 
     def verify_emby_ingestion(self) -> int:
-        """批量按 TMDB ID 核验；只有缺 ID 时才按片名和年份匹配。"""
+        """每轮重查 Emby 实际目录；已删除的条目不得继续算作入库。"""
+        self._last_emby_check_ok = False
         history = self._load_download_history()
-        pending = [item for item in history if item.get("organized_at") and not item.get("emby_ingested_at")]
-        if not pending:
+        if not any(item.get("download_completed_at") for item in history):
+            self._last_emby_check_ok = True
             return 0
         module = ModuleManager().get_running_module("EmbyModule")
         configs = module.get_configs() if module else {}
@@ -2254,9 +2345,18 @@ class SmartMoviePush(_PluginBase):
                 logger.warning(f"读取 Emby 电影索引失败：{name}：{type(err).__name__}")
         if not indexes:
             return 0
+        all_servers_loaded = len(indexes) == len(servers)
+        self._last_emby_check_ok = all_servers_loaded
+        # 索引请求期间可能新增或更新下载记录，避免用旧快照覆盖它们。
+        history = self._load_download_history()
         now = datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")
         found = 0
-        for item in pending:
+        checked = 0
+        changed = False
+        for item in history:
+            if not item.get("download_completed_at"):
+                continue
+            checked += 1
             item["last_emby_check_at"] = now
             tmdb_id = str(item.get("tmdb_id") or "")
             media = self._emby_media_info(item) if not tmdb_id else None
@@ -2268,15 +2368,26 @@ class SmartMoviePush(_PluginBase):
                 movie = by_tmdb.get(tmdb_id) if tmdb_id else by_title_year.get(fallback)
                 if not movie:
                     continue
-                item["emby_ingested_at"] = now
+                if not item.get("emby_ingested_at"):
+                    item["emby_ingested_at"] = now
+                    found += 1
+                    changed = True
+                    self._append_plugin_log("Emby 已入库", f"{item.get('title')} 已在 {server} 核实")
                 item["status"] = "emby_ingested"
                 item["emby_server"] = server
                 item["emby_item_id"] = str(movie["Id"])
-                found += 1
-                self._append_plugin_log("Emby 已入库", f"{item.get('title')} 已在 {server} 核实")
                 break
-        self.save_data(self._download_history_key, history[-1000:])
-        logger.info(f"Emby 批量核验完成：待查 {len(pending)} 部，本轮确认 {found} 部")
+            else:
+                # 还有服务器未响应时不能认定条目已经从全部 Emby 消失。
+                if all_servers_loaded and item.pop("emby_ingested_at", None):
+                    item.pop("emby_server", None)
+                    item.pop("emby_item_id", None)
+                    item["status"] = "organized" if item.get("organized_at") else "download_completed"
+                    changed = True
+                    self._append_plugin_log("Emby 已移除", f"{item.get('title')} 当前不在 Emby，已取消入库标记", "warning")
+        if changed:
+            self.save_data(self._download_history_key, history[-1000:])
+        logger.info(f"Emby 批量核验完成：已查 {checked} 部，本轮新增确认 {found} 部")
         return found
 
     @staticmethod
@@ -2323,7 +2434,7 @@ class SmartMoviePush(_PluginBase):
         return "\n".join(rows)
 
     def send_daily_completion_summary(self) -> None:
-        """午夜统计上一自然日本插件提交的电影，并标记其中已经入库的影片。"""
+        """午夜只统计上一自然日真正完成下载的本插件电影。"""
         timezone = pytz.timezone(settings.TZ)
         now = datetime.now(tz=timezone)
         end = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2333,14 +2444,13 @@ class SmartMoviePush(_PluginBase):
         if previous.get("date") == summary_date and previous.get("direct_success"):
             return
 
-        # 回查 MP 整理历史只补“已整理”；不能由此认定 Emby 已入库。
+        self.reconcile_download_completions()
+        # 成功整理能证明下载已完成。若种子已被删除，用 MP 整理时间兜底。
         history = self._load_download_history()
         history_changed = False
         transfer_oper = TransferHistoryOper()
         for item in history:
-            submitted_at = self._parse_history_time(item.get("submitted_at"), timezone)
-            if (not submitted_at or not (start <= submitted_at < end)
-                    or item.get("organized_at") or not item.get("download_id")):
+            if (item.get("organized_at") and item.get("download_completed_at")) or not item.get("download_id"):
                 continue
             try:
                 transfers = transfer_oper.list_by_hash(str(item.get("download_id"))) or []
@@ -2357,30 +2467,39 @@ class SmartMoviePush(_PluginBase):
                     item["title"] = f"{title} ({year})" if year and year not in title else title
                     item["media_title"] = title
                     item["year"] = year
-                item["organized_at"] = organized_at.isoformat(timespec="seconds")
-                item["status"] = "organized"
+                if not item.get("organized_at"):
+                    item["organized_at"] = organized_at.isoformat(timespec="seconds")
+                    if not item.get("emby_ingested_at"):
+                        item["status"] = "organized"
+                if not item.get("download_completed_at"):
+                    item["download_completed_at"] = organized_at.isoformat(timespec="seconds")
+                    item["download_completion_source"] = "transfer"
                 history_changed = True
             except Exception as err:
                 logger.warning(f"回查插件下载整理记录失败：{item.get('title')}：{err}")
         if history_changed:
             self.save_data(self._download_history_key, history[-1000:])
         self.verify_emby_ingestion()
+        if not getattr(self, "_last_emby_check_ok", False):
+            logger.warning("Emby 暂不可用，每日统计暂缓发送，避免将真实入库数误报为 0")
+            return
         history = self._load_download_history()
 
         downloaded = []
         seen = set()
         for item in history:
-            submitted_at = self._parse_history_time(item.get("submitted_at"), timezone)
-            if not submitted_at or not (start <= submitted_at < end):
+            completed_at = self._parse_history_time(item.get("download_completed_at"), timezone)
+            if not completed_at or not (start <= completed_at < end):
                 continue
-            identity = str(item.get("download_id") or item.get("tmdb_id") or item.get("title"))
+            identity = self._download_history_identity(item)
             if identity in seen:
                 continue
             seen.add(identity)
             downloaded.append(item)
-        downloaded.sort(key=lambda item: str(item.get("submitted_at") or ""))
+        downloaded.sort(key=lambda item: str(item.get("download_completed_at") or ""))
         organized_count = sum(1 for item in downloaded if item.get("organized_at"))
         completed_count = sum(1 for item in downloaded if item.get("emby_ingested_at"))
+        organized_waiting_emby = sum(1 for item in downloaded if item.get("organized_at") and not item.get("emby_ingested_at"))
         # Telegram 使用等宽 <pre>，并分批发送，分隔符在长片名换行后也保持固定列。
         page_size = 32
         pages = [downloaded[index:index + page_size]
@@ -2390,15 +2509,15 @@ class SmartMoviePush(_PluginBase):
             page_items = pages[page_number]
             rows = self._format_daily_movie_rows(page_items, page_number * page_size + 1)
             title = (
-                f"📊 {summary_date}｜提交下载 {len(downloaded)} 部｜"
+                f"📊 {summary_date}｜完成下载 {len(downloaded)} 部｜"
                 f"Emby 已入库 {completed_count} 部"
             )
             text = (
                 f"MoviePilot 已整理：{organized_count} 部｜待整理：{len(downloaded) - organized_count} 部\n"
-                f"已整理待 Emby：{max(organized_count - completed_count, 0)} 部\n"
+                f"已整理待 Emby：{organized_waiting_emby} 部\n"
                 f"名单 {page_number + 1}/{len(pages)}：\n"
                 f"<pre>{html.escape(rows)}</pre>\n"
-                "✓ 仅代表 Emby 已查到；提交下载不等于完成下载。"
+                "✓ 仅代表 Emby 当前确实查到；未完成下载的不计入本日报。"
             )
             source, result = self._send_telegram_direct(
                 title=title,
@@ -2423,7 +2542,7 @@ class SmartMoviePush(_PluginBase):
                 "sent_at": now.isoformat(timespec="seconds"),
                 "direct_success": page_number + 1 == len(pages),
             })
-        detail = (f"{summary_date} 提交下载 {len(downloaded)} 部，"
+        detail = (f"{summary_date} 完成下载 {len(downloaded)} 部，"
                   f"MoviePilot 已整理 {organized_count} 部，Emby 已入库 {completed_count} 部")
         if downloaded:
             detail += "：" + "、".join(
