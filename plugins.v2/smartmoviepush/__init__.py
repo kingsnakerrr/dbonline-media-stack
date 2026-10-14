@@ -41,7 +41,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.17"
+    plugin_version = "0.9.18"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -81,6 +81,7 @@ class SmartMoviePush(_PluginBase):
     _scheduler = None
     _running_lock = threading.Lock()
     _queue_lock = threading.Lock()
+    _plugin_log_lock = threading.RLock()
     _allowed_languages = {
         "zh", "en", "ja", "ko", "fr", "de", "es", "it", "pt",
         "nl", "sv", "no", "da", "fi", "pl", "cs", "hu", "tr",
@@ -93,6 +94,7 @@ class SmartMoviePush(_PluginBase):
     _download_queue_key = "download_queue"
     _download_history_key = "download_history"
     _plugin_logs_key = "plugin_logs"
+    _run_status_key = "run_status"
     _daily_summary_key = "daily_completion_summary"
     _access_auth_key = "access_auth"
     _access_sessions_key = "access_sessions"
@@ -288,16 +290,17 @@ class SmartMoviePush(_PluginBase):
         ]
 
     def scheduled_run(self):
-        if not self._enabled or not self._auto_push:
-            logger.info("智能下载影视资源定时推送已暂停，本轮跳过")
-            return
-        if self._disk_guard_blocks_new():
-            logger.warning("硬盘空间保护中，本轮定时扫描、推荐推送和新增下载全部跳过")
-            return
         now = datetime.now(tz=pytz.timezone(settings.TZ))
         minutes_today = now.hour * 60 + now.minute
         if minutes_today % self._push_interval_minutes != 0:
             return
+        if not self._enabled or not self._auto_push:
+            self._append_plugin_log("定时任务", "到达计划时间；插件或定时推送已关闭，本轮跳过")
+            return
+        if self._disk_guard_blocks_new():
+            self._append_plugin_log("定时任务", "到达计划时间；硬盘空间保护中，本轮跳过", "warning")
+            return
+        self._append_plugin_log("定时任务", f"到达计划时间，开始筛选；目标 {self._limit} 部")
         self.run_once(limit=self._limit, test_mode=False)
 
     @staticmethod
@@ -635,9 +638,12 @@ class SmartMoviePush(_PluginBase):
         return {"success": True, "message": f"已切换为{'自动' if self._auto_download else '手动'}下载"}
 
     def _api_run_once(self) -> dict:
+        self._append_plugin_log("手动操作", f"点击立即运行；目标 {self._test_limit} 部，模式：{'自动下载' if self._auto_download else '手动推送'}")
         if self._running_lock.locked():
+            self._append_plugin_log("手动操作", "已有扫描任务正在运行，本次点击没有启动第二轮", "warning")
             return {"success": False, "message": "任务正在运行中"}
         if self._disk_guard_blocks_new():
+            self._append_plugin_log("手动操作", "硬盘空间保护中，本次点击未执行", "warning")
             return {"success": False, "message": "硬盘空间保护中：立即运行、推荐推送和新增下载均已暂停；旧下载继续"}
         if self._auto_download:
             blocked_message = ""
@@ -647,6 +653,7 @@ class SmartMoviePush(_PluginBase):
                     f"正在下载任务已满：{active}/{self._max_active_downloads}。"
                 )
             if blocked_message:
+                self._append_plugin_log("手动操作", f"前置拦截：{blocked_message}；未扫描、未下载", "warning")
                 text = (
                     f"{blocked_message}\n"
                     "本次立即运行已取消：没有扫描、没有推送，也没有加入等候下载。\n"
@@ -665,6 +672,7 @@ class SmartMoviePush(_PluginBase):
         threading.Thread(target=self.run_once,
                          kwargs={"limit": self._test_limit, "test_mode": True},
                          daemon=True).start()
+        self._append_plugin_log("手动操作", "扫描线程已启动；先完成筛选，再批量提交及推送")
         return {
             "success": True,
             "message": f"已开始独立运行 {self._test_limit} 部，将按当前下载模式真实执行",
@@ -1113,6 +1121,7 @@ class SmartMoviePush(_PluginBase):
             "queue": list(queue),
             "history": list(reversed(history)),
             "logs": list(reversed(self._load_plugin_logs())),
+            "run_status": self.get_data(self._run_status_key) or {},
             "suppressed": [
                 {"tmdb_id": tmdb_id, **item}
                 for tmdb_id, item in sorted(
@@ -1658,14 +1667,25 @@ class SmartMoviePush(_PluginBase):
         return value if isinstance(value, list) else []
 
     def _append_plugin_log(self, category: str, message: str, level: str = "info") -> None:
-        logs = self._load_plugin_logs()
-        logs.append({
-            "created_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
-            "category": str(category or "运行"),
-            "message": str(message or ""),
-            "level": str(level or "info"),
-        })
-        self.save_data(self._plugin_logs_key, logs[-1000:])
+        with self._plugin_log_lock:
+            logs = self._load_plugin_logs()
+            logs.append({
+                "created_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+                "category": str(category or "运行"),
+                "message": str(message or ""),
+                "level": str(level or "info"),
+            })
+            self.save_data(self._plugin_logs_key, logs[-1000:])
+
+    def _set_run_status(self, run_id: str, source: str, stage: str,
+                        detail: str = "", **counts: Any) -> None:
+        status = {
+            "run_id": run_id, "source": source, "stage": stage,
+            "detail": detail,
+            "updated_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+        }
+        status.update(counts)
+        self.save_data(self._run_status_key, status)
 
     @staticmethod
     def _download_history_identity(item: dict) -> str:
@@ -2824,22 +2844,32 @@ class SmartMoviePush(_PluginBase):
         return True, True
 
     def run_once(self, limit: Optional[int] = None, test_mode: bool = False):
+        source = "手动立即运行" if test_mode else "定时任务"
         if not self._enabled:
+            self._append_plugin_log(source, "插件已关闭，未执行", "warning")
             logger.info("智能电影推送插件已关闭，本轮不执行")
             return
         if self._disk_guard_blocks_new():
+            self._append_plugin_log(source, "硬盘空间保护中，未扫描也未推送", "warning")
             logger.warning("硬盘空间保护中，本轮电影扫描、推荐推送和新增下载全部跳过")
             return
         if not self._running_lock.acquire(blocking=False):
+            self._append_plugin_log(source, "已有扫描任务正在运行，本轮跳过", "warning")
             logger.warning("智能电影推送已有任务运行，本轮跳过")
             return
+        run_id = datetime.now(tz=pytz.timezone(settings.TZ)).strftime("%m%d-%H%M%S")
+        def trace(category: str, message: str, level: str = "info") -> None:
+            self._append_plugin_log(category, f"[{run_id}] {message}", level)
         try:
             target = max(1, min(int(limit or self._limit), 50))
+            trace(source, f"开始执行；目标 {target} 部，下载模式 {'自动' if self._auto_download else '手动'}，站点 {self._site_ids}，每轮最多查询 {self._max_searches} 部")
+            self._set_run_status(run_id, source, "读取 TMDB 候选", "正在获取热门、近期、经典与随机电影", target=target, selected=0, searched=0, sent=0)
             pushed = self._load_recent_pushes()
             pushed_ids = set(pushed)
             suppressed_ids = set(self._load_suppressed())
             scan_cache = self._load_scan_cache()
             buckets = self._candidate_buckets()
+            trace("候选获取", "；".join(f"{name} {len(items)} 部" for name, items in buckets.items()))
             plans = [
                 ("new", min(self._new_count, target)),
                 ("recent", min(self._recent_count, target)),
@@ -2885,16 +2915,23 @@ class SmartMoviePush(_PluginBase):
                                 "status": "library", "checked_at": datetime.now().isoformat(timespec="seconds")}
                             continue
                         stats["searched"] += 1
+                        self._set_run_status(run_id, source, "搜索站点", f"正在查询 {media.title_year}", target=target, selected=len(selected), searched=stats["searched"], sent=0)
+                        trace("资源查询", f"第 {stats['searched']}/{self._max_searches} 部：{media.title_year}，开始搜索站点 {self._site_ids}")
                         best = self._search_best(media)
                         if not best:
                             stats["no_resource"] += 1
+                            trace("资源查询", f"{media.title_year}：无资源或未通过 MoviePilot 过滤规则")
                             scan_cache[tmdb_id] = {
                                 "status": "no_resource", "checked_at": datetime.now().isoformat(timespec="seconds")}
                             continue
                         selected.append((media, best))
+                        torrent = best.torrent_info
+                        trace("筛选成功", f"{media.title_year}：{torrent.title or '未知资源'}；站点 {torrent.site}；大小 {StringUtils.format_size(torrent.size) if torrent.size else '未知'}")
+                        self._set_run_status(run_id, source, "搜索站点", f"已选中 {media.title_year}", target=target, selected=len(selected), searched=stats["searched"], sent=0)
                         bucket_sent += 1
                     except Exception as err:
                         stats["errors"] += 1
+                        trace("筛选异常", f"{media.title_year}：{err}", "error")
                         scan_cache[tmdb_id] = {
                             "status": "error", "checked_at": datetime.now().isoformat(timespec="seconds")}
                         logger.error(f"电影推送处理 {media.title_year} 失败：{err}", exc_info=True)
@@ -2917,7 +2954,12 @@ class SmartMoviePush(_PluginBase):
                 f"无资源/未命中过滤 {stats['no_resource']}，异常 {stats['errors']}，选中 {len(selected)}"
             )
             logger.info(f"电影扫描完成：{diagnostic}；开始集中推送")
+            trace("扫描完成", diagnostic)
+            trace("候选名单", "、".join(media.title_year for media, _ in selected) or "无")
+            self._set_run_status(run_id, source, "批量发送", diagnostic, target=target, selected=len(selected), searched=stats["searched"], sent=0)
             if self._disk_guard_blocks_new():
+                trace("运行终止", "扫描结束时触发硬盘保护；没有发送或新增下载", "warning")
+                self._set_run_status(run_id, source, "已终止", "硬盘空间保护中", target=target, selected=len(selected), searched=stats["searched"], sent=0)
                 logger.warning("扫描完成时硬盘保护已启动，本轮候选保留在扫描缓存但不推送、不下载")
                 self.save_data(self._scan_cache_key, scan_cache)
                 return
@@ -2947,6 +2989,7 @@ class SmartMoviePush(_PluginBase):
                                 allow_queue=allow_queue,
                             )
                             if not handled:
+                                trace("提交失败", f"{media.title_year}：未提交，也未加入本次发送", "warning")
                                 continue
                             if submitted:
                                 auto_submitted += 1
@@ -2955,7 +2998,10 @@ class SmartMoviePush(_PluginBase):
                         pushed_ids.add(tmdb_id)
                         pushed[tmdb_id] = datetime.now().isoformat(timespec="seconds")
                         sent += 1
+                        trace("推送成功", f"{media.title_year}：{'已提交下载' if self._auto_download and submitted else '已加入等候下载' if self._auto_download else '已发送手动确认消息'}")
+                        self._set_run_status(run_id, source, "批量发送", f"刚发送 {media.title_year}", target=target, selected=len(selected), searched=stats["searched"], sent=sent)
                     except Exception as err:
+                        trace("推送失败", f"{media.title_year}：{err}", "error")
                         logger.error(f"集中推送 {media.title_year} 失败：{err}", exc_info=True)
 
             if self._auto_download:
@@ -2992,6 +3038,8 @@ class SmartMoviePush(_PluginBase):
 
             self.save_data(self._scan_cache_key, scan_cache)
             self.save_data(self._pushed_key, pushed)
+            trace("运行完成", f"目标 {target} 部；选中 {len(selected)} 部；推送 {sent} 部；提交下载详见‘提交下载’日志")
+            self._set_run_status(run_id, source, "已完成", diagnostic, target=target, selected=len(selected), searched=stats["searched"], sent=sent)
             logger.info(f"智能下载影视资源完成：目标 {target}，实际推送 {sent} 部，手动立即运行={test_mode}")
             if sent == 0 and not (self._auto_download and test_mode and selected):
                 _, result = self._send_telegram_direct(
@@ -3000,7 +3048,12 @@ class SmartMoviePush(_PluginBase):
                     userid=self._telegram_target(),
                 )
                 if not result:
+                    trace("通知失败", "无候选结果的 Telegram 通知未送达", "warning")
                     logger.error("本轮未选出电影的通知未送达 Telegram")
+        except Exception as err:
+            trace("运行异常", f"{type(err).__name__}：{err}", "error")
+            self._set_run_status(run_id, source, "运行失败", str(err)[:300])
+            logger.error(f"电影推荐运行失败：{err}", exc_info=True)
         finally:
             self._running_lock.release()
 

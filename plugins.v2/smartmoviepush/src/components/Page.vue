@@ -21,7 +21,12 @@ const queueSearch = ref('')
 const historySearch = ref('')
 const suppressedSearch = ref('')
 const logSearch = ref('')
+const showDetailedLogs = ref(false)
 const pageSizes = [20, 50, 100]
+const briefLogCategories = new Set(['提交下载', '提交失败', '推送成功', '推送失败', '整理完成', 'Emby 已入库', '每日统计'])
+const visibleLogs = computed(() => showDetailedLogs.value
+  ? (state.value.logs || [])
+  : (state.value.logs || []).filter(item => briefLogCategories.has(item.category)))
 const state = ref({
   summary: {}, queue: [], history: [], suppressed: [], logs: [],
   telegram: { source: '', admins_override: '', chat_id_override: '', sources: [] },
@@ -412,6 +417,10 @@ onUnmounted(() => {
         <VBtn color="info" variant="tonal" @click="dialog = 'logs'">查看日志</VBtn>
         <VBtn variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus()" />
       </div>
+      <VAlert v-if="state.run_status?.run_id" class="mt-3" type="info" variant="tonal" density="compact">
+        {{ state.run_status.source }} · {{ state.run_status.stage }}：{{ state.run_status.detail }}
+        <span v-if="state.run_status.target">（目标 {{ state.run_status.target }}，已查询 {{ state.run_status.searched || 0 }}，选中 {{ state.run_status.selected || 0 }}，已推送 {{ state.run_status.sent || 0 }}）</span>
+      </VAlert>
     </VCard>
 
     <VCard variant="outlined" class="pa-4 mb-4">
@@ -484,9 +493,11 @@ onUnmounted(() => {
         <VCardText>
           <div class="d-flex ga-2 mb-3">
             <VTextField v-model="logSearch" label="搜索日志" prepend-inner-icon="mdi-magnify" clearable hide-details />
+            <VSwitch v-model="showDetailedLogs" label="详情日志" color="primary" hide-details class="flex-grow-0" />
             <VBtn color="error" variant="tonal" @click="runAction('clear_logs')">清空日志</VBtn>
           </div>
-          <VDataTable :headers="logHeaders" :items="state.logs || []" :search="logSearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
+          <div class="text-caption text-medium-emphasis mb-2">{{ showDetailedLogs ? '显示操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步' }}</div>
+          <VDataTable :headers="logHeaders" :items="visibleLogs" :search="logSearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
         </VCardText>
       </VCard>
     </VDialog>
