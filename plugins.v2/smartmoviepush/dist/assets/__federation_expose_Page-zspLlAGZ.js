@@ -46,8 +46,9 @@ const _hoisted_32 = { class: "d-flex flex-wrap ga-2" };
 const _hoisted_33 = { class: "d-flex align-center ga-2" };
 const _hoisted_34 = { class: "text-caption text-no-wrap" };
 const _hoisted_35 = { class: "d-flex ga-2 mb-3" };
-const _hoisted_36 = { class: "d-flex ga-2 mb-3" };
+const _hoisted_36 = ["title"];
 const _hoisted_37 = { class: "d-flex ga-2 mb-3" };
+const _hoisted_38 = { class: "d-flex ga-2 mb-3" };
 
 const {computed,onMounted,onUnmounted,ref,watch} = await importShared('vue');
 
@@ -246,6 +247,8 @@ const queueHeaders = [
 const historyHeaders = [
   { title: '影片', key: 'title' },
   { title: '提交时间', key: 'submitted_at', width: 190 },
+  { title: '下载完成', key: 'download_completed_at', width: 190 },
+  { title: '整理 / 入库', key: 'result', width: 190 },
 ];
 const suppressedHeaders = [
   { title: '影片', key: 'title' },
@@ -1213,7 +1216,14 @@ return (_ctx, _cache) => {
                                   "items-per-page-options": pageSizes,
                                   density: "compact",
                                   hover: ""
-                                }, null, 8, ["items", "search"])
+                                }, {
+                                  "item.result": _withCtx(({ item }) => [
+                                    _createElementVNode("span", {
+                                      title: item.organize_error || ''
+                                    }, _toDisplayString(item.emby_ingested_at ? '✓ Emby 已入库' : item.organized_at ? 'MP 已整理，待 Emby' : item.organize_failed_at ? 'MP 整理失败' : item.download_completed_at ? '已下载，待整理' : '下载中 / 待下载'), 9, _hoisted_36)
+                                  ]),
+                                  _: 1
+                                }, 8, ["items", "search"])
                               ]),
                               _: 1
                             })
@@ -1231,7 +1241,7 @@ return (_ctx, _cache) => {
                               }),
                               _createVNode(_component_VCardText, null, {
                                 default: _withCtx(() => [
-                                  _createElementVNode("div", _hoisted_36, [
+                                  _createElementVNode("div", _hoisted_37, [
                                     _createVNode(_component_VTextField, {
                                       modelValue: suppressedSearch.value,
                                       "onUpdate:modelValue": _cache[42] || (_cache[42] = $event => ((suppressedSearch).value = $event)),
@@ -1328,7 +1338,7 @@ return (_ctx, _cache) => {
                                   }),
                                   _createVNode(_component_VCardText, null, {
                                     default: _withCtx(() => [
-                                      _createElementVNode("div", _hoisted_37, [
+                                      _createElementVNode("div", _hoisted_38, [
                                         _createVNode(_component_VTextField, {
                                           modelValue: logSearch.value,
                                           "onUpdate:modelValue": _cache[46] || (_cache[46] = $event => ((logSearch).value = $event)),
@@ -1375,6 +1385,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e1586c9e"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-8dcb457c"]]);
 
 export { Page as default };

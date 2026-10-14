@@ -189,6 +189,8 @@ const queueHeaders = [
 const historyHeaders = [
   { title: '影片', key: 'title' },
   { title: '提交时间', key: 'submitted_at', width: 190 },
+  { title: '下载完成', key: 'download_completed_at', width: 190 },
+  { title: '整理 / 入库', key: 'result', width: 190 },
 ]
 const suppressedHeaders = [
   { title: '影片', key: 'title' },
@@ -459,7 +461,11 @@ onUnmounted(() => {
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
           <VTextField v-model="historySearch" label="搜索影片" prepend-inner-icon="mdi-magnify" clearable class="mb-3" hide-details />
-          <VDataTable :headers="historyHeaders" :items="state.history" :search="historySearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
+          <VDataTable :headers="historyHeaders" :items="state.history" :search="historySearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover>
+            <template #item.result="{ item }">
+              <span :title="item.organize_error || ''">{{ item.emby_ingested_at ? '✓ Emby 已入库' : item.organized_at ? 'MP 已整理，待 Emby' : item.organize_failed_at ? 'MP 整理失败' : item.download_completed_at ? '已下载，待整理' : '下载中 / 待下载' }}</span>
+            </template>
+          </VDataTable>
         </VCardText>
       </VCard>
       <VCard v-else-if="dialog === 'suppressed'" title="不再推送列表">

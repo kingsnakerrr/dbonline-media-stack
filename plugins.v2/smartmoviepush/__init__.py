@@ -41,7 +41,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.14"
+    plugin_version = "0.9.15"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -278,6 +278,12 @@ class SmartMoviePush(_PluginBase):
                 "name": "核验本插件下载器任务是否真正完成",
                 "trigger": CronTrigger.from_crontab("*/5 * * * *", timezone=settings.TZ),
                 "func": self.reconcile_download_completions,
+            },
+            {
+                "id": "SmartMoviePushTransferResult",
+                "name": "核对本插件电影的 MoviePilot 整理结果",
+                "trigger": CronTrigger.from_crontab("*/5 * * * *", timezone=settings.TZ),
+                "func": self.reconcile_mp_transfer_results,
             },
         ]
 
@@ -1873,6 +1879,73 @@ class SmartMoviePush(_PluginBase):
             logger.info(f"插件下载完成核验：更新 {changed} 部")
         return changed
 
+    def reconcile_mp_transfer_results(self, all_pending: bool = False) -> int:
+        """按插件提交的种子 hash 核对 MP 整理成功/失败记录。"""
+        history = self._load_download_history()
+        timezone = pytz.timezone(settings.TZ)
+        cutoff = datetime.now(tz=timezone) - timedelta(days=3)
+        candidates = [item for item in history if item.get("download_id") and not item.get("organized_at")
+                      and (all_pending or (self._parse_history_time(
+                          item.get("download_completed_at") or item.get("submitted_at"), timezone
+                      ) or cutoff) >= cutoff)]
+        if not candidates:
+            return 0
+        oper = TransferHistoryOper()
+        results = {}
+        for torrent_hash in {str(item["download_id"]).strip().lower() for item in candidates}:
+            try:
+                rows = oper.list_by_hash(torrent_hash) or []
+                successful = [row for row in rows if getattr(row, "status", None) is True]
+                failed = [row for row in rows if getattr(row, "status", None) is False]
+                if successful:
+                    results[torrent_hash] = ("success", min(successful, key=lambda row: str(getattr(row, "date", "") or "")))
+                elif failed:
+                    results[torrent_hash] = ("failed", max(failed, key=lambda row: str(getattr(row, "date", "") or "")))
+            except Exception as err:
+                logger.warning(f"查询 MoviePilot 整理记录失败：{torrent_hash[:12]}：{err}")
+        if not results:
+            return 0
+        # 查询期间可能新增记录，避免覆盖新的插件下载历史。
+        history = self._load_download_history()
+        changed = 0
+        for item in history:
+            result = results.get(str(item.get("download_id") or "").strip().lower())
+            if not result or item.get("organized_at"):
+                continue
+            outcome, row = result
+            timestamp = self._parse_history_time(getattr(row, "date", None), timezone)
+            if outcome == "success":
+                if not timestamp:
+                    continue
+                title = str(getattr(row, "title", "") or "").strip()
+                year = str(getattr(row, "year", "") or "").strip()
+                if title:
+                    item["title"] = f"{title} ({year})" if year and year not in title else title
+                    item["media_title"] = title
+                    item["year"] = year
+                item["organized_at"] = timestamp.isoformat(timespec="seconds")
+                item.pop("organize_failed_at", None)
+                item.pop("organize_error", None)
+                if not item.get("download_completed_at"):
+                    item["download_completed_at"] = item["organized_at"]
+                    item["download_completion_source"] = "transfer"
+                if not item.get("emby_ingested_at"):
+                    item["status"] = "organized"
+                changed += 1
+            else:
+                failed_at = (timestamp or datetime.now(tz=timezone)).isoformat(timespec="seconds")
+                reason = str(getattr(row, "errmsg", "") or "").strip()[:300]
+                if item.get("organize_failed_at") == failed_at and item.get("organize_error") == reason:
+                    continue
+                item["organize_failed_at"] = failed_at
+                item["organize_error"] = reason
+                item["status"] = "organize_failed"
+                changed += 1
+        if changed:
+            self.save_data(self._download_history_key, history[-1000:])
+            logger.info(f"插件电影 MoviePilot 整理结果核对：更新 {changed} 条")
+        return changed
+
     def _submit_download(self, media: MediaInfo, context: Context,
                          channel: Any = None, userid: Any = None,
                          username: str = "智能下载影视资源_惹咪之北") -> Tuple[bool, Optional[str]]:
@@ -2242,6 +2315,8 @@ class SmartMoviePush(_PluginBase):
         history_item["organized_at"] = datetime.now(
             tz=pytz.timezone(settings.TZ)
         ).isoformat(timespec="seconds")
+        history_item.pop("organize_failed_at", None)
+        history_item.pop("organize_error", None)
         if not history_item.get("download_completed_at"):
             history_item["download_completed_at"] = history_item["organized_at"]
             history_item["download_completion_source"] = "transfer"
@@ -2450,105 +2525,92 @@ class SmartMoviePush(_PluginBase):
             return
 
         self.reconcile_download_completions()
-        # 成功整理能证明下载已完成。若种子已被删除，用 MP 整理时间兜底。
-        history = self._load_download_history()
-        history_changed = False
-        transfer_oper = TransferHistoryOper()
-        for item in history:
-            if (item.get("organized_at") and item.get("download_completed_at")) or not item.get("download_id"):
-                continue
-            try:
-                transfers = transfer_oper.list_by_hash(str(item.get("download_id"))) or []
-                successful = [row for row in transfers if bool(getattr(row, "status", False))]
-                if not successful:
-                    continue
-                transfer = min(successful, key=lambda row: str(getattr(row, "date", "") or ""))
-                organized_at = self._parse_history_time(getattr(transfer, "date", None), timezone)
-                if not organized_at:
-                    continue
-                title = str(getattr(transfer, "title", "") or "").strip()
-                year = str(getattr(transfer, "year", "") or "").strip()
-                if title:
-                    item["title"] = f"{title} ({year})" if year and year not in title else title
-                    item["media_title"] = title
-                    item["year"] = year
-                if not item.get("organized_at"):
-                    item["organized_at"] = organized_at.isoformat(timespec="seconds")
-                    if not item.get("emby_ingested_at"):
-                        item["status"] = "organized"
-                if not item.get("download_completed_at"):
-                    item["download_completed_at"] = organized_at.isoformat(timespec="seconds")
-                    item["download_completion_source"] = "transfer"
-                history_changed = True
-            except Exception as err:
-                logger.warning(f"回查插件下载整理记录失败：{item.get('title')}：{err}")
-        if history_changed:
-            self.save_data(self._download_history_key, history[-1000:])
+        # qB 种子已删除时，只有 MP 成功整理记录才能反证下载确实完成；
+        # 整理失败记录只标记失败，不能单独充当下载完成凭据。
+        self.reconcile_mp_transfer_results(all_pending=True)
         self.verify_emby_ingestion()
         if not getattr(self, "_last_emby_check_ok", False):
             logger.warning("Emby 暂不可用，每日统计暂缓发送，避免将真实入库数误报为 0")
             return
         history = self._load_download_history()
 
-        downloaded = []
-        seen = set()
+        downloaded_by_identity = {}
         for item in history:
             completed_at = self._parse_history_time(item.get("download_completed_at"), timezone)
             if not completed_at or not (start <= completed_at < end):
                 continue
             identity = self._download_history_identity(item)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            downloaded.append(item)
+            previous_item = downloaded_by_identity.get(identity)
+            rank = lambda value: (bool(value.get("emby_ingested_at")), bool(value.get("organized_at")),
+                                  bool(value.get("organize_failed_at")))
+            if previous_item is None or rank(item) > rank(previous_item):
+                downloaded_by_identity[identity] = item
+        downloaded = list(downloaded_by_identity.values())
         downloaded.sort(key=lambda item: str(item.get("download_completed_at") or ""))
         organized_count = sum(1 for item in downloaded if item.get("organized_at"))
         completed_count = sum(1 for item in downloaded if item.get("emby_ingested_at"))
         organized_waiting_emby = sum(1 for item in downloaded if item.get("organized_at") and not item.get("emby_ingested_at"))
+        failed_items = [item for item in downloaded if not item.get("organized_at") and item.get("organize_failed_at")]
+        awaiting_count = len(downloaded) - organized_count - len(failed_items)
         # Telegram 使用等宽 <pre>，并分批发送，分隔符在长片名换行后也保持固定列。
         page_size = 32
         pages = [downloaded[index:index + page_size]
                  for index in range(0, len(downloaded), page_size)] or [[]]
-        sent_pages = min(int(previous.get("sent_pages") or 0), len(pages)) if previous.get("date") == summary_date else 0
-        for page_number in range(sent_pages, len(pages)):
-            page_items = pages[page_number]
+        messages = []
+        for page_number, page_items in enumerate(pages):
             rows = self._format_daily_movie_rows(page_items, page_number * page_size + 1)
             title = (
                 f"📊 {summary_date}｜完成下载 {len(downloaded)} 部｜"
                 f"Emby 已入库 {completed_count} 部"
             )
-            text = (
-                f"MoviePilot 已整理：{organized_count} 部｜待整理：{len(downloaded) - organized_count} 部\n"
+            body = (
+                f"MoviePilot 已整理：{organized_count} 部｜整理失败：{len(failed_items)} 部｜待整理：{awaiting_count} 部\n"
                 f"已整理待 Emby：{organized_waiting_emby} 部\n"
                 f"名单 {page_number + 1}/{len(pages)}：\n"
                 f"<pre>{html.escape(rows)}</pre>\n"
                 "✓ 仅代表 Emby 当前确实查到；未完成下载的不计入本日报。"
             )
+            messages.append((title, body))
+        for page_number in range(0, len(failed_items), page_size):
+            failed_page = failed_items[page_number:page_number + page_size]
+            rows = self._format_daily_movie_rows(failed_page, page_number + 1)
+            messages.append((
+                f"⚠️ {summary_date}｜MoviePilot 整理/刮削失败 {len(failed_items)} 部",
+                f"以下影片已完成下载，但 MoviePilot 有失败记录，尚无成功整理记录：\n"
+                f"<pre>{html.escape(rows)}</pre>\n"
+                "请到 MoviePilot 整理记录查看具体错误；无失败记录的影片归为待整理。",
+            ))
+        sent_pages = min(int(previous.get("sent_pages") or 0), len(messages)) if previous.get("date") == summary_date else 0
+        for message_number in range(sent_pages, len(messages)):
+            title, body = messages[message_number]
             source, result = self._send_telegram_direct(
                 title=title,
-                text=text,
+                text=body,
                 userid=self._telegram_target(),
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
             if not source or not result:
-                logger.error(f"每日电影统计第 {page_number + 1}/{len(pages)} 页未送达 Telegram")
+                logger.error(f"每日电影统计第 {message_number + 1}/{len(messages)} 页未送达 Telegram")
                 self.save_data(self._daily_summary_key, {
                     "date": summary_date, "count": len(downloaded),
                     "organized_count": organized_count, "completed_count": completed_count,
-                    "sent_pages": page_number, "total_pages": len(pages),
+                    "failed_count": len(failed_items), "awaiting_count": awaiting_count,
+                    "sent_pages": message_number, "total_pages": len(messages),
                     "direct_success": False,
                 })
                 return
             self.save_data(self._daily_summary_key, {
                 "date": summary_date, "count": len(downloaded),
                 "organized_count": organized_count, "completed_count": completed_count,
-                "sent_pages": page_number + 1, "total_pages": len(pages),
+                "failed_count": len(failed_items), "awaiting_count": awaiting_count,
+                "sent_pages": message_number + 1, "total_pages": len(messages),
                 "sent_at": now.isoformat(timespec="seconds"),
-                "direct_success": page_number + 1 == len(pages),
+                "direct_success": message_number + 1 == len(messages),
             })
         detail = (f"{summary_date} 完成下载 {len(downloaded)} 部，"
-                  f"MoviePilot 已整理 {organized_count} 部，Emby 已入库 {completed_count} 部")
+                  f"MoviePilot 已整理 {organized_count} 部，整理失败 {len(failed_items)} 部，"
+                  f"待整理 {awaiting_count} 部，Emby 已入库 {completed_count} 部")
         if downloaded:
             detail += "：" + "、".join(
                 f"{item.get('title') or ''}{'（已入库）' if item.get('emby_ingested_at') else ''}"
