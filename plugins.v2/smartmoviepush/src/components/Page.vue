@@ -116,6 +116,7 @@ async function saveTelegram() {
     const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...telegramForm.value, access_token: accessToken.value })
     const body = envelope(response)
     if (body?.locked) { lockLocally(); return }
+    if (body?.success === false) { error.value = body?.message || '保存失败'; return }
     if (body?.warning) error.value = body?.message || body.warning
     else message.value = body?.message || 'Telegram 设置已保存'
     applyState(body?.data)
@@ -132,9 +133,10 @@ async function saveControlSettings(extra = {}) {
   error.value = ''
   message.value = ''
   try {
-    const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...controlForm.value, access_token: accessToken.value })
+    const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...extra, access_token: accessToken.value })
     const body = envelope(response)
     if (body?.locked) { lockLocally(); return }
+    if (body?.success === false) { error.value = body?.message || '保存失败'; return }
     message.value = body?.message || '控制设置已保存'
     applyState(body?.data)
   } catch (err) {
@@ -152,6 +154,7 @@ async function saveDiskGuard() {
     const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...diskForm.value, access_token: accessToken.value })
     const body = envelope(response)
     if (body?.locked) { lockLocally(); return }
+    if (body?.success === false) { error.value = body?.message || '保存失败'; return }
     message.value = body?.message || '硬盘保护设置已保存'
     applyState(body?.data)
   } catch (err) {
@@ -169,6 +172,7 @@ async function savePushSettings() {
     const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...pushForm.value, access_token: accessToken.value })
     const body = envelope(response)
     if (body?.locked) { lockLocally(); return }
+    if (body?.success === false) { error.value = body?.message || '保存失败'; return }
     message.value = body?.message || '推送与下载设置已保存'
     applyState(body?.data)
   } catch (err) {
@@ -289,14 +293,6 @@ async function unlockAccess() {
   }
 }
 
-async function lockAccess() {
-  try {
-    await props.api.post('plugin/SmartMoviePush/auth_lock', { access_token: accessToken.value })
-  } finally {
-    lockLocally()
-  }
-}
-
 onMounted(async () => {
   await checkAccess()
 })
@@ -403,7 +399,7 @@ onUnmounted(() => {
       <div class="text-caption text-medium-emphasis mb-3">定时任务按上方所选间隔使用“每轮数量”；“立即运行”使用“立即运行数量”，不受定时推送开关影响。硬盘保护启动后两者均暂停扫描、推荐推送和新增下载，旧下载继续；手动恢复保护后才重新运行。</div>
       <VRow dense class="settings-row push-settings-row">
         <VCol cols="6" md="3"><VTextField v-model.number="pushForm.limit" label="每轮下载/推送（部）" type="number" :min="1" :max="50" density="compact" /></VCol>
-        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.test_limit" label="立即运行数量（部）" type="number" :min="1" :max="5" density="compact" /></VCol>
+        <VCol cols="6" md="3"><VTextField v-model.number="pushForm.test_limit" label="立即运行数量（部）" type="number" :min="1" :max="50" density="compact" /></VCol>
         <VCol cols="6" md="3"><VTextField v-model.number="pushForm.max_active_downloads" label="同时下载上限（部）" type="number" :min="1" :max="100" density="compact" /></VCol>
         <VCol cols="6" md="3"><VTextField v-model.number="pushForm.max_searches" label="每轮最多搜索候选电影" type="number" :min="20" :max="200" density="compact" hint="每部候选会同时搜索下面选中的全部站点" persistent-hint /></VCol>
         <VCol cols="12" md="3"><VTextField v-model.number="pushForm.min_score" label="TMDB 最低评分" type="number" :min="0" :max="10" :step="0.1" density="compact" hint="默认 6 分；提高后候选更少但平均质量更高" persistent-hint /></VCol>
@@ -414,7 +410,6 @@ onUnmounted(() => {
         <VBtn color="success" variant="tonal" :loading="loading" :disabled="!controlForm.enabled" @click="runAction('run_once')">立即运行</VBtn>
         <VBtn color="error" variant="tonal" :loading="loading" @click="runAction('clear_cache')">清空扫描缓存</VBtn>
         <VBtn color="info" variant="tonal" @click="dialog = 'logs'">查看日志</VBtn>
-        <VBtn color="secondary" variant="tonal" prepend-icon="mdi-lock" @click="lockAccess">锁定插件</VBtn>
         <VBtn variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus()" />
       </div>
     </VCard>

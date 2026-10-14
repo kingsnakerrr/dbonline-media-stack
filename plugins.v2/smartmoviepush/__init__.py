@@ -41,7 +41,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.15"
+    plugin_version = "0.9.16"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -117,7 +117,7 @@ class SmartMoviePush(_PluginBase):
         )
         self._cron = self._cron_for_interval(self._push_interval_minutes)
         self._limit = max(1, min(int(config.get("limit") or 20), 50))
-        self._test_limit = max(1, min(int(config.get("test_limit") or 2), 5))
+        self._test_limit = max(1, min(int(config.get("test_limit") or 2), 50))
         raw_site_ids = config.get("site_ids")
         if not isinstance(raw_site_ids, list):
             raw_site_ids = str(raw_site_ids or config.get("site_id") or 1).replace(";", ",").split(",")
@@ -1236,6 +1236,53 @@ class SmartMoviePush(_PluginBase):
         payload = dict(payload or {})
         if not self._valid_access_token(payload.pop("access_token", "")):
             return {"success": False, "locked": True, "message": "插件未解锁"}
+        numeric_rules = {
+            "limit": (1, 50, "每轮数量"),
+            "test_limit": (1, 50, "立即运行数量"),
+            "max_active_downloads": (1, 100, "同时下载上限"),
+            "max_searches": (20, 200, "每轮搜索候选数"),
+            "disk_guard_threshold_gb": (1, None, "停止新增阈值"),
+            "disk_guard_recover_gb": (1, None, "允许恢复阈值"),
+        }
+        parsed_numbers = {}
+        for key, (minimum, maximum, label) in numeric_rules.items():
+            if key not in payload:
+                continue
+            try:
+                raw = payload[key]
+                value = int(raw)
+                if isinstance(raw, bool) or str(raw).strip() != str(value):
+                    raise ValueError()
+            except (TypeError, ValueError):
+                return {"success": False, "message": f"{label}必须是整数"}
+            if value < minimum or (maximum is not None and value > maximum):
+                scope = f"{minimum}–{maximum}" if maximum is not None else f"至少 {minimum}"
+                return {"success": False, "message": f"{label}须在 {scope} 范围内"}
+            parsed_numbers[key] = value
+        if "min_score" in payload:
+            try:
+                score = float(payload["min_score"])
+            except (TypeError, ValueError):
+                return {"success": False, "message": "TMDB 最低评分必须是数字"}
+            if not 0 <= score <= 10:
+                return {"success": False, "message": "TMDB 最低评分须在 0–10 范围内"}
+        if "site_ids" in payload:
+            if not isinstance(payload["site_ids"], list):
+                return {"success": False, "message": "资源搜索站点格式错误"}
+            selected = []
+            for raw in payload["site_ids"]:
+                try:
+                    site_id = int(raw)
+                except (TypeError, ValueError):
+                    return {"success": False, "message": "资源搜索站点包含无效 ID"}
+                if site_id > 0 and site_id not in selected:
+                    selected.append(site_id)
+            if not selected:
+                return {"success": False, "message": "请至少选择一个资源搜索站点"}
+        threshold = parsed_numbers.get("disk_guard_threshold_gb", self._disk_guard_threshold_gb)
+        recover = parsed_numbers.get("disk_guard_recover_gb", self._disk_guard_recover_gb)
+        if recover <= threshold:
+            return {"success": False, "message": "允许恢复阈值须大于停止新增阈值"}
         if "enabled" in payload:
             self._enabled = bool(payload.get("enabled"))
         if "auto_push" in payload:
@@ -1267,9 +1314,9 @@ class SmartMoviePush(_PluginBase):
                 int(payload.get("disk_guard_recover_gb") or 350),
             )
         if "limit" in payload:
-            self._limit = max(1, min(int(payload.get("limit") or 20), 50))
+            self._limit = parsed_numbers["limit"]
         if "test_limit" in payload:
-            self._test_limit = max(1, min(int(payload.get("test_limit") or 2), 5))
+            self._test_limit = parsed_numbers["test_limit"]
         if "site_ids" in payload:
             selected = []
             for value in payload.get("site_ids") or []:
@@ -1285,11 +1332,9 @@ class SmartMoviePush(_PluginBase):
         if "min_score" in payload:
             self._min_score = max(0.0, min(float(payload.get("min_score") or 0), 10.0))
         if "max_active_downloads" in payload:
-            self._max_active_downloads = max(
-                1, min(int(payload.get("max_active_downloads") or 20), 100)
-            )
+            self._max_active_downloads = parsed_numbers["max_active_downloads"]
         if "max_searches" in payload:
-            self._max_searches = max(20, min(int(payload.get("max_searches") or 80), 200))
+            self._max_searches = parsed_numbers["max_searches"]
         self.update_config(self._current_config())
         delivery_warning = self._telegram_delivery_warning() if any(
             key in payload for key in ("source", "admins_override", "chat_id_override")
