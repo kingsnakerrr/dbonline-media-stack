@@ -1,5 +1,6 @@
 import hashlib
 import html
+import json
 import math
 import random
 import re
@@ -7,6 +8,7 @@ import secrets
 import shutil
 import subprocess
 import threading
+import time
 import unicodedata
 from types import SimpleNamespace
 from datetime import datetime, timedelta
@@ -41,7 +43,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.18"
+    plugin_version = "0.9.19"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -82,6 +84,9 @@ class SmartMoviePush(_PluginBase):
     _running_lock = threading.Lock()
     _queue_lock = threading.Lock()
     _plugin_log_lock = threading.RLock()
+    _library_snapshot_lock = threading.RLock()
+    _library_snapshot = None
+    _library_snapshot_time = 0.0
     _allowed_languages = {
         "zh", "en", "ja", "ko", "fr", "de", "es", "it", "pt",
         "nl", "sv", "no", "da", "fi", "pl", "cs", "hu", "tr",
@@ -1469,8 +1474,9 @@ class SmartMoviePush(_PluginBase):
         except (TypeError, ValueError):
             return 0.0
 
-    def _rank_candidates(self, items: List[MediaInfo], recency_weight: float = 0.15) -> List[MediaInfo]:
-        """综合 TMDB 评分可信度、热度、上映时间和少量随机性排序。"""
+    def _rank_candidates(self, items: List[MediaInfo], recency_weight: float = 0.15,
+                         scan_history: Optional[dict] = None) -> List[MediaInfo]:
+        """先考虑口碑热度，再轻度倾向已上线一段时间且未反复搜空的电影。"""
         if not items:
             return []
         max_popularity = max((self._popularity(item) for item in items), default=1.0) or 1.0
@@ -1488,11 +1494,16 @@ class SmartMoviePush(_PluginBase):
                 recency = max(0.0, 1.0 - age_days / 3650.0)
             else:
                 recency = 0.0
-            return (bayesian / 10.0) * 0.55 + popularity * 0.25 + recency * recency_weight + random.random() * 0.05
+                age_days = 3650
+            availability = -0.12 if age_days < 14 else -0.04 if age_days < 45 else 0.04 if age_days < 365 else 0.0
+            previous = (scan_history or {}).get(str(media.tmdb_id)) or {}
+            if previous.get("status") == "no_resource":
+                availability -= 0.06  # 旧的搜空记录过期后仍可重试，只是稍后搜索。
+            return (bayesian / 10.0) * 0.55 + popularity * 0.25 + recency * recency_weight + availability + random.random() * 0.05
 
         return sorted(items, key=score, reverse=True)
 
-    def _candidate_buckets(self) -> Dict[str, List[MediaInfo]]:
+    def _candidate_buckets(self, scan_history: Optional[dict] = None) -> Dict[str, List[MediaInfo]]:
         chain = TmdbChain()
         today = datetime.now().date()
         new_floor = today - timedelta(days=365)
@@ -1569,10 +1580,10 @@ class SmartMoviePush(_PluginBase):
             and float(getattr(m, "vote_average", 0) or 0) >= self._min_score
             and self._vote_count(m) >= self._min_votes))
         return {
-            "new": self._rank_candidates(new_movies, recency_weight=0.20),
-            "recent": self._rank_candidates(recent_movies, recency_weight=0.15),
-            "classic": self._rank_candidates(classic_movies, recency_weight=0.02),
-            "random": self._rank_candidates(random_movies, recency_weight=0.08),
+            "new": self._rank_candidates(new_movies, recency_weight=0.20, scan_history=scan_history),
+            "recent": self._rank_candidates(recent_movies, recency_weight=0.15, scan_history=scan_history),
+            "classic": self._rank_candidates(classic_movies, recency_weight=0.02, scan_history=scan_history),
+            "random": self._rank_candidates(random_movies, recency_weight=0.08, scan_history=scan_history),
         }
 
     def _load_recent_pushes(self) -> Dict[str, str]:
@@ -1592,13 +1603,27 @@ class SmartMoviePush(_PluginBase):
                 continue
         return result
 
-    def _load_scan_cache(self) -> Dict[str, dict]:
+    def _scan_scope(self) -> str:
+        """站点或 MP 搜索过滤规则变化时，旧的无资源结论立即失效。"""
+        rules = {}
+        for key in (SystemConfigKey.SearchFilterRuleGroups,
+                    SystemConfigKey.UserFilterRuleGroups,
+                    SystemConfigKey.CustomFilterRules):
+            try:
+                rules[key.value] = self.systemconfig.get(key)
+            except Exception:
+                rules[key.value] = None
+        payload = json.dumps({"sites": sorted(self._site_ids), "rules": rules},
+                             ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+    def _load_scan_cache(self, include_expired: bool = False) -> Dict[str, dict]:
         value = self.get_data(self._scan_cache_key)
         if not isinstance(value, dict):
             return {}
         now = datetime.now()
         result = {}
-        ttl_hours = {"library": 168, "no_resource": 4, "error": 0.5}
+        scope = self._scan_scope()
         for tmdb_id, item in value.items():
             if not isinstance(item, dict):
                 continue
@@ -1606,8 +1631,21 @@ class SmartMoviePush(_PluginBase):
                 checked_at = datetime.fromisoformat(str(item.get("checked_at")))
             except (TypeError, ValueError):
                 continue
-            ttl = ttl_hours.get(str(item.get("status")), 0)
-            if ttl and now - checked_at < timedelta(hours=ttl):
+            status = str(item.get("status"))
+            if status in {"no_resource", "error"} and item.get("scope") != scope:
+                continue
+            try:
+                age_days = int(item.get("age_days") if item.get("age_days") is not None else 3650)
+            except (TypeError, ValueError):
+                age_days = 3650
+            ttl = (24 if status == "library" else
+                   3 if status == "no_resource" and age_days < 30 else
+                   6 if status == "no_resource" and age_days < 365 else
+                   18 if status == "no_resource" else
+                   0.25 if status == "error" else 0)
+            if ((ttl and now - checked_at < timedelta(hours=ttl)) or
+                    (include_expired and status == "no_resource" and
+                     now - checked_at < timedelta(days=7))):
                 result[str(tmdb_id)] = item
         return result
 
@@ -2461,6 +2499,63 @@ class SmartMoviePush(_PluginBase):
                     break
         return by_tmdb, by_title_year
 
+    def _remember_library_snapshot(self, indexes: list, server_names: list) -> None:
+        """只保存所有已启用 Emby 均成功读取的完整快照；不依赖同步中的 MP 表。"""
+        tmdb_ids = set()
+        title_years = set()
+        for _, by_tmdb, by_title_year in indexes:
+            tmdb_ids.update(by_tmdb)
+            title_years.update(by_title_year)
+        if not tmdb_ids and not title_years:
+            return
+        with self._library_snapshot_lock:
+            self._library_snapshot = {
+                "servers": tuple(sorted(str(name) for name in server_names)),
+                "tmdb_ids": tmdb_ids,
+                "title_years": title_years,
+            }
+            self._library_snapshot_time = time.monotonic()
+
+    def _library_snapshot_for_scan(self) -> Optional[dict]:
+        """每轮复用最近的 Emby 全量索引；失败时回退到 MP 原有逐部核验。"""
+        module = ModuleManager().get_running_module("EmbyModule")
+        configs = module.get_configs() if module else {}
+        servers = [(name, conf) for name, conf in (configs or {}).items()
+                   if getattr(conf, "enabled", False) and getattr(conf, "type", "") == "emby"]
+        names = tuple(sorted(str(name) for name, _ in servers))
+        if not servers:
+            return None
+        with self._library_snapshot_lock:
+            if (self._library_snapshot
+                    and self._library_snapshot.get("servers") == names
+                    and time.monotonic() - self._library_snapshot_time < 300):
+                return self._library_snapshot
+        indexes = []
+        for name, conf in servers:
+            try:
+                indexes.append((name, *self._emby_index_for_server(conf.config or {})))
+            except Exception as err:
+                logger.warning(f"预取 Emby 电影索引失败：{name}：{type(err).__name__}；回退逐部核验")
+                return None
+        if not any(by_tmdb or by_title_year for _, by_tmdb, by_title_year in indexes):
+            logger.warning("Emby 返回空电影目录，本轮回退 MoviePilot 逐部核验")
+            return None
+        self._remember_library_snapshot(indexes, list(names))
+        with self._library_snapshot_lock:
+            return self._library_snapshot if self._library_snapshot_time and time.monotonic() - self._library_snapshot_time < 300 else None
+
+    @staticmethod
+    def _snapshot_has_movie(snapshot: dict, media: MediaInfo) -> bool:
+        tmdb_id = str(media.tmdb_id or "")
+        if tmdb_id and tmdb_id in snapshot["tmdb_ids"]:
+            return True
+        # 有 TMDB ID 时不按片名兜底，避免翻拍或同名电影误判。
+        if tmdb_id:
+            return False
+        title = " ".join(str(media.title or "").casefold().split())
+        year = str(media.year or "")
+        return bool(title and year and (title, year) in snapshot["title_years"])
+
     def verify_emby_ingestion(self) -> int:
         """每轮重查 Emby 实际目录；已删除的条目不得继续算作入库。"""
         self._last_emby_check_ok = False
@@ -2492,6 +2587,8 @@ class SmartMoviePush(_PluginBase):
             return 0
         all_servers_loaded = len(indexes) == len(servers)
         self._last_emby_check_ok = all_servers_loaded
+        if all_servers_loaded:
+            self._remember_library_snapshot(indexes, [name for name, _ in servers])
         # 索引请求期间可能新增或更新下载记录，避免用旧快照覆盖它们。
         history = self._load_download_history()
         now = datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")
@@ -2867,9 +2964,17 @@ class SmartMoviePush(_PluginBase):
             pushed = self._load_recent_pushes()
             pushed_ids = set(pushed)
             suppressed_ids = set(self._load_suppressed())
+            scan_history = self._load_scan_cache(include_expired=True)
             scan_cache = self._load_scan_cache()
-            buckets = self._candidate_buckets()
+            search_scope = self._scan_scope()
+            buckets = self._candidate_buckets(scan_history)
             trace("候选获取", "；".join(f"{name} {len(items)} 部" for name, items in buckets.items()))
+            self._set_run_status(run_id, source, "读取媒体库索引", "批量获取 Emby 电影目录", target=target, selected=0, searched=0, sent=0)
+            library_snapshot = self._library_snapshot_for_scan()
+            if library_snapshot:
+                trace("媒体库索引", f"已载入 {len(library_snapshot['tmdb_ids'])} 个 TMDB ID；候选查询将使用内存比对")
+            else:
+                trace("媒体库索引", "完整 Emby 索引暂不可用，回退 MoviePilot 逐部核验", "warning")
             plans = [
                 ("new", min(self._new_count, target)),
                 ("recent", min(self._recent_count, target)),
@@ -2903,13 +3008,19 @@ class SmartMoviePush(_PluginBase):
                         continue
                     attempted.add(tmdb_id)
                     cached = scan_cache.get(tmdb_id)
+                    if cached and cached.get("status") == "library":
+                        if not library_snapshot or not self._snapshot_has_movie(library_snapshot, media):
+                            scan_cache.pop(tmdb_id, None)  # Emby 移除或索引不可用时重新核验。
+                            scan_history.pop(tmdb_id, None)
+                            cached = None
                     if cached and cached.get("status") in {"library", "no_resource", "error"}:
                         stats["cached"] += 1
                         continue
                     if stats["searched"] >= self._max_searches:
                         break
                     try:
-                        if self._already_in_library(media):
+                        if (self._snapshot_has_movie(library_snapshot, media)
+                                if library_snapshot else self._already_in_library(media)):
                             stats["library"] += 1
                             scan_cache[tmdb_id] = {
                                 "status": "library", "checked_at": datetime.now().isoformat(timespec="seconds")}
@@ -2921,10 +3032,15 @@ class SmartMoviePush(_PluginBase):
                         if not best:
                             stats["no_resource"] += 1
                             trace("资源查询", f"{media.title_year}：无资源或未通过 MoviePilot 过滤规则")
+                            released = self._release_date(media)
+                            age_days = max(0, (datetime.now().date() - released).days) if released else 3650
                             scan_cache[tmdb_id] = {
-                                "status": "no_resource", "checked_at": datetime.now().isoformat(timespec="seconds")}
+                                "status": "no_resource", "scope": search_scope,
+                                "age_days": age_days,
+                                "checked_at": datetime.now().isoformat(timespec="seconds")}
                             continue
                         selected.append((media, best))
+                        scan_history.pop(tmdb_id, None)
                         torrent = best.torrent_info
                         trace("筛选成功", f"{media.title_year}：{torrent.title or '未知资源'}；站点 {torrent.site}；大小 {StringUtils.format_size(torrent.size) if torrent.size else '未知'}")
                         self._set_run_status(run_id, source, "搜索站点", f"已选中 {media.title_year}", target=target, selected=len(selected), searched=stats["searched"], sent=0)
@@ -2933,7 +3049,8 @@ class SmartMoviePush(_PluginBase):
                         stats["errors"] += 1
                         trace("筛选异常", f"{media.title_year}：{err}", "error")
                         scan_cache[tmdb_id] = {
-                            "status": "error", "checked_at": datetime.now().isoformat(timespec="seconds")}
+                            "status": "error", "scope": search_scope,
+                            "checked_at": datetime.now().isoformat(timespec="seconds")}
                         logger.error(f"电影推送处理 {media.title_year} 失败：{err}", exc_info=True)
                 return bucket_sent
 
@@ -2961,7 +3078,8 @@ class SmartMoviePush(_PluginBase):
                 trace("运行终止", "扫描结束时触发硬盘保护；没有发送或新增下载", "warning")
                 self._set_run_status(run_id, source, "已终止", "硬盘空间保护中", target=target, selected=len(selected), searched=stats["searched"], sent=0)
                 logger.warning("扫描完成时硬盘保护已启动，本轮候选保留在扫描缓存但不推送、不下载")
-                self.save_data(self._scan_cache_key, scan_cache)
+                scan_history.update(scan_cache)
+                self.save_data(self._scan_cache_key, scan_history)
                 return
             sent = 0
 
@@ -2974,6 +3092,12 @@ class SmartMoviePush(_PluginBase):
                         break
                     tmdb_id = str(media.tmdb_id)
                     try:
+                        # 快照获取后电影可能刚入库；真正下载前仅对选中的少数影片再核验一次。
+                        if self._already_in_library(media):
+                            trace("发送跳过", f"{media.title_year}：提交前复核发现已在媒体库")
+                            scan_cache[tmdb_id] = {
+                                "status": "library", "checked_at": datetime.now().isoformat(timespec="seconds")}
+                            continue
                         # 手动“立即运行”与定时开关相互独立，但执行与定时任务
                         # 完全相同：自动下载模式下真实提交下载；达到并发上限
                         # 或触发硬盘保护时进入等候队列。
@@ -3036,7 +3160,8 @@ class SmartMoviePush(_PluginBase):
             else:
                 send_batch()
 
-            self.save_data(self._scan_cache_key, scan_cache)
+            scan_history.update(scan_cache)
+            self.save_data(self._scan_cache_key, scan_history)
             self.save_data(self._pushed_key, pushed)
             trace("运行完成", f"目标 {target} 部；选中 {len(selected)} 部；推送 {sent} 部；提交下载详见‘提交下载’日志")
             self._set_run_status(run_id, source, "已完成", diagnostic, target=target, selected=len(selected), searched=stats["searched"], sent=sent)

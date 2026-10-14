@@ -82,11 +82,22 @@ const historySearch = ref('');
 const suppressedSearch = ref('');
 const logSearch = ref('');
 const showDetailedLogs = ref(false);
+const logsRefreshing = ref(false);
 const pageSizes = [20, 50, 100];
 const briefLogCategories = new Set(['提交下载', '提交失败', '推送成功', '推送失败', '整理完成', 'Emby 已入库', '每日统计']);
 const visibleLogs = computed(() => showDetailedLogs.value
   ? (state.value.logs || [])
   : (state.value.logs || []).filter(item => briefLogCategories.has(item.category)));
+
+async function toggleDetailedLogs() {
+  showDetailedLogs.value = !showDetailedLogs.value;
+  logsRefreshing.value = true;
+  try {
+    await loadStatus(true);
+  } finally {
+    logsRefreshing.value = false;
+  }
+}
 const state = ref({
   summary: {}, queue: [], history: [], suppressed: [], logs: [],
   telegram: { source: '', admins_override: '', chat_id_override: '', sources: [] },
@@ -1356,26 +1367,41 @@ return (_ctx, _cache) => {
                                           clearable: "",
                                           "hide-details": ""
                                         }, null, 8, ["modelValue"]),
-                                        _createVNode(_component_VSwitch, {
-                                          modelValue: showDetailedLogs.value,
-                                          "onUpdate:modelValue": _cache[47] || (_cache[47] = $event => ((showDetailedLogs).value = $event)),
-                                          label: "详情日志",
-                                          color: "primary",
-                                          "hide-details": "",
-                                          class: "flex-grow-0"
-                                        }, null, 8, ["modelValue"]),
+                                        _createVNode(_component_VBtn, {
+                                          color: showDetailedLogs.value ? 'primary' : 'secondary',
+                                          variant: "tonal",
+                                          loading: logsRefreshing.value,
+                                          class: "flex-shrink-0",
+                                          onClick: toggleDetailedLogs
+                                        }, {
+                                          default: _withCtx(() => [
+                                            _createTextVNode(_toDisplayString(showDetailedLogs.value ? '详情日志：开' : '详情日志：关'), 1)
+                                          ]),
+                                          _: 1
+                                        }, 8, ["color", "loading"]),
+                                        _createVNode(_component_VBtn, {
+                                          variant: "tonal",
+                                          class: "flex-shrink-0",
+                                          loading: logsRefreshing.value,
+                                          onClick: _cache[47] || (_cache[47] = $event => (loadStatus(true)))
+                                        }, {
+                                          default: _withCtx(() => [...(_cache[85] || (_cache[85] = [
+                                            _createTextVNode("刷新", -1)
+                                          ]))]),
+                                          _: 1
+                                        }, 8, ["loading"]),
                                         _createVNode(_component_VBtn, {
                                           color: "error",
                                           variant: "tonal",
                                           onClick: _cache[48] || (_cache[48] = $event => (runAction('clear_logs')))
                                         }, {
-                                          default: _withCtx(() => [...(_cache[85] || (_cache[85] = [
+                                          default: _withCtx(() => [...(_cache[86] || (_cache[86] = [
                                             _createTextVNode("清空日志", -1)
                                           ]))]),
                                           _: 1
                                         })
                                       ]),
-                                      _createElementVNode("div", _hoisted_40, _toDisplayString(showDetailedLogs.value ? '显示操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步'), 1),
+                                      _createElementVNode("div", _hoisted_40, "当前显示 " + _toDisplayString(visibleLogs.value.length) + "/" + _toDisplayString((state.value.logs || []).length) + " 条。" + _toDisplayString(showDetailedLogs.value ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步') + "。升级前未记录的步骤无法补写。", 1),
                                       _createVNode(_component_VDataTable, {
                                         headers: logHeaders,
                                         items: visibleLogs.value,
@@ -1403,6 +1429,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-7befe49a"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-42ac1220"]]);
 
 export { Page as default };

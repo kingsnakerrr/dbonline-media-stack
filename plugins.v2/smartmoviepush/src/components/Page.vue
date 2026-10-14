@@ -22,11 +22,22 @@ const historySearch = ref('')
 const suppressedSearch = ref('')
 const logSearch = ref('')
 const showDetailedLogs = ref(false)
+const logsRefreshing = ref(false)
 const pageSizes = [20, 50, 100]
 const briefLogCategories = new Set(['提交下载', '提交失败', '推送成功', '推送失败', '整理完成', 'Emby 已入库', '每日统计'])
 const visibleLogs = computed(() => showDetailedLogs.value
   ? (state.value.logs || [])
   : (state.value.logs || []).filter(item => briefLogCategories.has(item.category)))
+
+async function toggleDetailedLogs() {
+  showDetailedLogs.value = !showDetailedLogs.value
+  logsRefreshing.value = true
+  try {
+    await loadStatus(true)
+  } finally {
+    logsRefreshing.value = false
+  }
+}
 const state = ref({
   summary: {}, queue: [], history: [], suppressed: [], logs: [],
   telegram: { source: '', admins_override: '', chat_id_override: '', sources: [] },
@@ -493,10 +504,11 @@ onUnmounted(() => {
         <VCardText>
           <div class="d-flex ga-2 mb-3">
             <VTextField v-model="logSearch" label="搜索日志" prepend-inner-icon="mdi-magnify" clearable hide-details />
-            <VSwitch v-model="showDetailedLogs" label="详情日志" color="primary" hide-details class="flex-grow-0" />
+            <VBtn :color="showDetailedLogs ? 'primary' : 'secondary'" variant="tonal" :loading="logsRefreshing" class="flex-shrink-0" @click="toggleDetailedLogs">{{ showDetailedLogs ? '详情日志：开' : '详情日志：关' }}</VBtn>
+            <VBtn variant="tonal" class="flex-shrink-0" :loading="logsRefreshing" @click="loadStatus(true)">刷新</VBtn>
             <VBtn color="error" variant="tonal" @click="runAction('clear_logs')">清空日志</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-2">{{ showDetailedLogs ? '显示操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步' }}</div>
+          <div class="text-caption text-medium-emphasis mb-2">当前显示 {{ visibleLogs.length }}/{{ (state.logs || []).length }} 条。{{ showDetailedLogs ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步' }}。升级前未记录的步骤无法补写。</div>
           <VDataTable :headers="logHeaders" :items="visibleLogs" :search="logSearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
         </VCardText>
       </VCard>
