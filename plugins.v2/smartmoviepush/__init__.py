@@ -44,7 +44,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.26"
+    plugin_version = "0.9.27"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1129,7 +1129,7 @@ class SmartMoviePush(_PluginBase):
                 "push_interval_minutes": self._push_interval_minutes,
                 "cache_count": len(cache) if isinstance(cache, dict) else 0,
                 "queue_count": len(queue),
-                "history_count": len(history),
+                "history_count": self._history_total_count(history),
                 "suppressed_count": len(suppressed),
                 "active_downloads": active_count,
                 "active_download_items": active_items,
@@ -1281,14 +1281,19 @@ class SmartMoviePush(_PluginBase):
         for item in history:
             submitted_at = self._parse_history_time(item.get("submitted_at"), timezone)
             if submitted_at:
-                dated.append((submitted_at.date().isoformat(), item))
-        dates = sorted({day for day, _ in dated}, reverse=True)
+                dated.append((submitted_at, item))
+        dates = sorted({submitted_at.date().isoformat() for submitted_at, _ in dated}, reverse=True)
+        period = str(payload.get("period") or "all").strip()
+        if period not in {"all", "date", "today", "yesterday", "week", "month", "last_month", "year"}:
+            return {"success": False, "message": "未知的时间范围"}
         selected_date = str(payload.get("date") or "").strip()
-        if selected_date and selected_date not in dates:
+        if period == "date" and selected_date not in dates:
             return {"success": False, "message": "所选日期没有本插件提交的记录"}
+        time_range = self._stats_range(period, datetime.now(tz=timezone)) if period not in {"all", "date"} else None
         search = str(payload.get("search") or "").strip().casefold()[:100]
-        matching = [item for day, item in dated
-                    if (not selected_date or day == selected_date)
+        matching = [item for submitted_at, item in dated
+                    if (period != "date" or submitted_at.date().isoformat() == selected_date)
+                    and (not time_range or time_range[0] <= submitted_at < time_range[1])
                     and (not search or search in str(item.get("title") or "").casefold()
                          or search in str(item.get("media_title") or "").casefold()
                          or search in str(item.get("tmdb_id") or "").casefold())]
@@ -1297,7 +1302,8 @@ class SmartMoviePush(_PluginBase):
         page = min(page, max(1, (total + page_size - 1) // page_size))
         start = (page - 1) * page_size
         return {"success": True, "data": {
-            "dates": dates, "date": selected_date, "items": matching[start:start + page_size],
+            "dates": dates, "date": selected_date, "period": period,
+            "items": matching[start:start + page_size],
             "total": total, "page": page, "page_size": page_size,
         }}
 
@@ -1779,6 +1785,17 @@ class SmartMoviePush(_PluginBase):
         except Exception as err:
             logger.error(f"读取本插件历史归档失败，统计仅含近期记录：{err}")
             return active
+
+    def _history_total_count(self, active: Optional[List[dict]] = None) -> int:
+        active = active if active is not None else self._load_download_history()
+        try:
+            with self._history_archive_lock:
+                with closing(self._history_archive()) as db:
+                    archived = int(db.execute("SELECT COUNT(*) FROM history_archive").fetchone()[0])
+            return len(active) + archived
+        except Exception as err:
+            logger.error(f"读取本插件历史总数失败：{err}")
+            return len(active)
 
     def _migrate_legacy_organized_history(self) -> None:
         """迁移旧记录：MP 整理能证明下载完成，但不能证明 Emby 入库。"""
