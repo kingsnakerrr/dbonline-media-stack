@@ -83,6 +83,7 @@ const suppressedSearch = ref('');
 const logSearch = ref('');
 const showDetailedLogs = ref(false);
 const logsRefreshing = ref(false);
+const logsRefreshedAt = ref('');
 const pageSizes = [20, 50, 100];
 const briefLogCategories = new Set(['提交下载', '提交失败', '推送成功', '推送失败', '整理完成', 'Emby 已入库', '每日统计']);
 const visibleLogs = computed(() => showDetailedLogs.value
@@ -91,12 +92,19 @@ const visibleLogs = computed(() => showDetailedLogs.value
 
 async function toggleDetailedLogs() {
   showDetailedLogs.value = !showDetailedLogs.value;
+  await refreshLogs();
+}
+async function refreshLogs() {
   logsRefreshing.value = true;
   try {
-    await loadStatus(true);
+    if (await loadStatus(true)) logsRefreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false });
   } finally {
     logsRefreshing.value = false;
   }
+}
+async function openLogs() {
+  dialog.value = 'logs';
+  await refreshLogs();
 }
 const state = ref({
   summary: {}, queue: [], history: [], suppressed: [], logs: [],
@@ -156,11 +164,13 @@ async function loadStatus(silent = false) {
     const body = envelope(response);
     if (body?.locked || body?.success === false) {
       lockLocally();
-      return
+      return false
     }
     applyState(unwrap(response), !silent);
+    return true
   } catch (err) {
     error.value = err?.message || '加载失败';
+    return false
   } finally {
     if (!silent) loading.value = false;
   }
@@ -447,7 +457,7 @@ return (_ctx, _cache) => {
                   ]),
                   _: 1
                 }),
-                _cache[50] || (_cache[50] = _createElementVNode("div", null, [
+                _cache[48] || (_cache[48] = _createElementVNode("div", null, [
                   _createElementVNode("div", { class: "text-h6 font-weight-bold" }, "智能下载影视资源_惹咪之北"),
                   _createElementVNode("div", { class: "text-body-2 text-medium-emphasis" }, "私人插件，首次使用请联系 @SDFSDFSF12321 获取密码。验证成功后当前浏览器会记住。")
                 ], -1))
@@ -470,7 +480,7 @@ return (_ctx, _cache) => {
                 loading: loading.value,
                 onClick: unlockAccess
               }, {
-                default: _withCtx(() => [...(_cache[51] || (_cache[51] = [
+                default: _withCtx(() => [...(_cache[49] || (_cache[49] = [
                   _createTextVNode("解锁插件", -1)
                 ]))]),
                 _: 1
@@ -489,7 +499,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_4, [
                       _createElementVNode("div", null, [
-                        _cache[52] || (_cache[52] = _createElementVNode("div", { class: "text-caption" }, "插件状态", -1)),
+                        _cache[50] || (_cache[50] = _createElementVNode("div", { class: "text-caption" }, "插件状态", -1)),
                         _createElementVNode("div", _hoisted_5, _toDisplayString(controlForm.value.enabled ? '已启用' : '已关闭'), 1)
                       ]),
                       _createVNode(_component_VSwitch, {
@@ -516,7 +526,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_7, [
                       _createElementVNode("div", null, [
-                        _cache[53] || (_cache[53] = _createElementVNode("div", { class: "text-caption" }, "定时推送", -1)),
+                        _cache[51] || (_cache[51] = _createElementVNode("div", { class: "text-caption" }, "定时推送", -1)),
                         _createElementVNode("div", _hoisted_8, _toDisplayString(diskGuard.value.active ? '硬盘保护暂停' : (controlForm.value.auto_push ? '已开启' : '已暂停')), 1)
                       ]),
                       _createVNode(_component_VSwitch, {
@@ -553,7 +563,7 @@ return (_ctx, _cache) => {
                   class: "pa-4 h-100 status-card"
                 }, {
                   default: _withCtx(() => [
-                    _cache[54] || (_cache[54] = _createElementVNode("div", { class: "text-caption mb-2" }, "下载模式", -1)),
+                    _cache[52] || (_cache[52] = _createElementVNode("div", { class: "text-caption mb-2" }, "下载模式", -1)),
                     _createVNode(_component_VSelect, {
                       modelValue: controlForm.value.auto_download,
                       "onUpdate:modelValue": [
@@ -579,7 +589,7 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_11, [
                       _createElementVNode("div", null, [
-                        _cache[55] || (_cache[55] = _createElementVNode("div", { class: "text-caption" }, "正在下载（点击看实时详情）", -1)),
+                        _cache[53] || (_cache[53] = _createElementVNode("div", { class: "text-caption" }, "正在下载（点击看实时详情）", -1)),
                         _createElementVNode("div", _hoisted_12, _toDisplayString(summary.value.active_downloads || 0) + "/" + _toDisplayString(summary.value.max_active_downloads || 20), 1)
                       ]),
                       _createVNode(_component_VIcon, { icon: "mdi-chevron-right" })
@@ -598,9 +608,9 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_14, [
                       _createElementVNode("div", null, [
-                        _cache[56] || (_cache[56] = _createElementVNode("div", { class: "text-caption" }, "等候下载", -1)),
+                        _cache[54] || (_cache[54] = _createElementVNode("div", { class: "text-caption" }, "等候下载", -1)),
                         _createElementVNode("div", _hoisted_15, _toDisplayString(state.value.queue.length), 1),
-                        _cache[57] || (_cache[57] = _createElementVNode("div", { class: "text-caption mt-1" }, "搜索、取消任务或批量清空", -1))
+                        _cache[55] || (_cache[55] = _createElementVNode("div", { class: "text-caption mt-1" }, "搜索、取消任务或批量清空", -1))
                       ]),
                       _createVNode(_component_VIcon, { icon: "mdi-chevron-right" })
                     ])
@@ -618,9 +628,9 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_17, [
                       _createElementVNode("div", null, [
-                        _cache[58] || (_cache[58] = _createElementVNode("div", { class: "text-caption" }, "插件下载记录", -1)),
+                        _cache[56] || (_cache[56] = _createElementVNode("div", { class: "text-caption" }, "插件下载记录", -1)),
                         _createElementVNode("div", _hoisted_18, _toDisplayString(state.value.history.length), 1),
-                        _cache[59] || (_cache[59] = _createElementVNode("div", { class: "text-caption mt-1" }, "搜索和分页查看记录", -1))
+                        _cache[57] || (_cache[57] = _createElementVNode("div", { class: "text-caption mt-1" }, "搜索和分页查看记录", -1))
                       ]),
                       _createVNode(_component_VIcon, { icon: "mdi-chevron-right" })
                     ])
@@ -638,9 +648,9 @@ return (_ctx, _cache) => {
                   default: _withCtx(() => [
                     _createElementVNode("div", _hoisted_20, [
                       _createElementVNode("div", null, [
-                        _cache[60] || (_cache[60] = _createElementVNode("div", { class: "text-caption" }, "不再推送列表", -1)),
+                        _cache[58] || (_cache[58] = _createElementVNode("div", { class: "text-caption" }, "不再推送列表", -1)),
                         _createElementVNode("div", _hoisted_21, _toDisplayString(state.value.suppressed.length), 1),
-                        _cache[61] || (_cache[61] = _createElementVNode("div", { class: "text-caption mt-1" }, "搜索、取消排除或批量清空", -1))
+                        _cache[59] || (_cache[59] = _createElementVNode("div", { class: "text-caption mt-1" }, "搜索、取消排除或批量清空", -1))
                       ]),
                       _createVNode(_component_VIcon, { icon: "mdi-chevron-right" })
                     ])
@@ -658,7 +668,7 @@ return (_ctx, _cache) => {
                 default: _withCtx(() => [
                   _createElementVNode("div", _hoisted_23, [
                     _createElementVNode("div", _hoisted_24, [
-                      _cache[62] || (_cache[62] = _createElementVNode("div", { class: "text-subtitle-1 font-weight-bold" }, "硬盘空间保护", -1)),
+                      _cache[60] || (_cache[60] = _createElementVNode("div", { class: "text-subtitle-1 font-weight-bold" }, "硬盘空间保护", -1)),
                       _createElementVNode("div", _hoisted_25, _toDisplayString(diskGuard.value.active ? '保护中：定时推送与新下载暂停，旧下载继续' : '正常：允许推送与新增下载'), 1)
                     ]),
                     _createElementVNode("div", _hoisted_26, [
@@ -709,7 +719,7 @@ return (_ctx, _cache) => {
                       loading: loading.value,
                       onClick: saveDiskGuard
                     }, {
-                      default: _withCtx(() => [...(_cache[63] || (_cache[63] = [
+                      default: _withCtx(() => [...(_cache[61] || (_cache[61] = [
                         _createTextVNode("保存", -1)
                       ]))]),
                       _: 1
@@ -720,7 +730,7 @@ return (_ctx, _cache) => {
                       loading: loading.value,
                       onClick: _cache[17] || (_cache[17] = $event => (runAction('disk_guard_check')))
                     }, {
-                      default: _withCtx(() => [...(_cache[64] || (_cache[64] = [
+                      default: _withCtx(() => [...(_cache[62] || (_cache[62] = [
                         _createTextVNode("立即检查", -1)
                       ]))]),
                       _: 1
@@ -734,7 +744,7 @@ return (_ctx, _cache) => {
                           loading: loading.value,
                           onClick: _cache[18] || (_cache[18] = $event => (runAction('disk_guard_ack', { incident_id: diskGuard.value.incident_id })))
                         }, {
-                          default: _withCtx(() => [...(_cache[65] || (_cache[65] = [
+                          default: _withCtx(() => [...(_cache[63] || (_cache[63] = [
                             _createTextVNode("收到，停止提醒", -1)
                           ]))]),
                           _: 1
@@ -749,7 +759,7 @@ return (_ctx, _cache) => {
                           loading: loading.value,
                           onClick: _cache[19] || (_cache[19] = $event => (runAction('disk_guard_resume')))
                         }, {
-                          default: _withCtx(() => [...(_cache[66] || (_cache[66] = [
+                          default: _withCtx(() => [...(_cache[64] || (_cache[64] = [
                             _createTextVNode("清理后恢复", -1)
                           ]))]),
                           _: 1
@@ -762,7 +772,7 @@ return (_ctx, _cache) => {
                           variant: "text",
                           onClick: _cache[20] || (_cache[20] = $event => (dialog.value = 'disk'))
                         }, {
-                          default: _withCtx(() => [...(_cache[67] || (_cache[67] = [
+                          default: _withCtx(() => [...(_cache[65] || (_cache[65] = [
                             _createTextVNode("查看暂停种子", -1)
                           ]))]),
                           _: 1
@@ -793,8 +803,8 @@ return (_ctx, _cache) => {
               class: "pa-4 mb-4"
             }, {
               default: _withCtx(() => [
-                _cache[72] || (_cache[72] = _createElementVNode("div", { class: "text-h6 mb-1" }, "推送与下载数量", -1)),
-                _cache[73] || (_cache[73] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, "定时任务按上方所选间隔使用“每轮数量”；“立即运行”使用“立即运行数量”，不受定时推送开关影响。硬盘保护启动后两者均暂停扫描、推荐推送和新增下载，旧下载继续；手动恢复保护后才重新运行。", -1)),
+                _cache[70] || (_cache[70] = _createElementVNode("div", { class: "text-h6 mb-1" }, "推送与下载数量", -1)),
+                _cache[71] || (_cache[71] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, "定时任务按上方所选间隔使用“每轮数量”；“立即运行”使用“立即运行数量”，不受定时推送开关影响。硬盘保护启动后两者均暂停扫描、推荐推送和新增下载，旧下载继续；手动恢复保护后才重新运行。", -1)),
                 _createVNode(_component_VRow, {
                   dense: "",
                   class: "settings-row push-settings-row"
@@ -927,7 +937,7 @@ return (_ctx, _cache) => {
                     loading: loading.value,
                     onClick: savePushSettings
                   }, {
-                    default: _withCtx(() => [...(_cache[68] || (_cache[68] = [
+                    default: _withCtx(() => [...(_cache[66] || (_cache[66] = [
                       _createTextVNode("保存推送与下载设置", -1)
                     ]))]),
                     _: 1
@@ -939,7 +949,7 @@ return (_ctx, _cache) => {
                     disabled: !controlForm.value.enabled,
                     onClick: _cache[27] || (_cache[27] = $event => (runAction('run_once')))
                   }, {
-                    default: _withCtx(() => [...(_cache[69] || (_cache[69] = [
+                    default: _withCtx(() => [...(_cache[67] || (_cache[67] = [
                       _createTextVNode("立即运行", -1)
                     ]))]),
                     _: 1
@@ -950,7 +960,7 @@ return (_ctx, _cache) => {
                     loading: loading.value,
                     onClick: _cache[28] || (_cache[28] = $event => (runAction('clear_cache')))
                   }, {
-                    default: _withCtx(() => [...(_cache[70] || (_cache[70] = [
+                    default: _withCtx(() => [...(_cache[68] || (_cache[68] = [
                       _createTextVNode("清空扫描缓存", -1)
                     ]))]),
                     _: 1
@@ -958,9 +968,9 @@ return (_ctx, _cache) => {
                   _createVNode(_component_VBtn, {
                     color: "info",
                     variant: "tonal",
-                    onClick: _cache[29] || (_cache[29] = $event => (dialog.value = 'logs'))
+                    onClick: openLogs
                   }, {
-                    default: _withCtx(() => [...(_cache[71] || (_cache[71] = [
+                    default: _withCtx(() => [...(_cache[69] || (_cache[69] = [
                       _createTextVNode("查看日志", -1)
                     ]))]),
                     _: 1
@@ -969,7 +979,7 @@ return (_ctx, _cache) => {
                     variant: "text",
                     icon: "mdi-refresh",
                     loading: loading.value,
-                    onClick: _cache[30] || (_cache[30] = $event => (loadStatus()))
+                    onClick: _cache[29] || (_cache[29] = $event => (loadStatus()))
                   }, null, 8, ["loading"])
                 ]),
                 (state.value.run_status?.run_id)
@@ -997,8 +1007,8 @@ return (_ctx, _cache) => {
               class: "pa-4 mb-4"
             }, {
               default: _withCtx(() => [
-                _cache[76] || (_cache[76] = _createElementVNode("div", { class: "text-h6 mb-1" }, "Telegram 设置", -1)),
-                _cache[77] || (_cache[77] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, "三个输入框留空即跟随 MoviePilot 的 Telegram 通知设置；需要覆盖哪一项就直接输入哪一项。", -1)),
+                _cache[74] || (_cache[74] = _createElementVNode("div", { class: "text-h6 mb-1" }, "Telegram 设置", -1)),
+                _cache[75] || (_cache[75] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mb-3" }, "三个输入框留空即跟随 MoviePilot 的 Telegram 通知设置；需要覆盖哪一项就直接输入哪一项。", -1)),
                 _createVNode(_component_VRow, {
                   dense: "",
                   class: "settings-row telegram-settings-row"
@@ -1011,7 +1021,7 @@ return (_ctx, _cache) => {
                       default: _withCtx(() => [
                         _createVNode(_component_VTextField, {
                           modelValue: telegramForm.value.source,
-                          "onUpdate:modelValue": _cache[31] || (_cache[31] = $event => ((telegramForm.value.source) = $event)),
+                          "onUpdate:modelValue": _cache[30] || (_cache[30] = $event => ((telegramForm.value.source) = $event)),
                           label: "TG 机器人 Token 或 MP 实例名（可选）",
                           type: "password",
                           autocomplete: "off",
@@ -1030,7 +1040,7 @@ return (_ctx, _cache) => {
                       default: _withCtx(() => [
                         _createVNode(_component_VTextField, {
                           modelValue: telegramForm.value.admins_override,
-                          "onUpdate:modelValue": _cache[32] || (_cache[32] = $event => ((telegramForm.value.admins_override) = $event)),
+                          "onUpdate:modelValue": _cache[31] || (_cache[31] = $event => ((telegramForm.value.admins_override) = $event)),
                           label: "管理员 ID/用户名（可选）",
                           density: "compact",
                           clearable: "",
@@ -1048,7 +1058,7 @@ return (_ctx, _cache) => {
                       default: _withCtx(() => [
                         _createVNode(_component_VTextField, {
                           modelValue: telegramForm.value.chat_id_override,
-                          "onUpdate:modelValue": _cache[33] || (_cache[33] = $event => ((telegramForm.value.chat_id_override) = $event)),
+                          "onUpdate:modelValue": _cache[32] || (_cache[32] = $event => ((telegramForm.value.chat_id_override) = $event)),
                           label: "通知群组/频道 Chat ID（可选）",
                           density: "compact",
                           clearable: "",
@@ -1067,7 +1077,7 @@ return (_ctx, _cache) => {
                   loading: loading.value,
                   onClick: saveTelegram
                 }, {
-                  default: _withCtx(() => [...(_cache[74] || (_cache[74] = [
+                  default: _withCtx(() => [...(_cache[72] || (_cache[72] = [
                     _createTextVNode("保存 Telegram 设置", -1)
                   ]))]),
                   _: 1
@@ -1077,9 +1087,9 @@ return (_ctx, _cache) => {
                   variant: "tonal",
                   class: "ml-2",
                   loading: loading.value,
-                  onClick: _cache[34] || (_cache[34] = $event => (runAction('telegram_test')))
+                  onClick: _cache[33] || (_cache[33] = $event => (runAction('telegram_test')))
                 }, {
-                  default: _withCtx(() => [...(_cache[75] || (_cache[75] = [
+                  default: _withCtx(() => [...(_cache[73] || (_cache[73] = [
                     _createTextVNode("发送测试消息", -1)
                   ]))]),
                   _: 1
@@ -1089,7 +1099,7 @@ return (_ctx, _cache) => {
             }),
             _createVNode(_component_VDialog, {
               modelValue: dialogOpen.value,
-              "onUpdate:modelValue": _cache[49] || (_cache[49] = $event => ((dialogOpen).value = $event)),
+              "onUpdate:modelValue": _cache[47] || (_cache[47] = $event => ((dialogOpen).value = $event)),
               "max-width": "75rem",
               scrollable: ""
             }, {
@@ -1101,7 +1111,7 @@ return (_ctx, _cache) => {
                     }, {
                       default: _withCtx(() => [
                         _createVNode(_component_VDialogCloseBtn, {
-                          onClick: _cache[35] || (_cache[35] = $event => (dialog.value = ''))
+                          onClick: _cache[34] || (_cache[34] = $event => (dialog.value = ''))
                         }),
                         _createVNode(_component_VCardText, null, {
                           default: _withCtx(() => [
@@ -1112,7 +1122,7 @@ return (_ctx, _cache) => {
                                   variant: "tonal",
                                   class: "mb-3"
                                 }, {
-                                  default: _withCtx(() => [...(_cache[78] || (_cache[78] = [
+                                  default: _withCtx(() => [...(_cache[76] || (_cache[76] = [
                                     _createTextVNode("当前没有 MoviePilot 正在下载的任务，或下载器暂未返回详情。", -1)
                                   ]))]),
                                   _: 1
@@ -1139,7 +1149,7 @@ return (_ctx, _cache) => {
                                   ]),
                                   _: 1
                                 }, 8, ["items"])),
-                            _cache[79] || (_cache[79] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-3" }, "每 5 秒自动刷新。", -1))
+                            _cache[77] || (_cache[77] = _createElementVNode("div", { class: "text-caption text-medium-emphasis mt-3" }, "每 5 秒自动刷新。", -1))
                           ]),
                           _: 1
                         })
@@ -1153,14 +1163,14 @@ return (_ctx, _cache) => {
                       }, {
                         default: _withCtx(() => [
                           _createVNode(_component_VDialogCloseBtn, {
-                            onClick: _cache[36] || (_cache[36] = $event => (dialog.value = ''))
+                            onClick: _cache[35] || (_cache[35] = $event => (dialog.value = ''))
                           }),
                           _createVNode(_component_VCardText, null, {
                             default: _withCtx(() => [
                               _createElementVNode("div", _hoisted_36, [
                                 _createVNode(_component_VTextField, {
                                   modelValue: queueSearch.value,
-                                  "onUpdate:modelValue": _cache[37] || (_cache[37] = $event => ((queueSearch).value = $event)),
+                                  "onUpdate:modelValue": _cache[36] || (_cache[36] = $event => ((queueSearch).value = $event)),
                                   label: "搜索影片",
                                   "prepend-inner-icon": "mdi-magnify",
                                   clearable: "",
@@ -1169,9 +1179,9 @@ return (_ctx, _cache) => {
                                 _createVNode(_component_VBtn, {
                                   color: "error",
                                   variant: "tonal",
-                                  onClick: _cache[38] || (_cache[38] = $event => (runAction('clear_queue')))
+                                  onClick: _cache[37] || (_cache[37] = $event => (runAction('clear_queue')))
                                 }, {
-                                  default: _withCtx(() => [...(_cache[80] || (_cache[80] = [
+                                  default: _withCtx(() => [...(_cache[78] || (_cache[78] = [
                                     _createTextVNode("批量清空", -1)
                                   ]))]),
                                   _: 1
@@ -1194,7 +1204,7 @@ return (_ctx, _cache) => {
                                     variant: "tonal",
                                     onClick: $event => (runAction('remove_queue', { key: item.key }))
                                   }, {
-                                    default: _withCtx(() => [...(_cache[81] || (_cache[81] = [
+                                    default: _withCtx(() => [...(_cache[79] || (_cache[79] = [
                                       _createTextVNode("取消下载", -1)
                                     ]))]),
                                     _: 1
@@ -1215,13 +1225,13 @@ return (_ctx, _cache) => {
                         }, {
                           default: _withCtx(() => [
                             _createVNode(_component_VDialogCloseBtn, {
-                              onClick: _cache[39] || (_cache[39] = $event => (dialog.value = ''))
+                              onClick: _cache[38] || (_cache[38] = $event => (dialog.value = ''))
                             }),
                             _createVNode(_component_VCardText, null, {
                               default: _withCtx(() => [
                                 _createVNode(_component_VTextField, {
                                   modelValue: historySearch.value,
-                                  "onUpdate:modelValue": _cache[40] || (_cache[40] = $event => ((historySearch).value = $event)),
+                                  "onUpdate:modelValue": _cache[39] || (_cache[39] = $event => ((historySearch).value = $event)),
                                   label: "搜索影片",
                                   "prepend-inner-icon": "mdi-magnify",
                                   clearable: "",
@@ -1257,14 +1267,14 @@ return (_ctx, _cache) => {
                           }, {
                             default: _withCtx(() => [
                               _createVNode(_component_VDialogCloseBtn, {
-                                onClick: _cache[41] || (_cache[41] = $event => (dialog.value = ''))
+                                onClick: _cache[40] || (_cache[40] = $event => (dialog.value = ''))
                               }),
                               _createVNode(_component_VCardText, null, {
                                 default: _withCtx(() => [
                                   _createElementVNode("div", _hoisted_38, [
                                     _createVNode(_component_VTextField, {
                                       modelValue: suppressedSearch.value,
-                                      "onUpdate:modelValue": _cache[42] || (_cache[42] = $event => ((suppressedSearch).value = $event)),
+                                      "onUpdate:modelValue": _cache[41] || (_cache[41] = $event => ((suppressedSearch).value = $event)),
                                       label: "搜索影片",
                                       "prepend-inner-icon": "mdi-magnify",
                                       clearable: "",
@@ -1273,9 +1283,9 @@ return (_ctx, _cache) => {
                                     _createVNode(_component_VBtn, {
                                       color: "error",
                                       variant: "tonal",
-                                      onClick: _cache[43] || (_cache[43] = $event => (runAction('clear_suppressed')))
+                                      onClick: _cache[42] || (_cache[42] = $event => (runAction('clear_suppressed')))
                                     }, {
-                                      default: _withCtx(() => [...(_cache[82] || (_cache[82] = [
+                                      default: _withCtx(() => [...(_cache[80] || (_cache[80] = [
                                         _createTextVNode("批量取消", -1)
                                       ]))]),
                                       _: 1
@@ -1298,7 +1308,7 @@ return (_ctx, _cache) => {
                                         variant: "tonal",
                                         onClick: $event => (runAction('remove_suppressed', { tmdb_id: item.tmdb_id }))
                                       }, {
-                                        default: _withCtx(() => [...(_cache[83] || (_cache[83] = [
+                                        default: _withCtx(() => [...(_cache[81] || (_cache[81] = [
                                           _createTextVNode("取消排除", -1)
                                         ]))]),
                                         _: 1
@@ -1319,7 +1329,7 @@ return (_ctx, _cache) => {
                             }, {
                               default: _withCtx(() => [
                                 _createVNode(_component_VDialogCloseBtn, {
-                                  onClick: _cache[44] || (_cache[44] = $event => (dialog.value = ''))
+                                  onClick: _cache[43] || (_cache[43] = $event => (dialog.value = ''))
                                 }),
                                 _createVNode(_component_VCardText, null, {
                                   default: _withCtx(() => [
@@ -1328,7 +1338,7 @@ return (_ctx, _cache) => {
                                       variant: "tonal",
                                       class: "mb-3"
                                     }, {
-                                      default: _withCtx(() => [...(_cache[84] || (_cache[84] = [
+                                      default: _withCtx(() => [...(_cache[82] || (_cache[82] = [
                                         _createTextVNode("这里的种子没有删除；空间清理到恢复线后，在硬盘保护卡片点击“恢复添加/下载”。", -1)
                                       ]))]),
                                       _: 1
@@ -1354,14 +1364,14 @@ return (_ctx, _cache) => {
                               }, {
                                 default: _withCtx(() => [
                                   _createVNode(_component_VDialogCloseBtn, {
-                                    onClick: _cache[45] || (_cache[45] = $event => (dialog.value = ''))
+                                    onClick: _cache[44] || (_cache[44] = $event => (dialog.value = ''))
                                   }),
                                   _createVNode(_component_VCardText, null, {
                                     default: _withCtx(() => [
                                       _createElementVNode("div", _hoisted_39, [
                                         _createVNode(_component_VTextField, {
                                           modelValue: logSearch.value,
-                                          "onUpdate:modelValue": _cache[46] || (_cache[46] = $event => ((logSearch).value = $event)),
+                                          "onUpdate:modelValue": _cache[45] || (_cache[45] = $event => ((logSearch).value = $event)),
                                           label: "搜索日志",
                                           "prepend-inner-icon": "mdi-magnify",
                                           clearable: "",
@@ -1383,9 +1393,9 @@ return (_ctx, _cache) => {
                                           variant: "tonal",
                                           class: "flex-shrink-0",
                                           loading: logsRefreshing.value,
-                                          onClick: _cache[47] || (_cache[47] = $event => (loadStatus(true)))
+                                          onClick: refreshLogs
                                         }, {
-                                          default: _withCtx(() => [...(_cache[85] || (_cache[85] = [
+                                          default: _withCtx(() => [...(_cache[83] || (_cache[83] = [
                                             _createTextVNode("刷新", -1)
                                           ]))]),
                                           _: 1
@@ -1393,15 +1403,15 @@ return (_ctx, _cache) => {
                                         _createVNode(_component_VBtn, {
                                           color: "error",
                                           variant: "tonal",
-                                          onClick: _cache[48] || (_cache[48] = $event => (runAction('clear_logs')))
+                                          onClick: _cache[46] || (_cache[46] = $event => (runAction('clear_logs')))
                                         }, {
-                                          default: _withCtx(() => [...(_cache[86] || (_cache[86] = [
+                                          default: _withCtx(() => [...(_cache[84] || (_cache[84] = [
                                             _createTextVNode("清空日志", -1)
                                           ]))]),
                                           _: 1
                                         })
                                       ]),
-                                      _createElementVNode("div", _hoisted_40, "当前显示 " + _toDisplayString(visibleLogs.value.length) + "/" + _toDisplayString((state.value.logs || []).length) + " 条。" + _toDisplayString(showDetailedLogs.value ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步') + "。升级前未记录的步骤无法补写。", 1),
+                                      _createElementVNode("div", _hoisted_40, "当前显示 " + _toDisplayString(visibleLogs.value.length) + "/" + _toDisplayString((state.value.logs || []).length) + " 条。" + _toDisplayString(showDetailedLogs.value ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步') + "。" + _toDisplayString(logsRefreshedAt.value ? `最近刷新：${logsRefreshedAt.value}。` : '') + "升级前未记录的步骤无法补写。", 1),
                                       _createVNode(_component_VDataTable, {
                                         headers: logHeaders,
                                         items: visibleLogs.value,
@@ -1429,6 +1439,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-42ac1220"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-dc37a544"]]);
 
 export { Page as default };

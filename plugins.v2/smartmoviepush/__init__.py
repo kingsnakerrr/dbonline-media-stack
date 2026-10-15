@@ -9,7 +9,6 @@ import shutil
 import subprocess
 import threading
 import time
-import unicodedata
 from types import SimpleNamespace
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -43,7 +42,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.19"
+    plugin_version = "0.9.20"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2646,21 +2645,7 @@ class SmartMoviePush(_PluginBase):
     def _format_daily_movie_rows(items: List[dict], start_index: int = 1) -> str:
         if not items:
             return "本日没有本插件提交下载的电影。"
-        def display_width(value: str) -> int:
-            return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in value)
-
-        def wrap(value: str, width: int) -> List[str]:
-            lines, current, used = [], "", 0
-            for char in value:
-                size = display_width(char)
-                if current and used + size > width:
-                    lines.append(current)
-                    current, used = "", 0
-                current += char
-                used += size
-            return lines + ([current] if current else [])
-
-        entries = []
+        rows = []
         for index, item in enumerate(items, start_index):
             movie_title = item.get("title") or f"TMDB {item.get('tmdb_id', '')}"
             if item.get("emby_ingested_at"):
@@ -2673,15 +2658,7 @@ class SmartMoviePush(_PluginBase):
                 stage = "待整理"
             else:
                 stage = "未完成"
-            entries.append(f"{index}. {movie_title}  {stage}")
-        rows = []
-        for index in range(0, len(entries), 2):
-            left = wrap(entries[index], 34)
-            right = wrap(entries[index + 1], 34) if index + 1 < len(entries) else []
-            for line_number in range(max(len(left), len(right))):
-                left_line = left[line_number] if line_number < len(left) else ""
-                right_line = right[line_number] if line_number < len(right) else ""
-                rows.append(f"{left_line}{' ' * (36 - display_width(left_line))}│  {right_line}")
+            rows.append(f"{index}. {movie_title}  {stage}")
         return "\n".join(rows)
 
     def send_daily_completion_summary(self) -> None:
@@ -2720,35 +2697,35 @@ class SmartMoviePush(_PluginBase):
                              and not item.get("organized_at") and not item.get("organize_failed_at"))
         organized_waiting_emby = sum(1 for item in submitted if item.get("organized_at")
                                      and not item.get("emby_ingested_at"))
-        # Telegram 使用等宽 <pre>，并分批发送，分隔符在长片名换行后也保持固定列。
-        page_size = 32
-        pages = [submitted[index:index + page_size]
-                 for index in range(0, len(submitted), page_size)] or [[]]
+        title = (
+            f"📊 {summary_date}｜插件提交 {len(submitted)} 项｜"
+            f"下载完成 {downloaded_count} 项｜Emby 已有 {ingested_count} 项"
+        )
+        header = (
+            f"未完成下载：{len(submitted) - downloaded_count} 项｜MP 已整理：{organized_count} 项\n"
+            f"MP 整理失败：{len(failed_items)} 项｜下载完待整理：{awaiting_count} 项\n"
+            f"已整理待 Emby：{organized_waiting_emby} 项\n"
+        )
+        footer = "\n以本日插件提交的任务为总账；Emby 已有表示该影片当前可查到。"
+        # Telegram 单条文本上限为 4096 字符。保守预留标题、分段标记和实体转义空间；
+        # 不按固定部数分页，能装下一条就只发送一条，失败影片在名单内直接标记。
+        row_limit = max(1000, 3800 - len(title) - len(header) - len(footer))
+        rows = [html.escape(self._format_daily_movie_rows([item], index))
+                for index, item in enumerate(submitted, 1)] or ["本日没有本插件提交下载的电影。"]
+        pages, current, current_length = [], [], 0
+        for row in rows:
+            extra = len(row) + (1 if current else 0)
+            if current and current_length + extra > row_limit:
+                pages.append(current)
+                current, current_length = [], 0
+            current.append(row)
+            current_length += len(row) + (1 if current_length else 0)
+        if current:
+            pages.append(current)
         messages = []
-        for page_number, page_items in enumerate(pages):
-            rows = self._format_daily_movie_rows(page_items, page_number * page_size + 1)
-            title = (
-                f"📊 {summary_date}｜插件提交 {len(submitted)} 项｜"
-                f"下载完成 {downloaded_count} 项｜Emby 已有 {ingested_count} 项"
-            )
-            body = (
-                f"未完成下载：{len(submitted) - downloaded_count} 项｜MP 已整理：{organized_count} 项\n"
-                f"MP 整理失败：{len(failed_items)} 项｜下载完待整理：{awaiting_count} 项\n"
-                f"已整理待 Emby：{organized_waiting_emby} 项\n"
-                f"名单 {page_number + 1}/{len(pages)}：\n"
-                f"<pre>{html.escape(rows)}</pre>\n"
-                "以本日插件提交的任务为总账；Emby 已有表示该影片当前可查到。"
-            )
-            messages.append((title, body))
-        for page_number in range(0, len(failed_items), page_size):
-            failed_page = failed_items[page_number:page_number + page_size]
-            rows = self._format_daily_movie_rows(failed_page, page_number + 1)
-            messages.append((
-                f"⚠️ {summary_date}｜MoviePilot 整理/刮削失败 {len(failed_items)} 部",
-                f"以下插件任务有 MoviePilot 失败记录，尚无成功整理记录：\n"
-                f"<pre>{html.escape(rows)}</pre>\n"
-                "请到 MoviePilot 整理记录查看具体错误；无失败记录的影片归为待整理。",
-            ))
+        for page_number, page_rows in enumerate(pages):
+            page_label = f"名单 {page_number + 1}/{len(pages)}：\n" if len(pages) > 1 else ""
+            messages.append((title, header + page_label + "\n".join(page_rows) + footer))
         sent_pages = min(int(previous.get("sent_pages") or 0), len(messages)) if previous.get("date") == summary_date else 0
         for message_number in range(sent_pages, len(messages)):
             title, body = messages[message_number]

@@ -23,6 +23,7 @@ const suppressedSearch = ref('')
 const logSearch = ref('')
 const showDetailedLogs = ref(false)
 const logsRefreshing = ref(false)
+const logsRefreshedAt = ref('')
 const pageSizes = [20, 50, 100]
 const briefLogCategories = new Set(['提交下载', '提交失败', '推送成功', '推送失败', '整理完成', 'Emby 已入库', '每日统计'])
 const visibleLogs = computed(() => showDetailedLogs.value
@@ -31,12 +32,19 @@ const visibleLogs = computed(() => showDetailedLogs.value
 
 async function toggleDetailedLogs() {
   showDetailedLogs.value = !showDetailedLogs.value
+  await refreshLogs()
+}
+async function refreshLogs() {
   logsRefreshing.value = true
   try {
-    await loadStatus(true)
+    if (await loadStatus(true)) logsRefreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } finally {
     logsRefreshing.value = false
   }
+}
+async function openLogs() {
+  dialog.value = 'logs'
+  await refreshLogs()
 }
 const state = ref({
   summary: {}, queue: [], history: [], suppressed: [], logs: [],
@@ -96,11 +104,13 @@ async function loadStatus(silent = false) {
     const body = envelope(response)
     if (body?.locked || body?.success === false) {
       lockLocally()
-      return
+      return false
     }
     applyState(unwrap(response), !silent)
+    return true
   } catch (err) {
     error.value = err?.message || '加载失败'
+    return false
   } finally {
     if (!silent) loading.value = false
   }
@@ -425,7 +435,7 @@ onUnmounted(() => {
         <VBtn color="primary" variant="tonal" :loading="loading" @click="savePushSettings">保存推送与下载设置</VBtn>
         <VBtn color="success" variant="tonal" :loading="loading" :disabled="!controlForm.enabled" @click="runAction('run_once')">立即运行</VBtn>
         <VBtn color="error" variant="tonal" :loading="loading" @click="runAction('clear_cache')">清空扫描缓存</VBtn>
-        <VBtn color="info" variant="tonal" @click="dialog = 'logs'">查看日志</VBtn>
+        <VBtn color="info" variant="tonal" @click="openLogs">查看日志</VBtn>
         <VBtn variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus()" />
       </div>
       <VAlert v-if="state.run_status?.run_id" class="mt-3" type="info" variant="tonal" density="compact">
@@ -505,10 +515,10 @@ onUnmounted(() => {
           <div class="d-flex ga-2 mb-3">
             <VTextField v-model="logSearch" label="搜索日志" prepend-inner-icon="mdi-magnify" clearable hide-details />
             <VBtn :color="showDetailedLogs ? 'primary' : 'secondary'" variant="tonal" :loading="logsRefreshing" class="flex-shrink-0" @click="toggleDetailedLogs">{{ showDetailedLogs ? '详情日志：开' : '详情日志：关' }}</VBtn>
-            <VBtn variant="tonal" class="flex-shrink-0" :loading="logsRefreshing" @click="loadStatus(true)">刷新</VBtn>
+            <VBtn variant="tonal" class="flex-shrink-0" :loading="logsRefreshing" @click="refreshLogs">刷新</VBtn>
             <VBtn color="error" variant="tonal" @click="runAction('clear_logs')">清空日志</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-2">当前显示 {{ visibleLogs.length }}/{{ (state.logs || []).length }} 条。{{ showDetailedLogs ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步' }}。升级前未记录的步骤无法补写。</div>
+          <div class="text-caption text-medium-emphasis mb-2">当前显示 {{ visibleLogs.length }}/{{ (state.logs || []).length }} 条。{{ showDetailedLogs ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步' }}。{{ logsRefreshedAt ? `最近刷新：${logsRefreshedAt}。` : '' }}升级前未记录的步骤无法补写。</div>
           <VDataTable :headers="logHeaders" :items="visibleLogs" :search="logSearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
         </VCardText>
       </VCard>

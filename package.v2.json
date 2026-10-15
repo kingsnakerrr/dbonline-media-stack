@@ -2,12 +2,13 @@
   "SmartMoviePush": {
     "name": "智能下载影视资源_惹咪之北",
     "description": "从 TMDB 候选及已选 PT 站点筛选电影，支持 Telegram 推荐、顺序下载、磁盘保护和 Emby 入库核验。",
-    "version": "0.9.19",
+    "version": "0.9.20",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Telegram_A.png",
     "author": "kingsnakerrr",
     "level": 1,
     "system_version": ">=2.5.7,<3",
     "history": {
+      "v0.9.20": "午夜日报改为一行一部电影，取消双列分隔线；按 Telegram 单条容量动态合并，整理失败直接在名单标记。",
       "v0.9.19": "复用完整 Emby 电影索引批量排除已入库候选，优化电影上映时长与搜空记录排序；按站点和过滤规则区分搜索缓存，修复详情日志切换不明显和未主动刷新的问题。",
       "v0.9.18": "立即运行与定时任务记录操作、候选、站点查询、筛选结果、集中发送及失败原因；界面显示运行阶段，日志默认精简并可切换详情。",
       "v0.9.17": "日报改为以当天本插件提交任务为总账，逐项核对 qB 下载完成、MoviePilot 整理结果与 Emby 是否已有，并标出每项所处阶段。",
