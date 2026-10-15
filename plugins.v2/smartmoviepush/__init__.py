@@ -44,7 +44,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.27"
+    plugin_version = "0.9.29"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1276,6 +1276,7 @@ class SmartMoviePush(_PluginBase):
         if page_size not in {20, 50, 100}:
             return {"success": False, "message": "每页只能选择 20、50 或 100 条"}
         timezone = pytz.timezone(settings.TZ)
+        now = datetime.now(tz=timezone)
         history = self._load_stats_history()
         dated = []
         for item in history:
@@ -1289,7 +1290,12 @@ class SmartMoviePush(_PluginBase):
         selected_date = str(payload.get("date") or "").strip()
         if period == "date" and selected_date not in dates:
             return {"success": False, "message": "所选日期没有本插件提交的记录"}
-        time_range = self._stats_range(period, datetime.now(tz=timezone)) if period not in {"all", "date"} else None
+        time_range = self._stats_range(period, now) if period not in {"all", "date"} else None
+        status = str(payload.get("status") or "all").strip()
+        statuses = {"all", "emby_ingested", "awaiting_library", "unfinished",
+                    "organized", "organized_not_ingested", "organize_failed"}
+        if status not in statuses:
+            return {"success": False, "message": "未知的下载状态"}
         search = str(payload.get("search") or "").strip().casefold()[:100]
         matching = [item for submitted_at, item in dated
                     if (period != "date" or submitted_at.date().isoformat() == selected_date)
@@ -1297,15 +1303,39 @@ class SmartMoviePush(_PluginBase):
                     and (not search or search in str(item.get("title") or "").casefold()
                          or search in str(item.get("media_title") or "").casefold()
                          or search in str(item.get("tmdb_id") or "").casefold())]
+        matching = [{**item, "view_status": self._history_view_status(item, now, timezone)}
+                    for item in matching]
+        status_counts = {key: 0 for key in statuses}
+        status_counts["all"] = len(matching)
+        for item in matching:
+            status_counts[item["view_status"]] += 1
+        if status != "all":
+            matching = [item for item in matching if item["view_status"] == status]
         matching.sort(key=lambda item: str(item.get("submitted_at") or ""), reverse=True)
         total = len(matching)
         page = min(page, max(1, (total + page_size - 1) // page_size))
         start = (page - 1) * page_size
         return {"success": True, "data": {
             "dates": dates, "date": selected_date, "period": period,
+            "status": status, "status_counts": status_counts,
             "items": matching[start:start + page_size],
             "total": total, "page": page, "page_size": page_size,
         }}
+
+    def _history_view_status(self, item: dict, now: datetime, timezone) -> str:
+        """整理后留出 24 小时上传/扫描窗口，超时未入库单独列为待排查。"""
+        if item.get("emby_ingested_at"):
+            return "emby_ingested"
+        if item.get("organized_at"):
+            organized_at = self._parse_history_time(item.get("organized_at"), timezone)
+            if organized_at and now - organized_at >= timedelta(hours=24):
+                return "organized_not_ingested"
+            return "organized"
+        if item.get("organize_failed_at"):
+            return "organize_failed"
+        if item.get("download_completed_at"):
+            return "awaiting_library"
+        return "unfinished"
 
     def _api_ui_config(self, payload: dict = Body(default={})) -> dict:
         payload = dict(payload or {})
@@ -1786,6 +1816,39 @@ class SmartMoviePush(_PluginBase):
             logger.error(f"读取本插件历史归档失败，统计仅含近期记录：{err}")
             return active
 
+    def _save_reconciled_history(self, changed_items: List[dict]) -> None:
+        """把后续核验结果写回原记录，归档后仍保留原提交日期。"""
+        if not changed_items:
+            return
+        changes = {str(item.get("record_uid")): item for item in changed_items
+                   if item.get("record_uid")}
+        if not changes:
+            logger.error("核验记录缺少 record_uid，无法安全写回历史")
+            return
+        active = self._load_download_history()
+        active_ids = {str(item.get("record_uid")) for item in active if item.get("record_uid")}
+        active_changed = False
+        for index, item in enumerate(active):
+            updated = changes.get(str(item.get("record_uid")))
+            if updated is not None:
+                active[index] = updated
+                active_changed = True
+        if active_changed:
+            self._save_download_history(active)
+        archived = [item for uid, item in changes.items() if uid not in active_ids]
+        if archived:
+            try:
+                with self._history_archive_lock:
+                    with closing(self._history_archive()) as db:
+                        with db:
+                            db.executemany(
+                                "UPDATE history_archive SET payload = ? WHERE uid = ?",
+                                [(json.dumps(item, ensure_ascii=False), item["record_uid"])
+                                 for item in archived],
+                            )
+            except Exception as err:
+                logger.error(f"写回归档下载状态失败：{err}")
+
     def _history_total_count(self, active: Optional[List[dict]] = None) -> int:
         active = active if active is not None else self._load_download_history()
         try:
@@ -2030,7 +2093,7 @@ class SmartMoviePush(_PluginBase):
 
     def reconcile_download_completions(self) -> int:
         """以下载器的完成记录为准；已移除种子的任务由成功整理记录兜底。"""
-        history = self._load_download_history()
+        history = self._load_stats_history()
         timezone = pytz.timezone(settings.TZ)
         now = datetime.now(tz=timezone)
         recent = now - timedelta(days=2)
@@ -2080,8 +2143,9 @@ class SmartMoviePush(_PluginBase):
         if not completed:
             return 0
         # 网络请求期间可能新增下载，必须在保存前重新读取，避免覆盖新记录。
-        history = self._load_download_history()
+        history = self._load_stats_history()
         changed = 0
+        changed_items = []
         for item in history:
             result = completed.get(str(item.get("download_id") or "").strip().lower())
             if not result:
@@ -2094,14 +2158,15 @@ class SmartMoviePush(_PluginBase):
             item["download_completed_at"] = finished_at
             item["download_completion_source"] = source
             changed += 1
+            changed_items.append(item)
         if changed:
-            self._save_download_history(history)
+            self._save_reconciled_history(changed_items)
             logger.info(f"插件下载完成核验：更新 {changed} 部")
         return changed
 
     def reconcile_mp_transfer_results(self, all_pending: bool = False) -> int:
         """按插件提交的种子 hash 核对 MP 整理成功/失败记录。"""
-        history = self._load_download_history()
+        history = self._load_stats_history()
         timezone = pytz.timezone(settings.TZ)
         cutoff = datetime.now(tz=timezone) - timedelta(days=3)
         candidates = [item for item in history if item.get("download_id") and not item.get("organized_at")
@@ -2126,8 +2191,9 @@ class SmartMoviePush(_PluginBase):
         if not results:
             return 0
         # 查询期间可能新增记录，避免覆盖新的插件下载历史。
-        history = self._load_download_history()
+        history = self._load_stats_history()
         changed = 0
+        changed_items = []
         for item in history:
             result = results.get(str(item.get("download_id") or "").strip().lower())
             if not result or item.get("organized_at"):
@@ -2152,6 +2218,7 @@ class SmartMoviePush(_PluginBase):
                 if not item.get("emby_ingested_at"):
                     item["status"] = "organized"
                 changed += 1
+                changed_items.append(item)
             else:
                 failed_at = (timestamp or datetime.now(tz=timezone)).isoformat(timespec="seconds")
                 reason = str(getattr(row, "errmsg", "") or "").strip()[:300]
@@ -2161,8 +2228,9 @@ class SmartMoviePush(_PluginBase):
                 item["organize_error"] = reason
                 item["status"] = "organize_failed"
                 changed += 1
+                changed_items.append(item)
         if changed:
-            self._save_download_history(history)
+            self._save_reconciled_history(changed_items)
             logger.info(f"插件电影 MoviePilot 整理结果核对：更新 {changed} 条")
         return changed
 
@@ -2704,7 +2772,7 @@ class SmartMoviePush(_PluginBase):
     def verify_emby_ingestion(self) -> int:
         """每轮重查 Emby 实际目录；已删除的条目不得继续算作入库。"""
         self._last_emby_check_ok = False
-        history = self._load_download_history()
+        history = self._load_stats_history()
         if not any(item.get("download_completed_at") for item in history):
             self._last_emby_check_ok = True
             return 0
@@ -2735,11 +2803,12 @@ class SmartMoviePush(_PluginBase):
         if all_servers_loaded:
             self._remember_library_snapshot(indexes, [name for name, _ in servers])
         # 索引请求期间可能新增或更新下载记录，避免用旧快照覆盖它们。
-        history = self._load_download_history()
+        history = self._load_stats_history()
         now = datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")
         found = 0
         checked = 0
         changed = False
+        changed_items = []
         for item in history:
             if not item.get("download_completed_at"):
                 continue
@@ -2759,6 +2828,7 @@ class SmartMoviePush(_PluginBase):
                     item["emby_ingested_at"] = now
                     found += 1
                     changed = True
+                    changed_items.append(item)
                     self._append_plugin_log("Emby 已入库", f"{item.get('title')} 已在 {server} 核实")
                 item["status"] = "emby_ingested"
                 item["emby_server"] = server
@@ -2771,9 +2841,10 @@ class SmartMoviePush(_PluginBase):
                     item.pop("emby_item_id", None)
                     item["status"] = "organized" if item.get("organized_at") else "download_completed"
                     changed = True
+                    changed_items.append(item)
                     self._append_plugin_log("Emby 已移除", f"{item.get('title')} 当前不在 Emby，已取消入库标记", "warning")
         if changed:
-            self._save_download_history(history)
+            self._save_reconciled_history(changed_items)
         logger.info(f"Emby 批量核验完成：已查 {checked} 部，本轮新增确认 {found} 部")
         return found
 

@@ -21,6 +21,7 @@ const queueSearch = ref('')
 const historySearch = ref('')
 const historyPeriod = ref('all')
 const historyDate = ref('')
+const historyStatus = ref('all')
 const historyPage = ref(1)
 const historyPageSize = ref(100)
 const historyBusy = ref(false)
@@ -35,6 +36,16 @@ const historyPeriodOptions = [
   { title: '今年', value: 'year' },
   { title: '指定日期', value: 'date' },
 ]
+const historyStatusOptions = [
+  { title: '全部', value: 'all', color: 'primary' },
+  { title: 'Emby 已入库', value: 'emby_ingested', color: 'success' },
+  { title: '待入库', value: 'awaiting_library', color: 'info' },
+  { title: '未下载完成', value: 'unfinished', color: 'secondary' },
+  { title: '已整理', value: 'organized', color: 'warning' },
+  { title: '整理失败', value: 'organize_failed', color: 'error' },
+  { title: '已整理未入库', value: 'organized_not_ingested', color: 'error' },
+]
+const historyStatusMeta = Object.fromEntries(historyStatusOptions.map(item => [item.value, item]))
 const historyDateOptions = computed(() => [
   { title: '全部日期', value: '' },
   ...(historyView.value.dates || []).map(date => ({ title: date, value: date })),
@@ -74,6 +85,7 @@ async function loadHistory() {
       access_token: accessToken.value,
       period: historyPeriod.value,
       date: historyDate.value,
+      status: historyStatus.value,
       search: historySearch.value,
       page: historyPage.value,
       page_size: historyPageSize.value,
@@ -91,6 +103,7 @@ async function loadHistory() {
 }
 async function openHistory() {
   historyPeriod.value = 'all'
+  historyStatus.value = 'all'
   historyPage.value = 1
   dialog.value = 'history'
   await loadHistory()
@@ -103,7 +116,7 @@ watch(historySearch, () => {
     historySearchTimer = window.setTimeout(loadHistory, 300)
   }
 })
-watch([historyPeriod, historyDate, historyPageSize], () => {
+watch([historyPeriod, historyDate, historyStatus, historyPageSize], () => {
   if (historyPeriod.value === 'date' && !historyDate.value) {
     historyDate.value = historyView.value.dates?.[0] || ''
     if (!historyDate.value) return
@@ -505,7 +518,6 @@ onUnmounted(() => {
         <VBtn color="success" variant="tonal" :loading="loading" :disabled="!controlForm.enabled" @click="runAction('run_once')">立即运行</VBtn>
         <VBtn color="error" variant="tonal" :loading="loading" @click="runAction('clear_cache')">清空扫描缓存</VBtn>
         <VBtn color="info" variant="tonal" @click="openLogs">查看日志</VBtn>
-        <VBtn color="primary" variant="tonal" @click="openHistory">下载记录</VBtn>
         <VBtn variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus()" />
       </div>
       <VAlert v-if="state.run_status?.run_id" class="mt-3" type="info" variant="tonal" density="compact">
@@ -555,6 +567,11 @@ onUnmounted(() => {
       <VCard v-else-if="dialog === 'history'" title="下载记录">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
+          <VTabs v-model="historyStatus" show-arrows class="mb-3">
+            <VTab v-for="option in historyStatusOptions" :key="option.value" :value="option.value">
+              {{ option.title }} {{ historyView.status_counts?.[option.value] ?? 0 }}
+            </VTab>
+          </VTabs>
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <VSelect v-model="historyPeriod" :items="historyPeriodOptions" label="时间范围" density="compact" hide-details style="min-width: 170px; max-width: 200px" />
             <VSelect v-if="historyPeriod === 'date'" v-model="historyDate" :items="historyDateOptions.slice(1)" label="提交日期" density="compact" hide-details style="min-width: 180px; max-width: 220px" />
@@ -562,10 +579,10 @@ onUnmounted(() => {
             <VSelect v-model="historyPageSize" :items="pageSizes" label="每页条数" density="compact" hide-details style="max-width: 140px" />
             <VBtn variant="tonal" :loading="historyBusy" @click="loadHistory">刷新</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-2">当前范围 {{ historyView.total || 0 }} 条；仅统计本插件提交的任务，含历史归档。默认每页 100 条。</div>
+          <div class="text-caption text-medium-emphasis mb-2">当前列表 {{ historyView.total || 0 }} 条；仅统计本插件提交的任务，含历史归档。默认每页 100 条。待入库＝下载完成、等待 MP 整理；已整理＝MP 已整理、等待上传及 Emby 扫描；已整理未入库＝整理超过 24 小时仍未在 Emby 找到，需排查上传、扫描或匹配情况。</div>
           <VDataTable :headers="historyHeaders" :items="historyView.items || []" :items-per-page="historyPageSize" hide-default-footer density="compact" hover>
             <template #item.result="{ item }">
-              <VChip size="small" :color="item.emby_ingested_at ? 'success' : item.organized_at || item.organize_failed_at ? 'error' : item.download_completed_at ? 'warning' : 'info'" :title="item.organize_error || ''">{{ item.emby_ingested_at ? 'Emby 已入库' : item.organized_at ? '待入库' : item.organize_failed_at ? '整理失败' : item.download_completed_at ? '待整理' : '未完成' }}</VChip>
+              <VChip size="small" :color="historyStatusMeta[item.view_status]?.color || 'secondary'" :title="item.organize_error || ''">{{ historyStatusMeta[item.view_status]?.title || '未知状态' }}</VChip>
             </template>
           </VDataTable>
           <div class="d-flex align-center justify-end ga-3 mt-3">
