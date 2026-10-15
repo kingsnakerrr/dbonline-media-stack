@@ -44,7 +44,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.24"
+    plugin_version = "0.9.25"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2286,16 +2286,33 @@ class SmartMoviePush(_PluginBase):
                 except Exception as err:
                     logger.error(f"处理插件专用 Telegram 按钮失败：{err}")
 
-            @bot.message_handler(commands=["smartmovie"])
+            @bot.message_handler(commands=["start", "smartmovie", "help"])
             def handle_plugin_command(message):
                 if self._custom_telegram_bot is not bot:
                     return
                 user = getattr(message, "from_user", None)
-                self._show_telegram_menu(
-                    str(getattr(message.chat, "id", "")),
-                    getattr(user, "id", None),
-                    getattr(user, "username", None),
-                )
+                chat_id = str(getattr(message.chat, "id", ""))
+                userid = getattr(user, "id", None)
+                username = getattr(user, "username", None)
+                command = str(getattr(message, "text", "") or "").split(maxsplit=1)[0]
+                command = command.split("@", 1)[0].lower()
+                if command == "/help":
+                    self._show_telegram_help(chat_id, userid, username)
+                else:
+                    self._show_telegram_menu(chat_id, userid, username)
+
+            # 独立机器人专供本插件使用；把命令注册到 Telegram 原生菜单，
+            # 首次点 Open 发出的 /start 也能直接打开统计菜单。
+            try:
+                bot.set_my_commands([
+                    telegram_types.BotCommand("start", "打开智能电影管理菜单"),
+                    telegram_types.BotCommand("smartmovie", "查看下载统计和当前状态"),
+                    telegram_types.BotCommand("help", "查看中文命令说明"),
+                ])
+                bot.set_chat_menu_button(menu_button=telegram_types.MenuButtonCommands())
+            except Exception as err:
+                # 命令列表设置失败也不能妨碍机器人接收 /start 和 /help。
+                logger.warning(f"Telegram 命令菜单注册失败，继续启动消息接收：{err}")
 
             def poll():
                 try:
@@ -2931,6 +2948,20 @@ class SmartMoviePush(_PluginBase):
             logger.error("Telegram 统计菜单未送达")
         else:
             self._delete_telegram_reply_later(source, result)
+
+    def _show_telegram_help(self, chat_id: str, userid: Any, username: Any = None) -> None:
+        if not self._is_telegram_admin(userid, username):
+            self._reply_telegram_action("无操作权限", "只有已配置的 Telegram 管理员可以使用本插件指令。", chat_id)
+            return
+        self._reply_telegram_action(
+            "智能电影插件 · 命令说明",
+            "/start — 打开管理菜单（首次点 Open 自动执行）\n"
+            "/smartmovie — 打开统计与状态菜单\n"
+            "/help — 查看这份中文说明\n\n"
+            "菜单中可点选今天、昨天、本周、本月、上个月、今年的统计，"
+            "以及当前状态和最近运行。只接受已配置管理员的操作。",
+            chat_id,
+        )
 
     @eventmanager.register(EventType.PluginAction)
     def telegram_command_action(self, event: Event) -> None:
