@@ -44,7 +44,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.25"
+    plugin_version = "0.9.26"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -240,6 +240,8 @@ class SmartMoviePush(_PluginBase):
              "methods": ["POST"], "auth": "bear", "summary": "锁定当前浏览器会话"},
             {"path": "/secure_status", "endpoint": self._api_secure_status,
              "methods": ["POST"], "auth": "bear", "summary": "获取受密码保护的插件界面数据"},
+            {"path": "/secure_history", "endpoint": self._api_secure_history,
+             "methods": ["POST"], "auth": "bear", "summary": "按日期分页查看本插件下载记录"},
             {"path": "/ui_config", "endpoint": self._api_ui_config,
              "methods": ["POST"], "auth": "bear", "summary": "保存 Telegram 覆盖设置"},
             {"path": "/ui_action", "endpoint": self._api_ui_action,
@@ -1261,6 +1263,43 @@ class SmartMoviePush(_PluginBase):
         if not self._valid_access_token((payload or {}).get("access_token")):
             return {"success": False, "locked": True, "message": "插件未解锁"}
         return {"success": True, "data": self._ui_status_data()}
+
+    def _api_secure_history(self, payload: dict = Body(default={})) -> dict:
+        payload = payload or {}
+        if not self._valid_access_token(payload.get("access_token")):
+            return {"success": False, "locked": True, "message": "插件未解锁"}
+        try:
+            page = max(1, int(payload.get("page") or 1))
+            page_size = int(payload.get("page_size") or 100)
+        except (TypeError, ValueError):
+            return {"success": False, "message": "页码或每页数量不正确"}
+        if page_size not in {20, 50, 100}:
+            return {"success": False, "message": "每页只能选择 20、50 或 100 条"}
+        timezone = pytz.timezone(settings.TZ)
+        history = self._load_stats_history()
+        dated = []
+        for item in history:
+            submitted_at = self._parse_history_time(item.get("submitted_at"), timezone)
+            if submitted_at:
+                dated.append((submitted_at.date().isoformat(), item))
+        dates = sorted({day for day, _ in dated}, reverse=True)
+        selected_date = str(payload.get("date") or "").strip()
+        if selected_date and selected_date not in dates:
+            return {"success": False, "message": "所选日期没有本插件提交的记录"}
+        search = str(payload.get("search") or "").strip().casefold()[:100]
+        matching = [item for day, item in dated
+                    if (not selected_date or day == selected_date)
+                    and (not search or search in str(item.get("title") or "").casefold()
+                         or search in str(item.get("media_title") or "").casefold()
+                         or search in str(item.get("tmdb_id") or "").casefold())]
+        matching.sort(key=lambda item: str(item.get("submitted_at") or ""), reverse=True)
+        total = len(matching)
+        page = min(page, max(1, (total + page_size - 1) // page_size))
+        start = (page - 1) * page_size
+        return {"success": True, "data": {
+            "dates": dates, "date": selected_date, "items": matching[start:start + page_size],
+            "total": total, "page": page, "page_size": page_size,
+        }}
 
     def _api_ui_config(self, payload: dict = Body(default={})) -> dict:
         payload = dict(payload or {})
@@ -2741,13 +2780,13 @@ class SmartMoviePush(_PluginBase):
             if item.get("emby_ingested_at"):
                 stage = ""
             elif item.get("organized_at"):
-                stage = "❌ 待入库"
+                stage = "🔴 待入库"
             elif item.get("organize_failed_at"):
-                stage = "❌ 整理失败"
+                stage = "🔴 整理失败"
             elif item.get("download_completed_at"):
-                stage = "❌ 待整理"
+                stage = "🟡 待整理"
             else:
-                stage = "❌ 未完成"
+                stage = "🟠 未完成"
             rows.append(f"{index}. {movie_title}{'  ' + stage if stage else ''}")
         return "\n".join(rows)
 
@@ -2796,7 +2835,7 @@ class SmartMoviePush(_PluginBase):
             f"MP 整理失败：{len(failed_items)} 项｜下载完待整理：{awaiting_count} 项\n"
             f"待入库：{organized_waiting_emby} 项\n"
         )
-        footer = "\n以本日插件提交的任务为总账；无标记表示 Emby 已有，❌ 表示尚未入库。"
+        footer = "\n以本日插件提交的任务为总账；无标记表示 Emby 已有，🟠 未完成下载，🟡 待整理，🔴 整理失败或待入库。"
         # Telegram 单条文本上限为 4096 字符。保守预留标题、分段标记和实体转义空间；
         # 不按固定部数分页，能装下一条就只发送一条，失败影片在名单内直接标记。
         row_limit = max(1000, 3800 - len(title) - len(header) - len(footer))
@@ -3431,7 +3470,7 @@ class SmartMoviePush(_PluginBase):
                 if not result:
                     logger.error(f"Telegram 统计结果未送达：{key}")
                     break
-                self._delete_telegram_reply_later(sent_source, result, seconds=60)
+                self._delete_telegram_reply_later(sent_source, result, seconds=600)
             return
         pending = self._load_pending()
         item = pending.get(key)

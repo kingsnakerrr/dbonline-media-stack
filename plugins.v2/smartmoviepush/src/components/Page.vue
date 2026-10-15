@@ -19,6 +19,15 @@ const dialogOpen = computed({
 })
 const queueSearch = ref('')
 const historySearch = ref('')
+const historyDate = ref('')
+const historyPage = ref(1)
+const historyPageSize = ref(100)
+const historyBusy = ref(false)
+const historyView = ref({ dates: [], items: [], total: 0, page: 1 })
+const historyDateOptions = computed(() => [
+  { title: '全部日期', value: '' },
+  ...(historyView.value.dates || []).map(date => ({ title: date, value: date })),
+])
 const suppressedSearch = ref('')
 const logSearch = ref('')
 const showDetailedLogs = ref(false)
@@ -45,6 +54,48 @@ async function refreshLogs() {
 async function openLogs() {
   dialog.value = 'logs'
   await refreshLogs()
+}
+async function loadHistory() {
+  if (!accessToken.value) return
+  historyBusy.value = true
+  try {
+    const response = await props.api.post('plugin/SmartMoviePush/secure_history', {
+      access_token: accessToken.value,
+      date: historyDate.value,
+      search: historySearch.value,
+      page: historyPage.value,
+      page_size: historyPageSize.value,
+    })
+    const body = envelope(response)
+    if (body?.locked) { lockLocally(); return }
+    if (body?.success === false) { error.value = body?.message || '加载下载记录失败'; return }
+    historyView.value = unwrap(response)
+    historyPage.value = historyView.value.page || 1
+  } catch (err) {
+    error.value = err?.message || '加载下载记录失败'
+  } finally {
+    historyBusy.value = false
+  }
+}
+async function openHistory() {
+  historyPage.value = 1
+  dialog.value = 'history'
+  await loadHistory()
+}
+let historySearchTimer
+watch(historySearch, () => {
+  window.clearTimeout(historySearchTimer)
+  if (dialog.value === 'history') {
+    historyPage.value = 1
+    historySearchTimer = window.setTimeout(loadHistory, 300)
+  }
+})
+watch([historyDate, historyPageSize], () => {
+  if (dialog.value === 'history') { historyPage.value = 1; loadHistory() }
+})
+async function changeHistoryPage(delta) {
+  historyPage.value += delta
+  await loadHistory()
 }
 const state = ref({
   summary: {}, queue: [], history: [], suppressed: [], logs: [],
@@ -324,6 +375,7 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   window.clearInterval(refreshTimer)
+  window.clearTimeout(historySearchTimer)
   window.clearTimeout(messageTimer)
   window.clearTimeout(errorTimer)
 })
@@ -379,8 +431,8 @@ onUnmounted(() => {
         </VCard>
       </div>
       <div class="status-item">
-        <VCard variant="tonal" color="primary" class="pa-4 h-100 list-card status-card" @click="dialog = 'history'">
-          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">插件下载记录</div><div class="text-h6 font-weight-bold">{{ state.history.length }}</div><div class="text-caption mt-1">搜索和分页查看记录</div></div><VIcon icon="mdi-chevron-right" /></div>
+        <VCard variant="tonal" color="primary" class="pa-4 h-100 list-card status-card" @click="openHistory">
+          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">下载记录</div><div class="text-h6 font-weight-bold">{{ state.history.length }}</div><div class="text-caption mt-1">按日期查看完整记录</div></div><VIcon icon="mdi-chevron-right" /></div>
         </VCard>
       </div>
       <div class="status-item">
@@ -436,6 +488,7 @@ onUnmounted(() => {
         <VBtn color="success" variant="tonal" :loading="loading" :disabled="!controlForm.enabled" @click="runAction('run_once')">立即运行</VBtn>
         <VBtn color="error" variant="tonal" :loading="loading" @click="runAction('clear_cache')">清空扫描缓存</VBtn>
         <VBtn color="info" variant="tonal" @click="openLogs">查看日志</VBtn>
+        <VBtn color="primary" variant="tonal" @click="openHistory">下载记录</VBtn>
         <VBtn variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus()" />
       </div>
       <VAlert v-if="state.run_status?.run_id" class="mt-3" type="info" variant="tonal" density="compact">
@@ -482,15 +535,26 @@ onUnmounted(() => {
           </VDataTable>
         </VCardText>
       </VCard>
-      <VCard v-else-if="dialog === 'history'" title="插件下载记录">
+      <VCard v-else-if="dialog === 'history'" title="下载记录">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
-          <VTextField v-model="historySearch" label="搜索影片" prepend-inner-icon="mdi-magnify" clearable class="mb-3" hide-details />
-          <VDataTable :headers="historyHeaders" :items="state.history" :search="historySearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover>
+          <div class="d-flex flex-wrap align-center ga-2 mb-3">
+            <VSelect v-model="historyDate" :items="historyDateOptions" label="提交日期" density="compact" hide-details style="min-width: 180px; max-width: 220px" />
+            <VTextField v-model="historySearch" label="搜索影片或 TMDB ID" prepend-inner-icon="mdi-magnify" clearable density="compact" hide-details style="min-width: 220px" />
+            <VSelect v-model="historyPageSize" :items="pageSizes" label="每页条数" density="compact" hide-details style="max-width: 140px" />
+            <VBtn variant="tonal" :loading="historyBusy" @click="loadHistory">刷新</VBtn>
+          </div>
+          <div class="text-caption text-medium-emphasis mb-2">本插件提交记录共 {{ historyView.total || 0 }} 条；只显示当前筛选日期，含历史归档。默认每页 100 条。</div>
+          <VDataTable :headers="historyHeaders" :items="historyView.items || []" :items-per-page="historyPageSize" hide-default-footer density="compact" hover>
             <template #item.result="{ item }">
-              <span :title="item.organize_error || ''">{{ item.emby_ingested_at ? '✓ Emby 已入库' : item.organized_at ? 'MP 已整理，待 Emby' : item.organize_failed_at ? 'MP 整理失败' : item.download_completed_at ? '已下载，待整理' : '下载中 / 待下载' }}</span>
+              <VChip size="small" :color="item.emby_ingested_at ? 'success' : item.organized_at || item.organize_failed_at ? 'error' : item.download_completed_at ? 'warning' : 'info'" :title="item.organize_error || ''">{{ item.emby_ingested_at ? 'Emby 已入库' : item.organized_at ? '待入库' : item.organize_failed_at ? '整理失败' : item.download_completed_at ? '待整理' : '未完成' }}</VChip>
             </template>
           </VDataTable>
+          <div class="d-flex align-center justify-end ga-3 mt-3">
+            <span class="text-caption">第 {{ historyView.page || 1 }} / {{ Math.max(1, Math.ceil((historyView.total || 0) / historyPageSize)) }} 页</span>
+            <VBtn size="small" variant="tonal" :disabled="historyBusy || historyPage <= 1" @click="changeHistoryPage(-1)">上一页</VBtn>
+            <VBtn size="small" variant="tonal" :disabled="historyBusy || historyPage * historyPageSize >= (historyView.total || 0)" @click="changeHistoryPage(1)">下一页</VBtn>
+          </div>
         </VCardText>
       </VCard>
       <VCard v-else-if="dialog === 'suppressed'" title="不再推送列表">
