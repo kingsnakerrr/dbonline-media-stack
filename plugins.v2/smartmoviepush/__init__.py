@@ -42,7 +42,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.20"
+    plugin_version = "0.9.21"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2649,16 +2649,16 @@ class SmartMoviePush(_PluginBase):
         for index, item in enumerate(items, start_index):
             movie_title = item.get("title") or f"TMDB {item.get('tmdb_id', '')}"
             if item.get("emby_ingested_at"):
-                stage = "✓ 已入库"
+                stage = ""
             elif item.get("organized_at"):
-                stage = "已整理"
+                stage = "❌ 待入库"
             elif item.get("organize_failed_at"):
-                stage = "整理失败"
+                stage = "❌ 整理失败"
             elif item.get("download_completed_at"):
-                stage = "待整理"
+                stage = "❌ 待整理"
             else:
-                stage = "未完成"
-            rows.append(f"{index}. {movie_title}  {stage}")
+                stage = "❌ 未完成"
+            rows.append(f"{index}. {movie_title}{'  ' + stage if stage else ''}")
         return "\n".join(rows)
 
     def send_daily_completion_summary(self) -> None:
@@ -2704,9 +2704,9 @@ class SmartMoviePush(_PluginBase):
         header = (
             f"未完成下载：{len(submitted) - downloaded_count} 项｜MP 已整理：{organized_count} 项\n"
             f"MP 整理失败：{len(failed_items)} 项｜下载完待整理：{awaiting_count} 项\n"
-            f"已整理待 Emby：{organized_waiting_emby} 项\n"
+            f"待入库：{organized_waiting_emby} 项\n"
         )
-        footer = "\n以本日插件提交的任务为总账；Emby 已有表示该影片当前可查到。"
+        footer = "\n以本日插件提交的任务为总账；无标记表示 Emby 已有，❌ 表示尚未入库。"
         # Telegram 单条文本上限为 4096 字符。保守预留标题、分段标记和实体转义空间；
         # 不按固定部数分页，能装下一条就只发送一条，失败影片在名单内直接标记。
         row_limit = max(1000, 3800 - len(title) - len(header) - len(footer))
