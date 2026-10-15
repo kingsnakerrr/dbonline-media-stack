@@ -2,6 +2,7 @@ import hashlib
 import html
 import json
 import math
+import calendar
 import random
 import re
 import secrets
@@ -14,6 +15,7 @@ from contextlib import closing
 from types import SimpleNamespace
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 import pytz
 import requests
@@ -44,7 +46,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.29"
+    plugin_version = "0.9.30"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -90,12 +92,21 @@ class SmartMoviePush(_PluginBase):
     _library_snapshot = None
     _library_snapshot_time = 0.0
     _allowed_languages = {
-        "zh", "en", "ja", "ko", "fr", "de", "es", "it", "pt",
-        "nl", "sv", "no", "da", "fi", "pl", "cs", "hu", "tr",
+        "zh", "cn", "yue", "en", "ja", "ko", "fr", "de", "es", "it", "pt",
+        "nl", "sv", "no", "da", "fi", "pl", "cs", "hu", "tr", "ru",
+        "ro", "el", "sr", "hr", "sk", "sl", "bg", "uk", "is", "et", "lv", "lt",
+    }
+    _allowed_countries = {
+        "US", "CA", "GB", "IE", "FR", "DE", "IT", "ES", "PT", "NL", "BE",
+        "CH", "AT", "SE", "NO", "DK", "FI", "IS", "PL", "CZ", "SK", "HU",
+        "RO", "BG", "GR", "HR", "SI", "RS", "BA", "ME", "MK", "AL", "EE",
+        "LV", "LT", "LU", "MT", "CY", "UA", "BY", "MD", "RU", "TR",
+        "JP", "KR", "CN", "TW", "HK",
     }
     _pending_key = "pending_downloads"
     _pushed_key = "pushed_tmdb_ids"
     _scan_cache_key = "scan_cache"
+    _region_cache_key = "production_region_cache"
     _suppressed_key = "suppressed_movies"
     _daily_messages_key = "daily_messages"
     _download_queue_key = "download_queue"
@@ -113,6 +124,9 @@ class SmartMoviePush(_PluginBase):
     _disk_guard_state_key = "disk_guard_state"
     _disk_scan_key = "disk_usage_scan"
     _disk_guard_lock = threading.Lock()
+    _monthly_tasks_key = "monthly_movie_tasks"
+    _monthly_tasks_lock = threading.RLock()
+    _monthly_scan_lock = threading.Lock()
 
     def init_plugin(self, config: dict = None):
         self.stop_service()
@@ -242,6 +256,8 @@ class SmartMoviePush(_PluginBase):
              "methods": ["POST"], "auth": "bear", "summary": "获取受密码保护的插件界面数据"},
             {"path": "/secure_history", "endpoint": self._api_secure_history,
              "methods": ["POST"], "auth": "bear", "summary": "按日期分页查看本插件下载记录"},
+            {"path": "/secure_monthly", "endpoint": self._api_secure_monthly,
+             "methods": ["POST"], "auth": "bear", "summary": "分页查看月份任务的完整候选名单"},
             {"path": "/ui_config", "endpoint": self._api_ui_config,
              "methods": ["POST"], "auth": "bear", "summary": "保存 Telegram 覆盖设置"},
             {"path": "/ui_action", "endpoint": self._api_ui_action,
@@ -301,6 +317,12 @@ class SmartMoviePush(_PluginBase):
                 "name": "核对本插件电影的 MoviePilot 整理结果",
                 "trigger": CronTrigger.from_crontab("*/5 * * * *", timezone=settings.TZ),
                 "func": self.reconcile_mp_transfer_results,
+            },
+            {
+                "id": "SmartMoviePushMonthlyTasks",
+                "name": "按年月评分筛选的电影下载任务",
+                "trigger": CronTrigger.from_crontab("*/10 * * * *", timezone=settings.TZ),
+                "func": self.process_monthly_tasks,
             },
         ]
 
@@ -1163,6 +1185,7 @@ class SmartMoviePush(_PluginBase):
             },
             "disk_guard": self._disk_guard_status(),
             "disk_scan": self.get_data(self._disk_scan_key) or {},
+            "monthly_tasks": self._monthly_task_summaries(),
         }
 
     @staticmethod
@@ -1321,6 +1344,124 @@ class SmartMoviePush(_PluginBase):
             "items": matching[start:start + page_size],
             "total": total, "page": page, "page_size": page_size,
         }}
+
+    def _api_secure_monthly(self, payload: dict = Body(default={})) -> dict:
+        payload = payload or {}
+        if not self._valid_access_token(payload.get("access_token")):
+            return {"success": False, "locked": True, "message": "插件未解锁"}
+        task = self._monthly_task(str(payload.get("task_id") or ""))
+        if not task:
+            return {"success": False, "message": "月份任务不存在"}
+        try:
+            page = max(1, int(payload.get("page") or 1))
+        except (TypeError, ValueError):
+            return {"success": False, "message": "页码无效"}
+        history = {}
+        for item in self._load_stats_history():
+            movie_id = str(item.get("tmdb_id") or "")
+            if movie_id and (movie_id not in history or str(item.get("submitted_at") or "") > str(history[movie_id].get("submitted_at") or "")):
+                history[movie_id] = item
+        queue_ids = {str(item.get("tmdb_id")) for item in self._load_download_queue()}
+        pushed_ids = set(self._load_recent_pushes())
+        suppressed_ids = set(self._load_suppressed())
+        cache = self._load_scan_cache(include_expired=True)
+        now = datetime.now(tz=pytz.timezone(settings.TZ))
+        rows = []
+        counts = {}
+        for item in task.get("candidates") or []:
+            movie_id = str(item.get("tmdb_id"))
+            record = history.get(movie_id)
+            if record:
+                status = self._history_view_status(record, now, pytz.timezone(settings.TZ))
+            elif movie_id in queue_ids:
+                status = "queued"
+            elif movie_id in pushed_ids:
+                status = "pushed"
+            elif movie_id in suppressed_ids:
+                status = "suppressed"
+            else:
+                status = {"library": "library", "no_resource": "no_resource"}.get(
+                    (cache.get(movie_id) or {}).get("status"), "candidate")
+            counts[status] = counts.get(status, 0) + 1
+            rows.append({key: value for key, value in item.items() if key != "info"} | {"status": status})
+        counts["all"] = len(rows)
+        search = str(payload.get("search") or "").strip().casefold()[:100]
+        if search:
+            rows = [item for item in rows if search in str(item.get("title") or "").casefold()
+                    or search in str(item.get("tmdb_id") or "")]
+        status_filter = str(payload.get("status") or "all")
+        if status_filter != "all":
+            rows = [item for item in rows if item["status"] == status_filter]
+        total = len(rows)
+        page = min(page, max(1, (total + 99) // 100))
+        return {"success": True, "data": {
+            "task": {key: value for key, value in task.items() if key != "candidates"} | {
+                "candidate_count": counts["all"]},
+            "items": rows[(page - 1) * 100:page * 100], "counts": counts,
+            "total": total, "page": page, "page_size": 100,
+        }}
+
+    def _api_monthly_action(self, action: str, payload: dict) -> dict:
+        task_id = str(payload.get("task_id") or "")
+        task = self._monthly_task(task_id) if task_id else None
+        if action == "monthly_save":
+            try:
+                year = int(payload.get("year"))
+                month = int(payload.get("month"))
+                minimum = float(payload.get("min_score"))
+                batch_size = int(payload.get("batch_size") or 5)
+            except (TypeError, ValueError):
+                return {"success": False, "message": "年份、月份和最低评分必须是数字"}
+            now = datetime.now(tz=pytz.timezone(settings.TZ))
+            if not (1900 <= year <= now.year and 1 <= month <= 12 and 0 <= minimum <= 10
+                    and 1 <= batch_size <= 50):
+                return {"success": False, "message": "请选择 1900 年至今年、1–12 月、0–10 分和每轮 1–50 部"}
+            if (year, month) > (now.year, now.month):
+                return {"success": False, "message": "不能扫描未来月份"}
+            with self._monthly_tasks_lock:
+                tasks = self._load_monthly_tasks()
+                if not task and len(tasks) >= 5:
+                    return {"success": False, "message": "最多只能设置 5 个独立月份任务"}
+                if task and task.get("scan_state") == "running":
+                    return {"success": False, "message": "该月份正在扫描，完成后再修改"}
+                task_id = task_id if task else secrets.token_hex(6)
+                updated = {
+                    "id": task_id, "year": year, "month": month, "min_score": minimum,
+                    "batch_size": batch_size,
+                    "active": False, "scan_state": "pending", "scan_error": "",
+                    "scan_progress": "等待扫描", "candidates": [], "scanned_at": "",
+                    "created_at": (task or {}).get("created_at") or now.isoformat(timespec="seconds"),
+                }
+                tasks = [item for item in tasks if item.get("id") != task_id] + [updated]
+                self.save_data(self._monthly_tasks_key, tasks)
+            threading.Thread(target=self._scan_monthly_task, args=(task_id,), daemon=True).start()
+            return {"success": True, "message": f"{year} 年 {month} 月任务已保存，正在扫描完整候选名单；扫描后手动点击开始下载"}
+        if not task:
+            return {"success": False, "message": "月份任务不存在"}
+        if action == "monthly_rescan":
+            if task.get("scan_state") == "running":
+                return {"success": False, "message": "扫描已经在运行"}
+            self._update_monthly_task(task_id, scan_state="running", scan_error="", scan_progress="准备重新扫描")
+            threading.Thread(target=self._scan_monthly_task, args=(task_id,), daemon=True).start()
+            return {"success": True, "message": "已开始重新扫描；旧名单会在新名单完整获取后替换"}
+        if action == "monthly_start":
+            if not self._enabled or self._disk_guard_blocks_new():
+                return {"success": False, "message": "插件已关闭或硬盘保护中，不能开始新下载"}
+            if task.get("scan_state") != "complete":
+                return {"success": False, "message": "请等待月份扫描完成"}
+            self._update_monthly_task(task_id, active=True)
+            threading.Thread(target=self.run_once,
+                             kwargs={"limit": int(task.get("batch_size") or 5), "month_task_id": task_id}, daemon=True).start()
+            return {"success": True, "message": "月份任务已启动；本轮沿用站点和并发设置，后续每 10 分钟续跑"}
+        if action == "monthly_pause":
+            self._update_monthly_task(task_id, active=False)
+            return {"success": True, "message": "月份任务已暂停新搜索；已经提交的下载不会取消"}
+        if action == "monthly_delete":
+            with self._monthly_tasks_lock:
+                self.save_data(self._monthly_tasks_key,
+                               [item for item in self._load_monthly_tasks() if item.get("id") != task_id])
+            return {"success": True, "message": "月份任务及候选名单已删除；已有下载记录和已提交任务不受影响"}
+        return {"success": False, "message": "未知的月份任务操作"}
 
     def _history_view_status(self, item: dict, now: datetime, timezone) -> str:
         """整理后留出 24 小时上传/扫描窗口，超时未入库单独列为待排查。"""
@@ -1505,6 +1646,8 @@ class SmartMoviePush(_PluginBase):
                     if scan.get("success") else f"扫描失败：{scan.get('error')}"
                 ),
             }
+        elif action in {"monthly_save", "monthly_rescan", "monthly_start", "monthly_pause", "monthly_delete"}:
+            result = self._api_monthly_action(action, payload)
         else:
             result = {"success": False, "message": "未知操作"}
         result["data"] = self._ui_status_data()
@@ -1546,7 +1689,156 @@ class SmartMoviePush(_PluginBase):
             return None
 
     def _valid_region(self, media: MediaInfo) -> bool:
-        return not media.original_language or media.original_language in self._allowed_languages
+        countries = self._production_country_codes(getattr(media, "tmdb_info", None) or {})
+        if countries:
+            return bool(countries & self._allowed_countries)
+        # Discover 列表通常没有制作国家；不能按原语言先丢弃，否则会漏掉合拍片。
+        return True
+
+    @staticmethod
+    def _production_country_codes(info: dict) -> set:
+        values = info.get("production_countries") or info.get("origin_country") or []
+        return {
+            str(value.get("iso_3166_1") if isinstance(value, dict) else value).upper()
+            for value in values if value
+        }
+
+    def _load_monthly_tasks(self) -> list:
+        value = self.get_data(self._monthly_tasks_key)
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def _monthly_task(self, task_id: str) -> Optional[dict]:
+        return next((item for item in self._load_monthly_tasks() if item.get("id") == task_id), None)
+
+    def _update_monthly_task(self, task_id: str, **changes) -> Optional[dict]:
+        with self._monthly_tasks_lock:
+            tasks = self._load_monthly_tasks()
+            for item in tasks:
+                if item.get("id") == task_id:
+                    item.update(changes)
+                    self.save_data(self._monthly_tasks_key, tasks)
+                    return item
+        return None
+
+    def _monthly_task_summaries(self) -> list:
+        return [{key: value for key, value in task.items() if key != "candidates"} | {
+            "candidate_count": len(task.get("candidates") or []),
+        } for task in self._load_monthly_tasks()]
+
+    def _scan_monthly_task(self, task_id: str) -> None:
+        """按 TMDB 首映月完整翻页，再以电影详情中的制作国家核验地区。"""
+        # 同时建立多个任务时排队扫描，避免其余任务被误标成失败。
+        self._monthly_scan_lock.acquire()
+        task = self._monthly_task(task_id)
+        try:
+            if not task:
+                return
+            self._update_monthly_task(task_id, scan_state="running", scan_error="")
+            year, month, minimum = int(task["year"]), int(task["month"]), float(task["min_score"])
+            last_day = calendar.monthrange(year, month)[1]
+            module = ModuleManager().get_running_module("TheMovieDbModule")
+            if not module or not getattr(module, "tmdb", None):
+                raise RuntimeError("MoviePilot 的 TMDB 模块尚未就绪")
+            chain = TmdbChain()
+            results = {}
+            pages_done = 0
+            examined = 0
+
+            def scan_window(first: int, last: int) -> None:
+                nonlocal pages_done, examined
+                page = 1
+                while page <= 500:
+                    current = self._monthly_task(task_id)
+                    if not current or (current["year"], current["month"], current["min_score"]) != (year, month, minimum):
+                        raise RuntimeError("任务设置已改变，取消旧扫描")
+                    params = {
+                        "sort_by": "popularity.desc", "include_adult": False,
+                        "primary_release_date.gte": f"{year:04d}-{month:02d}-{first:02d}",
+                        "primary_release_date.lte": f"{year:04d}-{month:02d}-{last:02d}",
+                        "vote_average.gte": minimum, "page": page,
+                    }
+                    discover = module.tmdb.discover
+                    response = discover._request_obj(
+                        discover._urls["movies"], urlencode(params), key=None, call_cached=False)
+                    if not isinstance(response, dict) or not isinstance(response.get("results"), list):
+                        raise RuntimeError(f"TMDB 第 {page} 页未返回有效结果，扫描未完成")
+                    raw = response["results"]
+                    total_pages = int(response.get("total_pages") or 0)
+                    if total_pages > 500:
+                        if first == last:
+                            raise RuntimeError(f"{first} 日超过 TMDB 500 页上限，不能保证完整名单")
+                        midpoint = (first + last) // 2
+                        scan_window(first, midpoint)
+                        scan_window(midpoint + 1, last)
+                        return
+                    if not raw:
+                        break
+                    pages_done += 1
+                    examined += len(raw)
+                    for movie in raw:
+                        try:
+                            movie_id = int(movie.get("id") or 0)
+                            if not movie_id or movie_id in results or float(movie.get("vote_average") or 0) < minimum:
+                                continue
+                            detail = None
+                            for attempt in range(3):
+                                detail = chain.tmdb_info(movie_id, MediaType.MOVIE)
+                                if isinstance(detail, dict) and detail.get("id"):
+                                    break
+                                if attempt < 2:
+                                    time.sleep(attempt + 1)
+                            if not isinstance(detail, dict) or not detail.get("id"):
+                                raise RuntimeError(f"TMDB {movie_id} 详情读取失败，不能完整核验地区")
+                            countries = self._production_country_codes(detail)
+                            if not countries or not countries.intersection(self._allowed_countries):
+                                continue
+                            info = {key: detail.get(key, movie.get(key)) for key in (
+                                "id", "title", "original_title", "release_date", "vote_average",
+                                "vote_count", "original_language", "popularity", "overview",
+                                "poster_path", "backdrop_path", "genre_ids", "production_countries")}
+                            info["id"] = movie_id
+                            info["release_date"] = movie.get("release_date") or detail.get("release_date")
+                            info["media_type"] = "movie"
+                            results[movie_id] = {
+                                "tmdb_id": movie_id, "title": info.get("title") or str(movie_id),
+                                "year": year, "release_date": info["release_date"],
+                                "score": float(movie.get("vote_average") or 0),
+                                "countries": sorted(countries.intersection(self._allowed_countries)),
+                                "info": info,
+                            }
+                        except Exception as err:
+                            raise RuntimeError(f"TMDB {movie.get('id')} 详情核验中断：{err}") from err
+                    self._update_monthly_task(task_id, scan_progress=f"已读 {pages_done} 页 / {examined} 部，地区匹配 {len(results)} 部")
+                    if page >= total_pages:
+                        break
+                    page += 1
+
+            scan_window(1, last_day)
+            candidates = sorted(results.values(), key=lambda item: (-item["score"], item["release_date"] or "", item["tmdb_id"]))
+            self._update_monthly_task(
+                task_id, candidates=candidates, scan_state="complete", scan_error="",
+                scan_progress=f"已扫描 {pages_done} 页、{examined} 部；符合地区和评分 {len(candidates)} 部",
+                scanned_at=datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+            )
+            self._append_plugin_log("月份筛选", f"{year} 年 {month} 月、评分 ≥{minimum}：{len(candidates)} 部符合；已保存完整候选名单")
+        except Exception as err:
+            self._update_monthly_task(task_id, scan_state="error", scan_error=str(err)[:300])
+            self._append_plugin_log("月份筛选", f"{task_id} 扫描失败：{type(err).__name__}：{err}", "error")
+        finally:
+            self._monthly_scan_lock.release()
+
+    def process_monthly_tasks(self) -> None:
+        """各月份独立续跑；沿用全局并发、硬盘保护和等待队列。"""
+        if not self._enabled or self._disk_guard_blocks_new():
+            return
+        for task in self._load_monthly_tasks():
+            if not task.get("active") or task.get("scan_state") != "complete":
+                continue
+            if self._running_lock.locked():
+                return
+            if len(self._load_download_queue()) >= self._max_active_downloads * 2:
+                return
+            self.run_once(limit=int(task.get("batch_size") or 5), month_task_id=str(task["id"]))
 
     @staticmethod
     def _vote_count(media: MediaInfo) -> int:
@@ -3280,8 +3572,15 @@ class SmartMoviePush(_PluginBase):
         self._push_movie(media, context, auto_downloaded=True)
         return True, True
 
-    def run_once(self, limit: Optional[int] = None, test_mode: bool = False):
-        source = "手动立即运行" if test_mode else "定时任务"
+    def run_once(self, limit: Optional[int] = None, test_mode: bool = False,
+                 month_task_id: str = ""):
+        month_task = self._monthly_task(month_task_id) if month_task_id else None
+        if month_task_id and (not month_task or not month_task.get("active")
+                              or month_task.get("scan_state") != "complete"):
+            return
+        source = (f"月份任务 {month_task['year']}-{month_task['month']:02d}" if month_task
+                  else "手动立即运行" if test_mode else "定时任务")
+        auto_mode = self._auto_download or bool(month_task)
         if not self._enabled:
             self._append_plugin_log(source, "插件已关闭，未执行", "warning")
             logger.info("智能电影推送插件已关闭，本轮不执行")
@@ -3299,15 +3598,24 @@ class SmartMoviePush(_PluginBase):
             self._append_plugin_log(category, f"[{run_id}] {message}", level)
         try:
             target = max(1, min(int(limit or self._limit), 50))
-            trace(source, f"开始执行；目标 {target} 部，下载模式 {'自动' if self._auto_download else '手动'}，站点 {self._site_ids}，每轮最多查询 {self._max_searches} 部")
-            self._set_run_status(run_id, source, "读取 TMDB 候选", "正在获取热门、近期、经典与随机电影", target=target, selected=0, searched=0, sent=0)
+            trace(source, f"开始执行；目标 {target} 部，下载模式 {'自动' if auto_mode else '手动'}，站点 {self._site_ids}，每轮最多查询 {self._max_searches} 部")
+            self._set_run_status(run_id, source, "读取 TMDB 候选", "正在读取月份名单" if month_task else "正在获取热门、近期、经典与随机电影", target=target, selected=0, searched=0, sent=0)
             pushed = self._load_recent_pushes()
             pushed_ids = set(pushed)
+            if month_task:
+                # 月份任务可以反复续跑，历史提交与等待队列必须永久排除，不能只依赖 30 天推送去重。
+                pushed_ids.update(str(item.get("tmdb_id")) for item in self._load_stats_history() if item.get("tmdb_id"))
+                pushed_ids.update(str(item.get("tmdb_id")) for item in self._load_download_queue() if item.get("tmdb_id"))
             suppressed_ids = set(self._load_suppressed())
             scan_history = self._load_scan_cache(include_expired=True)
             scan_cache = self._load_scan_cache()
+            region_cache = self.get_data(self._region_cache_key) or {}
+            if not isinstance(region_cache, dict):
+                region_cache = {}
             search_scope = self._scan_scope()
-            buckets = self._candidate_buckets(scan_history)
+            buckets = ({"monthly": [MediaInfo(tmdb_info=item["info"])
+                                    for item in month_task.get("candidates") or [] if item.get("info")]
+                       } if month_task else self._candidate_buckets(scan_history))
             trace("候选获取", "；".join(f"{name} {len(items)} 部" for name, items in buckets.items()))
             self._set_run_status(run_id, source, "读取媒体库索引", "批量获取 Emby 电影目录", target=target, selected=0, searched=0, sent=0)
             library_snapshot = self._library_snapshot_for_scan()
@@ -3320,18 +3628,20 @@ class SmartMoviePush(_PluginBase):
                 ("recent", min(self._recent_count, target)),
                 ("classic", min(self._classic_count, target)),
                 ("random", min(self._random_count, target)),
-            ]
+            ] if not month_task else [("monthly", target)]
             selected: List[Tuple[MediaInfo, Context]] = []
             attempted = set()
             stats = {
                 "tmdb": len({str(media.tmdb_id) for values in buckets.values() for media in values}),
-                "pushed": 0, "suppressed": 0, "cached": 0, "library": 0,
+                "pushed": 0, "suppressed": 0, "cached": 0, "library": 0, "region": 0,
                 "searched": 0, "no_resource": 0, "errors": 0,
             }
 
             def try_bucket(items: List[MediaInfo], wanted: int) -> int:
                 bucket_sent = 0
                 for media in items:
+                    if month_task_id and not (self._monthly_task(month_task_id) or {}).get("active"):
+                        break
                     if self._disk_guard_blocks_new():
                         logger.warning("扫描期间触发硬盘保护，停止本轮电影搜索")
                         break
@@ -3359,6 +3669,25 @@ class SmartMoviePush(_PluginBase):
                     if stats["searched"] >= self._max_searches:
                         break
                     try:
+                        countries = self._production_country_codes(getattr(media, "tmdb_info", None) or {})
+                        if not countries:
+                            cached_region = region_cache.get(tmdb_id) or {}
+                            cached_time = self._parse_history_time(
+                                cached_region.get("checked_at"), pytz.timezone(settings.TZ))
+                            if cached_time and datetime.now(tz=pytz.timezone(settings.TZ)) - cached_time < timedelta(days=90):
+                                countries = set(cached_region.get("countries") or [])
+                            else:
+                                detail = TmdbChain().tmdb_info(int(media.tmdb_id), MediaType.MOVIE)
+                                if not isinstance(detail, dict) or not detail.get("id"):
+                                    raise RuntimeError("TMDB 详情暂不可用，无法核验制作地区")
+                                countries = self._production_country_codes(detail)
+                                region_cache[tmdb_id] = {
+                                    "countries": sorted(countries),
+                                    "checked_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+                                }
+                        if not countries or not countries.intersection(self._allowed_countries):
+                            stats["region"] += 1
+                            continue
                         if (self._snapshot_has_movie(library_snapshot, media)
                                 if library_snapshot else self._already_in_library(media)):
                             stats["library"] += 1
@@ -3398,7 +3727,7 @@ class SmartMoviePush(_PluginBase):
                 try_bucket(buckets[bucket_name], wanted)
 
             # 某一组资源不足时，按新片→近期→经典→随机的顺序继续补齐到总数。
-            if len(selected) < target:
+            if len(selected) < target and not month_task:
                 fallback = []
                 for bucket_name in ("new", "recent", "classic", "random"):
                     fallback.extend(buckets[bucket_name])
@@ -3407,7 +3736,7 @@ class SmartMoviePush(_PluginBase):
             # 扫描阶段完成后才集中发送，避免用户在漫长搜索过程中零散收到消息。
             diagnostic = (
                 f"TMDB候选 {stats['tmdb']}，已推送跳过 {stats['pushed']}，不再推送 {stats['suppressed']}，"
-                f"缓存跳过 {stats['cached']}，媒体库已有 {stats['library']}，查询站点 {stats['searched']}，"
+                f"缓存跳过 {stats['cached']}，地区过滤 {stats['region']}，媒体库已有 {stats['library']}，查询站点 {stats['searched']}，"
                 f"无资源/未命中过滤 {stats['no_resource']}，异常 {stats['errors']}，选中 {len(selected)}"
             )
             logger.info(f"电影扫描完成：{diagnostic}；开始集中推送")
@@ -3420,6 +3749,7 @@ class SmartMoviePush(_PluginBase):
                 logger.warning("扫描完成时硬盘保护已启动，本轮候选保留在扫描缓存但不推送、不下载")
                 scan_history.update(scan_cache)
                 self.save_data(self._scan_cache_key, scan_history)
+                self.save_data(self._region_cache_key, region_cache)
                 return
             sent = 0
 
@@ -3427,6 +3757,8 @@ class SmartMoviePush(_PluginBase):
                 nonlocal sent
                 auto_submitted = 0
                 for media, best in selected:
+                    if month_task_id and not (self._monthly_task(month_task_id) or {}).get("active"):
+                        break
                     if self._disk_guard_blocks_new():
                         logger.warning("批量推送期间触发硬盘保护，剩余电影停止推送和下载")
                         break
@@ -3441,7 +3773,7 @@ class SmartMoviePush(_PluginBase):
                         # 手动“立即运行”与定时开关相互独立，但执行与定时任务
                         # 完全相同：自动下载模式下真实提交下载；达到并发上限
                         # 或触发硬盘保护时进入等候队列。
-                        if self._auto_download:
+                        if auto_mode:
                             # 手动立即运行是一次有严格数量上限的实际测试。
                             # 没有空位的项目不能进入长期队列，否则用户只点一次
                             # “运行 5 部”，后续却会随着空位不断继续下载。
@@ -3462,13 +3794,13 @@ class SmartMoviePush(_PluginBase):
                         pushed_ids.add(tmdb_id)
                         pushed[tmdb_id] = datetime.now().isoformat(timespec="seconds")
                         sent += 1
-                        trace("推送成功", f"{media.title_year}：{'已提交下载' if self._auto_download and submitted else '已加入等候下载' if self._auto_download else '已发送手动确认消息'}")
+                        trace("推送成功", f"{media.title_year}：{'已提交下载' if auto_mode and submitted else '已加入等候下载' if auto_mode else '已发送手动确认消息'}")
                         self._set_run_status(run_id, source, "批量发送", f"刚发送 {media.title_year}", target=target, selected=len(selected), searched=stats["searched"], sent=sent)
                     except Exception as err:
                         trace("推送失败", f"{media.title_year}：{err}", "error")
                         logger.error(f"集中推送 {media.title_year} 失败：{err}", exc_info=True)
 
-            if self._auto_download:
+            if auto_mode:
                 # 锁住“读活动数→批量提交”全过程，防止手动点击和队列补位同时越过 20 部上限。
                 with self._queue_lock:
                     active = self._active_download_count()
@@ -3502,11 +3834,12 @@ class SmartMoviePush(_PluginBase):
 
             scan_history.update(scan_cache)
             self.save_data(self._scan_cache_key, scan_history)
+            self.save_data(self._region_cache_key, region_cache)
             self.save_data(self._pushed_key, pushed)
             trace("运行完成", f"目标 {target} 部；选中 {len(selected)} 部；推送 {sent} 部；提交下载详见‘提交下载’日志")
             self._set_run_status(run_id, source, "已完成", diagnostic, target=target, selected=len(selected), searched=stats["searched"], sent=sent)
             logger.info(f"智能下载影视资源完成：目标 {target}，实际推送 {sent} 部，手动立即运行={test_mode}")
-            if sent == 0 and not (self._auto_download and test_mode and selected):
+            if sent == 0 and not month_task and not (auto_mode and test_mode and selected):
                 _, result = self._send_telegram_direct(
                     title="智能电影推荐立即运行完成",
                     text=f"本轮未选出电影。\n{diagnostic}",
@@ -3520,6 +3853,11 @@ class SmartMoviePush(_PluginBase):
             self._set_run_status(run_id, source, "运行失败", str(err)[:300])
             logger.error(f"电影推荐运行失败：{err}", exc_info=True)
         finally:
+            if month_task_id and self._monthly_task(month_task_id):
+                self._update_monthly_task(
+                    month_task_id,
+                    last_run_at=datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+                )
             self._running_lock.release()
 
     @eventmanager.register(EventType.MessageAction)
