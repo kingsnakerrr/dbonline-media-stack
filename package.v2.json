@@ -2,12 +2,13 @@
   "SmartMoviePush": {
     "name": "智能下载影视资源_惹咪之北",
     "description": "从 TMDB 候选及已选 PT 站点筛选电影，支持 Telegram 推荐、顺序下载、磁盘保护和 Emby 入库核验。",
-    "version": "0.9.23",
+    "version": "0.9.24",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Telegram_A.png",
     "author": "kingsnakerrr",
     "level": 1,
     "system_version": ">=2.5.7,<3",
     "history": {
+      "v0.9.24": "Telegram 统计菜单保留 10 秒且点击后立即撤回；统计结果保留 1 分钟，其他按钮操作提示仍为 10 秒。",
       "v0.9.23": "插件下载记录超过近期 1000 条后自动归档到持久化 SQLite，月/年统计及每日统计合并读取，不再因近期列表截断而少算。",
       "v0.9.22": "新增管理员 /smartmovie 统计菜单：今天、昨天、本周、本月、上月、今年、当前状态和最近运行；仅按天列出电影，查询结果和操作反馈 10 秒后撤回。",
       "v0.9.21": "午夜日报仅给未入库电影加红色叉号及状态，已入库电影不逐项标记；汇总改称待入库。",

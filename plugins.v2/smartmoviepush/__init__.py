@@ -44,7 +44,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.23"
+    plugin_version = "0.9.24"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -3400,7 +3400,7 @@ class SmartMoviePush(_PluginBase):
                 if not result:
                     logger.error(f"Telegram 统计结果未送达：{key}")
                     break
-                self._delete_telegram_reply_later(sent_source, result)
+                self._delete_telegram_reply_later(sent_source, result, seconds=60)
             return
         pending = self._load_pending()
         item = pending.get(key)
