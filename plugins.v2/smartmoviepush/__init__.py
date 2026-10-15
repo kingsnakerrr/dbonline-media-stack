@@ -6,9 +6,11 @@ import random
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
+from contextlib import closing
 from types import SimpleNamespace
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -42,7 +44,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.22"
+    plugin_version = "0.9.23"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -83,6 +85,7 @@ class SmartMoviePush(_PluginBase):
     _running_lock = threading.Lock()
     _queue_lock = threading.Lock()
     _plugin_log_lock = threading.RLock()
+    _history_archive_lock = threading.RLock()
     _library_snapshot_lock = threading.RLock()
     _library_snapshot = None
     _library_snapshot_time = 0.0
@@ -716,7 +719,15 @@ class SmartMoviePush(_PluginBase):
         return {"success": True, "message": f"已清空 {count} 部等候下载电影"}
 
     def _api_clear_download_history(self) -> dict:
-        count = len(self._load_download_history())
+        count = len(self._load_stats_history())
+        try:
+            with self._history_archive_lock:
+                with closing(self._history_archive()) as db:
+                    with db:
+                        db.execute("DELETE FROM history_archive")
+        except Exception as err:
+            logger.error(f"清理本插件历史归档失败：{err}")
+            return {"success": False, "message": "清理历史归档失败，近期记录未清空；请检查插件日志"}
         self.save_data(self._download_history_key, [])
         return {"success": True, "message": f"已清空 {count} 条下载记录"}
 
@@ -1686,6 +1697,50 @@ class SmartMoviePush(_PluginBase):
         value = self.get_data(self._download_history_key)
         return value if isinstance(value, list) else []
 
+    def _history_archive(self):
+        connection = sqlite3.connect(str(self.get_data_path() / "download_history.sqlite"), timeout=20)
+        connection.execute("CREATE TABLE IF NOT EXISTS history_archive (uid TEXT PRIMARY KEY, submitted_at TEXT, payload TEXT NOT NULL)")
+        return connection
+
+    def _save_download_history(self, history: List[dict]) -> None:
+        """热数据仍保持 1000 条；淘汰的历史安全归档，供月/年统计使用。"""
+        for item in history:
+            if not item.get("record_uid"):
+                identity = [item.get("submitted_at"), item.get("download_id"),
+                            item.get("tmdb_id"), item.get("title")]
+                item["record_uid"] = hashlib.sha256(
+                    json.dumps(identity, ensure_ascii=False).encode("utf-8")
+                ).hexdigest()
+        older = history[:-1000]
+        if older:
+            try:
+                with self._history_archive_lock:
+                    with closing(self._history_archive()) as db:
+                        with db:
+                            db.executemany(
+                                "INSERT OR REPLACE INTO history_archive(uid, submitted_at, payload) VALUES (?, ?, ?)",
+                                [(item["record_uid"], str(item.get("submitted_at") or ""),
+                                  json.dumps(item, ensure_ascii=False)) for item in older],
+                            )
+            except Exception as err:
+                # 归档失败时宁可暂时放大 MP 记录，也不丢失淘汰的任务。
+                logger.error(f"归档本插件历史下载记录失败，暂不截断：{err}")
+                self.save_data(self._download_history_key, history)
+                return
+        self.save_data(self._download_history_key, history[-1000:])
+
+    def _load_stats_history(self) -> List[dict]:
+        active = self._load_download_history()
+        try:
+            with self._history_archive_lock:
+                with closing(self._history_archive()) as db:
+                    older = [json.loads(row[0]) for row in db.execute("SELECT payload FROM history_archive")]
+            active_ids = {str(item.get("record_uid")) for item in active if item.get("record_uid")}
+            return [item for item in older if str(item.get("record_uid")) not in active_ids] + active
+        except Exception as err:
+            logger.error(f"读取本插件历史归档失败，统计仅含近期记录：{err}")
+            return active
+
     def _migrate_legacy_organized_history(self) -> None:
         """迁移旧记录：MP 整理能证明下载完成，但不能证明 Emby 入库。"""
         history = self._load_download_history()
@@ -1702,7 +1757,7 @@ class SmartMoviePush(_PluginBase):
                 item["download_completion_source"] = "transfer"
                 changed += 1
         if changed:
-            self.save_data(self._download_history_key, history[-1000:])
+            self._save_download_history(history)
             self._append_plugin_log("入库核验", f"已将 {changed} 条旧整理记录改为等待 Emby 核验")
 
     def _load_plugin_logs(self) -> List[dict]:
@@ -1789,7 +1844,7 @@ class SmartMoviePush(_PluginBase):
                 added += 1
 
             history.sort(key=lambda item: str(item.get("submitted_at") or ""))
-            self.save_data(self._download_history_key, history[-1000:])
+            self._save_download_history(history)
             self.save_data(self._history_backfill_key, {
                 "completed_at": datetime.now().isoformat(timespec="seconds"),
                 "matched": len(records),
@@ -1906,6 +1961,7 @@ class SmartMoviePush(_PluginBase):
     def _record_download(self, media: MediaInfo, download_id: Any) -> None:
         history = self._load_download_history()
         history.append({
+            "record_uid": secrets.token_hex(16),
             "tmdb_id": media.tmdb_id,
             "title": media.title_year,
             "media_title": media.title,
@@ -1913,7 +1969,7 @@ class SmartMoviePush(_PluginBase):
             "download_id": str(download_id or ""),
             "submitted_at": datetime.now().isoformat(timespec="seconds"),
         })
-        self.save_data(self._download_history_key, history[-1000:])
+        self._save_download_history(history)
         self._append_plugin_log("提交下载", f"{media.title_year} 已提交到 MoviePilot，任务 {download_id}")
 
     def reconcile_download_completions(self) -> int:
@@ -1983,7 +2039,7 @@ class SmartMoviePush(_PluginBase):
             item["download_completion_source"] = source
             changed += 1
         if changed:
-            self.save_data(self._download_history_key, history[-1000:])
+            self._save_download_history(history)
             logger.info(f"插件下载完成核验：更新 {changed} 部")
         return changed
 
@@ -2050,7 +2106,7 @@ class SmartMoviePush(_PluginBase):
                 item["status"] = "organize_failed"
                 changed += 1
         if changed:
-            self.save_data(self._download_history_key, history[-1000:])
+            self._save_download_history(history)
             logger.info(f"插件电影 MoviePilot 整理结果核对：更新 {changed} 条")
         return changed
 
@@ -2440,7 +2496,7 @@ class SmartMoviePush(_PluginBase):
             history_item["download_completed_at"] = history_item["organized_at"]
             history_item["download_completion_source"] = "transfer"
         history_item["status"] = "organized"
-        self.save_data(self._download_history_key, history[-1000:])
+        self._save_download_history(history)
         self._append_plugin_log("整理完成", f"{history_item.get('title') or f'TMDB {tmdb_id}'} 等待 Emby 入库")
         deleted, failed = self._delete_download_messages(tmdb_id)
         if deleted or failed:
@@ -2644,7 +2700,7 @@ class SmartMoviePush(_PluginBase):
                     changed = True
                     self._append_plugin_log("Emby 已移除", f"{item.get('title')} 当前不在 Emby，已取消入库标记", "warning")
         if changed:
-            self.save_data(self._download_history_key, history[-1000:])
+            self._save_download_history(history)
         logger.info(f"Emby 批量核验完成：已查 {checked} 部，本轮新增确认 {found} 部")
         return found
 
@@ -2697,7 +2753,7 @@ class SmartMoviePush(_PluginBase):
         if not getattr(self, "_last_emby_check_ok", False):
             logger.warning("Emby 暂不可用，每日统计暂缓发送，避免将真实入库数误报为 0")
             return
-        history = self._load_download_history()
+        history = self._load_stats_history()
 
         submitted = []
         for item in history:
@@ -2934,7 +2990,7 @@ class SmartMoviePush(_PluginBase):
         if not selected:
             return []
         start, end, label, show_titles = selected
-        history = self._load_download_history()
+        history = self._load_stats_history()
         items = []
         for item in history:
             submitted_at = self._parse_history_time(item.get("submitted_at"), timezone)
@@ -2956,7 +3012,7 @@ class SmartMoviePush(_PluginBase):
                           if (parsed := self._parse_history_time(item.get("submitted_at"), timezone))),
                          default=None)
             if oldest and oldest > start:
-                header += f"\n⚠️ 历史仅保留到 {oldest.strftime('%Y.%m.%d')}，该周期可能不完整"
+                header += f"\nℹ️ 可核验记录始于 {oldest.strftime('%Y.%m.%d')}；更早已丢失的任务无法追溯"
         if not show_titles:
             return [(title, header)]
         rows = [html.escape(self._format_daily_movie_rows([item], index))
