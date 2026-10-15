@@ -34,17 +34,18 @@ MoviePilot V2 私人电影推荐与下载插件。插件从 TMDB 候选中排除
    cp -a smartmoviepush /opt/docker-compose/moviepilot/config/local-plugins/plugins.v2/
    ```
 
-3. 如果当前 MoviePilot 版本不会自动加载本地目录，再复制进容器：
+3. 确认容器实际加载的文件也已更新。当前 `takehost` 部署必须同时复制进容器；只更新宿主机目录不会让页面生效：
 
    ```bash
    docker exec moviepilot-v2 mkdir -p /app/app/plugins/smartmoviepush
    docker cp smartmoviepush/. moviepilot-v2:/app/app/plugins/smartmoviepush/
    ```
 
-4. 重启 MoviePilot：
+4. 重启 MoviePilot，并核对容器内的 `plugin_version` 与安装包版本一致：
 
    ```bash
    docker restart moviepilot-v2
+   docker exec moviepilot-v2 grep plugin_version /app/app/plugins/smartmoviepush/__init__.py
    ```
 
 5. 打开 MoviePilot 的“插件”，进入“智能下载影视资源_惹咪之北”。
