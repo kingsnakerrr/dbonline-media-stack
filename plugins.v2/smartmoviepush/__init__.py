@@ -47,7 +47,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.36"
+    plugin_version = "0.9.37"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2150,8 +2150,8 @@ class SmartMoviePush(_PluginBase):
                         if not self._enabled or self._disk_guard_blocks_new():
                             self._monthly_batch_job["skipped"] += 1
                             continue
-                        current_queue = self._load_download_queue()
-                        already_queued = any(str(entry.get("tmdb_id")) == movie_id for entry in current_queue)
+                        already_queued = any(str(entry.get("tmdb_id")) == movie_id
+                                             for entry in self._load_download_queue())
                         if self._active_download_count() < self._max_active_downloads:
                             ok, error = self._submit_download(media, context)
                             if not ok:
@@ -2161,10 +2161,7 @@ class SmartMoviePush(_PluginBase):
                             self._monthly_batch_job["submitted"] += 1
                             plugin_ids.add(movie_id)
                             if already_queued:
-                                self.save_data(self._download_queue_key, [entry for entry in current_queue
-                                               if str(entry.get("tmdb_id")) != movie_id])
                                 queued_ids.discard(movie_id)
-                                self._append_plugin_log("年度下载", f"{media.title_year} 已提交，已从等候队列移除")
                         elif already_queued:
                             self._monthly_batch_job["queued"] += 1
                         elif self._enqueue_download(media, context):
@@ -2597,6 +2594,19 @@ class SmartMoviePush(_PluginBase):
     def _load_download_queue(self) -> List[dict]:
         value = self.get_data(self._download_queue_key)
         return value if isinstance(value, list) else []
+
+    def _remove_queued_movie(self, tmdb_id: Any) -> int:
+        """成功提交后清除同片等候项；调用者须持有 _queue_lock。"""
+        movie_id = str(tmdb_id or "")
+        if not movie_id:
+            return 0
+        queue = self._load_download_queue()
+        retained = [item for item in queue if str(item.get("tmdb_id") or "") != movie_id]
+        removed = len(queue) - len(retained)
+        if removed:
+            self.save_data(self._download_queue_key, retained)
+            self._append_plugin_log("队列去重", f"TMDB {movie_id} 已提交下载，移除 {removed} 条同片等候任务")
+        return removed
 
     def _load_download_history(self) -> List[dict]:
         value = self.get_data(self._download_history_key)
@@ -3081,6 +3091,7 @@ class SmartMoviePush(_PluginBase):
         if not download_id:
             return False, error or "未知错误"
         self._record_download(media, download_id)
+        self._remove_queued_movie(media.tmdb_id)
         return True, None
 
     def process_download_queue(self) -> None:
@@ -3110,6 +3121,8 @@ class SmartMoviePush(_PluginBase):
             for item in queue[:]:
                 if submitted >= slots:
                     break
+                if not any(row.get("key") == item.get("key") for row in remaining):
+                    continue
                 try:
                     results = SearchChain().search_by_id(
                         tmdbid=int(item["tmdb_id"]), mtype=MediaType.MOVIE,
@@ -3128,7 +3141,8 @@ class SmartMoviePush(_PluginBase):
                     )
                     if not ok:
                         raise RuntimeError(error or "提交失败")
-                    remaining = [row for row in remaining if row.get("key") != item.get("key")]
+                    # _submit_download 已从共享队列移除同片任务；不能再用进入函数时的旧快照覆盖。
+                    remaining = self._load_download_queue()
                     submitted += 1
                     logger.info(f"顺序下载队列已提交：{item.get('title')}")
                 except Exception as err:
