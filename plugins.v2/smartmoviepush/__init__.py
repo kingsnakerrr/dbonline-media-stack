@@ -47,7 +47,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.33"
+    plugin_version = "0.9.34"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -129,6 +129,11 @@ class SmartMoviePush(_PluginBase):
     _monthly_tasks_lock = threading.RLock()
     _monthly_scan_lock = threading.Lock()
     _monthly_archive_lock = threading.RLock()
+    _monthly_resource_lock = threading.Lock()
+    _monthly_resource_job_lock = threading.RLock()
+    _monthly_resource_job = {}
+    _monthly_batch_lock = threading.Lock()
+    _monthly_batch_job = {}
 
     def init_plugin(self, config: dict = None):
         self.stop_service()
@@ -1368,8 +1373,15 @@ class SmartMoviePush(_PluginBase):
         try:
             page = max(1, int(payload.get("page") or 1))
             page_size = min(100, max(10, int(payload.get("page_size") or 30)))
+            minimum = float(payload.get("min_score") if payload.get("min_score") is not None
+                            else task.get("min_score") or 0)
         except (TypeError, ValueError):
-            return {"success": False, "message": "页码或每页条数无效"}
+            return {"success": False, "message": "页码、每页条数或评分无效"}
+        if not 0 <= minimum <= 10:
+            return {"success": False, "message": "评分应为 0–10 分"}
+        resources_only = bool(payload.get("resources_only"))
+        resources = (self._load_monthly_resource_cache(int(task["year"]), int(task["month"]))
+                     if resources_only else {})
         history = {}
         for item in self._load_stats_history():
             movie_id = str(item.get("tmdb_id") or "")
@@ -1385,9 +1397,14 @@ class SmartMoviePush(_PluginBase):
         rows = []
         counts = {}
         for item in task.get("candidates") or []:
+            if float(item.get("score") or 0) < minimum:
+                continue
             if selected_date and str(item.get("release_date") or "") != selected_date:
                 continue
             movie_id = str(item.get("tmdb_id"))
+            options = resources.get(movie_id) or []
+            if resources_only and not options:
+                continue
             record = history.get(movie_id)
             in_emby = bool(library_snapshot and movie_id in library_snapshot["tmdb_ids"])
             if record:
@@ -1411,7 +1428,10 @@ class SmartMoviePush(_PluginBase):
                 status = {"library": "library", "no_resource": "no_resource"}.get(
                     (cache.get(movie_id) or {}).get("status"), "candidate")
             counts[status] = counts.get(status, 0) + 1
-            rows.append({key: value for key, value in item.items() if key != "info"} | {"status": status})
+            rows.append({key: value for key, value in item.items() if key != "info"} |
+                        {"status": status, "resources": options})
+        rows.sort(key=lambda item: (-int(item.get("vote_count") or 0),
+                                    -float(item.get("score") or 0), str(item.get("tmdb_id"))))
         counts["all"] = len(rows)
         search = str(payload.get("search") or "").strip().casefold()[:100]
         if search:
@@ -1429,6 +1449,12 @@ class SmartMoviePush(_PluginBase):
             "items": rows[(page - 1) * page_size:page * page_size], "counts": counts,
             "total": total, "page": page, "page_size": page_size, "date": selected_date,
             "emby_fresh": bool(library_snapshot),
+            "resource_progress": dict(self._monthly_resource_job)
+                if self._monthly_resource_job.get("year") == task["year"]
+                and self._monthly_resource_job.get("month") == task["month"] else {},
+            "batch_progress": dict(self._monthly_batch_job)
+                if self._monthly_batch_job.get("year") == task["year"]
+                and self._monthly_batch_job.get("month") == task["month"] else {},
         }}
 
     def _api_monthly_action(self, action: str, payload: dict) -> dict:
@@ -1678,6 +1704,22 @@ class SmartMoviePush(_PluginBase):
             }
         elif action in {"monthly_save", "monthly_rescan", "monthly_start", "monthly_pause", "monthly_delete"}:
             result = self._api_monthly_action(action, payload)
+        elif action in {"monthly_resource_scan", "monthly_batch_download"}:
+            try:
+                year, month = int(payload.get("year")), int(payload.get("month"))
+                if not 1900 <= year <= datetime.now().year or not 1 <= month <= 12:
+                    raise ValueError("invalid month")
+                if action == "monthly_resource_scan":
+                    minimum = float(payload.get("min_score") if payload.get("min_score") is not None else 7)
+                    if not 0 <= minimum <= 10:
+                        raise ValueError("invalid score")
+                    result = self._start_monthly_resource_scan(
+                        year, month, minimum, bool(payload.get("force")))
+                else:
+                    result = self._start_monthly_batch_download(
+                        year, month, payload.get("selections"))
+            except (TypeError, ValueError):
+                result = {"success": False, "message": "年份、月份、评分或选择的资源无效"}
         else:
             result = {"success": False, "message": "未知操作"}
         result["data"] = self._ui_status_data()
@@ -1798,6 +1840,10 @@ class SmartMoviePush(_PluginBase):
                            "payload TEXT NOT NULL, PRIMARY KEY(scan_key, tmdb_id))")
         connection.execute("CREATE INDEX IF NOT EXISTS monthly_scan_movies_date "
                            "ON monthly_scan_movies(scan_key, release_date)")
+        connection.execute("CREATE TABLE IF NOT EXISTS monthly_resource_cache "
+                           "(month_key TEXT NOT NULL, tmdb_id TEXT NOT NULL, scope TEXT NOT NULL, "
+                           "checked_at REAL NOT NULL, payload TEXT NOT NULL, "
+                           "PRIMARY KEY(month_key, tmdb_id, scope))")
         return connection
 
     def _save_monthly_archive(self, task: dict, candidates: list, count_scan: bool = False) -> str:
@@ -1887,6 +1933,225 @@ class SmartMoviePush(_PluginBase):
                  "month_candidate_count": monthly_totals.get((year, month), count),
                  "days": day_counts.get(key, {})}
                 for key, year, month, score, scanned_at, count, scan_count in scans]
+
+    def _monthly_resource_scope(self) -> str:
+        """站点选择变动时不复用旧的资源搜索结果。"""
+        ids = sorted(int(site) for site in self._site_ids)
+        return hashlib.sha256(json.dumps(ids).encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _monthly_resource_rank(context: Context) -> int:
+        text = f"{getattr(context.meta_info, 'resource_pix', '')} {context.torrent_info.title or ''}".lower()
+        if re.search(r"\b(4320p|8k)\b", text):
+            return 4320
+        if re.search(r"\b(2160p|4k|uhd)\b", text):
+            return 2160
+        if re.search(r"\b(1080p|fullhd|fhd)\b", text):
+            return 1080
+        if re.search(r"\b720p\b", text):
+            return 720
+        if re.search(r"\b480p\b", text):
+            return 480
+        return 0
+
+    def _monthly_resource_options(self, contexts: list) -> list:
+        """SearchChain 已按 MoviePilot 规则过滤；同片只展示最高清的两个候选。"""
+        ranked = sorted((ctx for ctx in contexts if getattr(ctx, 'torrent_info', None)), key=lambda ctx: (
+            -self._monthly_resource_rank(ctx),
+            -int(ctx.torrent_info.seeders or 0),
+            -float(ctx.torrent_info.size or 0)))
+        options, identities = [], set()
+        for context in ranked:
+            identity = self._torrent_identity(context)
+            if identity in identities:
+                continue
+            identities.add(identity)
+            torrent = context.torrent_info
+            resolution = self._monthly_resource_rank(context)
+            options.append({
+                "id": identity, "title": str(torrent.title or "未知资源")[:250],
+                "site": str(torrent.site_name or torrent.site or "未知站点"),
+                "size_gb": round(float(torrent.size or 0) / (1024 ** 3), 2),
+                "seeders": int(torrent.seeders or 0),
+                "resolution": f"{resolution}P" if resolution else "未知",
+            })
+            if len(options) == 2:
+                break
+        return options
+
+    def _load_monthly_resource_cache(self, year: int, month: int) -> dict:
+        month_key = f"{year:04d}-{month:02d}"
+        scope = self._monthly_resource_scope()
+        fresh_after = time.time() - 6 * 3600
+        with self._monthly_archive_lock:
+            with closing(self._monthly_archive()) as db:
+                rows = db.execute(
+                    "SELECT tmdb_id, checked_at, payload FROM monthly_resource_cache "
+                    "WHERE month_key=? AND scope=?", (month_key, scope)).fetchall()
+        return {tmdb_id: json.loads(payload) for tmdb_id, checked_at, payload in rows
+                if checked_at >= fresh_after}
+
+    def _save_monthly_resource_cache(self, year: int, month: int, tmdb_id: str, options: list) -> None:
+        with self._monthly_archive_lock:
+            with closing(self._monthly_archive()) as db:
+                with db:
+                    db.execute("INSERT OR REPLACE INTO monthly_resource_cache VALUES (?, ?, ?, ?, ?)", (
+                        f"{year:04d}-{month:02d}", tmdb_id, self._monthly_resource_scope(),
+                        time.time(), json.dumps(options, ensure_ascii=False)))
+
+    def _start_monthly_resource_scan(self, year: int, month: int, minimum: float,
+                                     force: bool = False) -> dict:
+        archive = self._load_monthly_archive_month(year, month)
+        if not archive:
+            return {"success": False, "message": "这个月尚无扫描名单"}
+        if minimum < float(archive["min_score"]):
+            return {"success": False, "message": f"保存名单最低为 {archive['min_score']} 分；降低评分需先重新扫描月份"}
+        if not self._monthly_resource_lock.acquire(blocking=False):
+            job = self._monthly_resource_job
+            if (job.get("running") and job.get("year") == year and job.get("month") == month
+                    and job.get("min_score") == minimum and job.get("scope") == self._monthly_resource_scope()):
+                return {"success": True, "message": "这个月份的资源查询正在继续"}
+            return {"success": False, "message": "已有月份资源搜索在运行，请等完成后再启动另一轮"}
+        candidates = [item for item in archive["candidates"] if float(item.get("score") or 0) >= minimum]
+        candidates.sort(key=lambda item: (-int(item.get("vote_count") or 0),
+                                          -float(item.get("score") or 0), str(item.get("tmdb_id"))))
+        job = {"year": year, "month": month, "min_score": minimum, "scope": self._monthly_resource_scope(),
+               "running": True, "done": 0, "total": len(candidates), "found": 0, "errors": 0,
+               "started_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")}
+        with self._monthly_resource_job_lock:
+            self._monthly_resource_job = job
+        try:
+            threading.Thread(target=self._scan_monthly_resources,
+                             args=(year, month, candidates, force), daemon=True).start()
+        except Exception:
+            self._monthly_resource_lock.release()
+            raise
+        return {"success": True, "message": f"已开始核对 {len(candidates)} 部电影的站点资源；匹配结果会逐步显示"}
+
+    def _scan_monthly_resources(self, year: int, month: int, candidates: list, force: bool) -> None:
+        try:
+            cached = {} if force else self._load_monthly_resource_cache(year, month)
+            library = self._library_snapshot_for_scan()
+            downloaded = {str(item.get("tmdb_id")) for item in self._load_stats_history()}
+            queued = {str(item.get("tmdb_id")) for item in self._load_download_queue()}
+            for item in candidates:
+                tmdb_id = str(item["tmdb_id"])
+                options = cached.get(tmdb_id)
+                try:
+                    if options is None:
+                        if (library and tmdb_id in library["tmdb_ids"]) or tmdb_id in downloaded or tmdb_id in queued:
+                            options = []
+                        else:
+                            contexts = SearchChain().search_by_id(
+                                tmdbid=int(tmdb_id), mtype=MediaType.MOVIE,
+                                sites=self._site_ids, cache_local=False) or []
+                            options = self._monthly_resource_options(contexts)
+                        self._save_monthly_resource_cache(year, month, tmdb_id, options)
+                    with self._monthly_resource_job_lock:
+                        self._monthly_resource_job["found"] += bool(options)
+                except Exception as err:
+                    logger.warning(f"月份资源核对 {tmdb_id} 失败：{err}")
+                    with self._monthly_resource_job_lock:
+                        self._monthly_resource_job["errors"] += 1
+                finally:
+                    with self._monthly_resource_job_lock:
+                        self._monthly_resource_job["done"] += 1
+        finally:
+            with self._monthly_resource_job_lock:
+                self._monthly_resource_job["running"] = False
+            self._monthly_resource_lock.release()
+
+    def _start_monthly_batch_download(self, year: int, month: int, selections: list) -> dict:
+        """只接受当前过滤规则匹配过的资源 ID；下载前重新搜索并再次校验。"""
+        if not self._enabled or self._disk_guard_blocks_new():
+            return {"success": False, "message": "插件或硬盘保护已停止新增下载"}
+        if not isinstance(selections, list) or not 1 <= len(selections) <= 100:
+            return {"success": False, "message": "每次请选择 1–100 部电影"}
+        archive = self._load_monthly_archive_month(year, month)
+        if not archive:
+            return {"success": False, "message": "月份名单不存在"}
+        movies = {str(item["tmdb_id"]): item for item in archive["candidates"]}
+        cached = self._load_monthly_resource_cache(year, month)
+        validated, seen = [], set()
+        for choice in selections:
+            movie_id = str(choice.get("tmdb_id") or "") if isinstance(choice, dict) else ""
+            resource_id = str(choice.get("resource_id") or "") if isinstance(choice, dict) else ""
+            if movie_id in seen or movie_id not in movies or not any(
+                    option["id"] == resource_id for option in cached.get(movie_id, [])):
+                return {"success": False, "message": "选择中包含重复、已过期或不符合 MP 规则的资源，请重新搜索"}
+            seen.add(movie_id)
+            validated.append((movies[movie_id], resource_id))
+        if not self._monthly_batch_lock.acquire(blocking=False):
+            return {"success": False, "message": "上一次批量下载还在提交中"}
+        self._monthly_batch_job = {"running": True, "total": len(validated), "done": 0,
+                                   "submitted": 0, "queued": 0, "skipped": 0, "errors": 0,
+                                   "year": year, "month": month}
+        try:
+            threading.Thread(target=self._run_monthly_batch_download,
+                             args=(validated,), daemon=True).start()
+        except Exception:
+            self._monthly_batch_lock.release()
+            raise
+        return {"success": True, "message": f"已开始提交 {len(validated)} 部；下载空位不足的会进入本插件等候队列"}
+
+    def _run_monthly_batch_download(self, validated: list) -> None:
+        try:
+            plugin_ids = {str(item.get("tmdb_id")) for item in self._load_stats_history()}
+            queued_ids = {str(item.get("tmdb_id")) for item in self._load_download_queue()}
+            library = self._library_snapshot_for_scan(force=True)
+            for item, resource_id in validated:
+                movie_id = str(item["tmdb_id"])
+                try:
+                    if not self._enabled or self._disk_guard_blocks_new():
+                        self._monthly_batch_job["skipped"] += 1
+                        continue
+                    if movie_id in plugin_ids or movie_id in queued_ids or (library and movie_id in library["tmdb_ids"]):
+                        self._monthly_batch_job["skipped"] += 1
+                        continue
+                    media = MediaInfo(tmdb_info=item["info"])
+                    if self._already_in_library(media):
+                        self._monthly_batch_job["skipped"] += 1
+                        continue
+                    contexts = SearchChain().search_by_id(
+                        tmdbid=int(movie_id), mtype=MediaType.MOVIE,
+                        sites=self._site_ids, cache_local=False) or []
+                    context = next((ctx for ctx in contexts
+                                    if self._torrent_identity(ctx) == resource_id), None)
+                    if not context:
+                        self._monthly_batch_job["skipped"] += 1
+                        self._append_plugin_log("月份下载", f"{media.title_year} 所选资源已失效或不再符合规则")
+                        continue
+                    # 与定时推送、队列补位共用锁，原子地检查活动数并提交，不能越过并发上限。
+                    with self._queue_lock:
+                        if not self._enabled or self._disk_guard_blocks_new():
+                            self._monthly_batch_job["skipped"] += 1
+                            continue
+                        if self._active_download_count() < self._max_active_downloads:
+                            ok, error = self._submit_download(media, context)
+                            if not ok:
+                                self._monthly_batch_job["errors"] += 1
+                                self._append_plugin_log("月份下载", f"{media.title_year} 提交失败：{error}", "error")
+                                continue
+                            self._monthly_batch_job["submitted"] += 1
+                            plugin_ids.add(movie_id)
+                        elif self._enqueue_download(media, context):
+                            self._monthly_batch_job["queued"] += 1
+                            queued_ids.add(movie_id)
+                        else:
+                            self._monthly_batch_job["skipped"] += 1
+                except Exception as err:
+                    self._monthly_batch_job["errors"] += 1
+                    logger.error(f"月份批量下载 {movie_id} 失败：{err}", exc_info=True)
+                finally:
+                    self._monthly_batch_job["done"] += 1
+            self._append_plugin_log("月份下载", "批量完成：提交 "
+                                    f"{self._monthly_batch_job['submitted']} 部、等候 "
+                                    f"{self._monthly_batch_job['queued']} 部、跳过 "
+                                    f"{self._monthly_batch_job['skipped']} 部、失败 "
+                                    f"{self._monthly_batch_job['errors']} 部")
+        finally:
+            self._monthly_batch_job["running"] = False
+            self._monthly_batch_lock.release()
 
     def _archive_existing_monthly_scans(self) -> None:
         """升级时先归档旧名单，再在后台补齐中文资料，不阻塞插件启动。"""

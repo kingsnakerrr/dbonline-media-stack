@@ -23,7 +23,8 @@ methods = {"_load_monthly_tasks", "_monthly_task", "_update_monthly_task",
            "_production_country_codes", "_scan_monthly_task", "_api_monthly_action",
            "_monthly_scan_key", "_monthly_archive", "_save_monthly_archive",
            "_load_monthly_archive", "_load_monthly_archive_month", "_monthly_archive_summaries", "_api_secure_monthly",
-           "_chinese_movie_title"}
+           "_chinese_movie_title", "_monthly_resource_rank", "_monthly_resource_options",
+           "_torrent_identity", "_start_monthly_batch_download"}
 selected = [node for node in plugin.body if isinstance(node, ast.FunctionDef) and node.name in methods]
 
 
@@ -59,6 +60,8 @@ class NoopThread:
 namespace = {
     "calendar": calendar, "datetime": datetime,
     "sqlite3": sqlite3, "json": json, "re": re, "closing": closing,
+    "hashlib": __import__("hashlib"),
+    "Context": SimpleNamespace,
     "Body": lambda default=None: default,
     "pytz": SimpleNamespace(timezone=lambda _name: timezone.utc), "urlencode": urlencode,
     "Optional": Optional,
@@ -84,6 +87,11 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._monthly_tasks_lock = threading.RLock()
         self.subject._monthly_scan_lock = threading.Lock()
         self.subject._monthly_archive_lock = threading.RLock()
+        self.subject._monthly_resource_job = {}
+        self.subject._monthly_batch_job = {}
+        self.subject._monthly_batch_lock = threading.Lock()
+        self.subject._enabled = True
+        self.subject._disk_guard_blocks_new = lambda: False
         self.subject.get_data_path = lambda: Path(self.tempdir.name)
         self.subject._allowed_countries = {"US", "TW", "JP", "KR", "CN", "HK"}
         self.store = {}
@@ -153,8 +161,8 @@ class MonthlyTasksTest(unittest.TestCase):
     def test_archive_day_uses_live_plugin_history_and_emby_index(self):
         task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
         key = self.subject._save_monthly_archive(task, [
-            {"tmdb_id": 1, "release_date": "2026-01-02", "title": "中文影片 1"},
-            {"tmdb_id": 2, "release_date": "2026-01-03", "title": "中文影片 2"},
+            {"tmdb_id": 1, "release_date": "2026-01-02", "score": 7, "title": "中文影片 1"},
+            {"tmdb_id": 2, "release_date": "2026-01-03", "score": 7, "title": "中文影片 2"},
         ])
         self.subject._valid_access_token = lambda _token: True
         self.subject._load_stats_history = lambda: [{"tmdb_id": 1, "submitted_at": "2026-01-02",
@@ -177,6 +185,58 @@ class MonthlyTasksTest(unittest.TestCase):
             {"iso_639_1": "zh", "iso_3166_1": "TW", "data": {"title": "繁體譯名"}},
         ]}}
         self.assertEqual(self.subject._chinese_movie_title(detail), "繁體譯名")
+
+    def test_two_resources_prioritize_resolution_then_seeders(self):
+        def context(name, seeders, size):
+            return SimpleNamespace(meta_info=SimpleNamespace(resource_pix=""),
+                                   torrent_info=SimpleNamespace(site=1, site_name="测试站点",
+                                       enclosure=name, page_url=name, title=name,
+                                       size=size, seeders=seeders))
+        options = self.subject._monthly_resource_options([
+            context("Film.1080p", 100, 2 * 1024 ** 3),
+            context("Film.2160p.low", 2, 9 * 1024 ** 3),
+            context("Film.2160p.high", 20, 12 * 1024 ** 3),
+        ])
+        self.assertEqual(len(options), 2)
+        self.assertEqual([item["seeders"] for item in options], [20, 2])
+        self.assertEqual(options[0]["resolution"], "2160P")
+
+    def test_resource_only_hides_unmatched_titles(self):
+        task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
+        key = self.subject._save_monthly_archive(task, [
+            {"tmdb_id": 1, "release_date": "2026-01-02", "score": 8, "title": "有资源"},
+            {"tmdb_id": 2, "release_date": "2026-01-03", "score": 8, "title": "无资源"},
+        ])
+        self.subject._valid_access_token = lambda _token: True
+        self.subject._load_monthly_resource_cache = lambda *_args: {"1": [{"id": "option1"}], "2": []}
+        self.subject._load_stats_history = lambda: []
+        self.subject._load_download_queue = lambda: []
+        self.subject._load_recent_pushes = lambda: {}
+        self.subject._load_suppressed = lambda: {}
+        self.subject._load_scan_cache = lambda **_kwargs: {}
+        self.subject._library_snapshot_for_scan = lambda **_kwargs: {"tmdb_ids": set()}
+        result = self.subject._api_secure_monthly({
+            "archive_key": key, "resources_only": True, "min_score": 7,
+            "access_token": "test",
+        })
+        self.assertEqual(result["data"]["total"], 1)
+        self.assertEqual(result["data"]["items"][0]["tmdb_id"], 1)
+
+    def test_manual_batch_rejects_forged_or_duplicate_resource_ids(self):
+        task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
+        self.subject._save_monthly_archive(task, [
+            {"tmdb_id": 1, "release_date": "2026-01-02", "score": 8, "title": "影片"},
+        ])
+        self.subject._load_monthly_resource_cache = lambda *_args: {"1": [{"id": "allowed"}]}
+        result = self.subject._start_monthly_batch_download(2026, 1, [
+            {"tmdb_id": 1, "resource_id": "forged"},
+        ])
+        self.assertFalse(result["success"])
+        result = self.subject._start_monthly_batch_download(2026, 1, [
+            {"tmdb_id": 1, "resource_id": "allowed"},
+            {"tmdb_id": 1, "resource_id": "allowed"},
+        ])
+        self.assertFalse(result["success"])
 
     def test_five_task_limit_does_not_overwrite_existing_tasks(self):
         self.store["monthly_movie_tasks"] = [{"id": str(i)} for i in range(5)]
