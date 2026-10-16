@@ -24,7 +24,7 @@ methods = {"_load_monthly_tasks", "_monthly_task", "_update_monthly_task",
            "_monthly_scan_key", "_monthly_archive", "_save_monthly_archive",
            "_load_monthly_archive", "_load_monthly_archive_month", "_monthly_archive_summaries", "_api_secure_monthly",
            "_chinese_movie_title", "_monthly_resource_rank", "_monthly_resource_options",
-           "_torrent_identity", "_start_monthly_batch_download"}
+           "_torrent_identity", "_start_monthly_batch_download", "_start_monthly_resource_scan"}
 selected = [node for node in plugin.body if isinstance(node, ast.FunctionDef) and node.name in methods]
 
 
@@ -88,6 +88,8 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._monthly_scan_lock = threading.Lock()
         self.subject._monthly_archive_lock = threading.RLock()
         self.subject._monthly_resource_job = {}
+        self.subject._monthly_resource_lock = threading.Lock()
+        self.subject._monthly_resource_job_lock = threading.RLock()
         self.subject._monthly_batch_job = {}
         self.subject._monthly_batch_lock = threading.Lock()
         self.subject._enabled = True
@@ -99,6 +101,20 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject.save_data = self.store.__setitem__
         self.logs = []
         self.subject._append_plugin_log = lambda *args: self.logs.append(args)
+
+    def test_resource_scan_limits_one_click_to_sixty_top_voted_candidates(self):
+        candidates = [{"tmdb_id": index, "score": 7.5, "vote_count": index}
+                      for index in range(1, 131)]
+        self.subject._load_monthly_archive_month = lambda *_args: {
+            "min_score": 7, "candidates": candidates}
+        self.subject._load_monthly_resource_cache = lambda *_args: {"130": []}
+        self.subject._monthly_resource_scope = lambda: "sites"
+        self.subject._scan_monthly_resources = lambda *_args: None
+        result = self.subject._start_monthly_resource_scan(2026, 1, 7)
+        self.assertTrue(result["success"])
+        self.assertEqual(self.subject._monthly_resource_job["total"], 60)
+        self.assertEqual(self.subject._monthly_resource_job["checked"], 1)
+        self.assertEqual(self.subject._monthly_resource_job["candidates"], 130)
 
     def test_month_scan_includes_us_taiwan_and_excludes_other_country(self):
         self.store["monthly_movie_tasks"] = [{

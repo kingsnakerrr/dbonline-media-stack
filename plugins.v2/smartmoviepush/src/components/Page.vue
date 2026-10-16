@@ -39,6 +39,7 @@ const monthlyStatus = ref('all')
 const monthlyPage = ref(1)
 const monthlyPageSize = ref(30)
 const monthlyMinScore = ref(7)
+const monthlyEditMode = ref(false)
 const monthlySelected = ref([])
 const monthlyResourceChoice = ref({})
 const monthlyBusy = ref(false)
@@ -226,6 +227,11 @@ async function openMonthlyArchive(archive) {
   monthlyArchiveKey.value = ''
   monthlyArchiveYear.value = archive.latest ? Number(archive.year) : 0
   monthlyArchiveMonth.value = archive.latest ? Number(archive.month) : 0
+  monthlyEditMode.value = !archive.latest && !archive.tasks?.length
+  monthlyForm.value = { task_id: archive.tasks?.[0]?.id || '', year: Number(archive.year),
+    month: Number(archive.month), min_score: Number(archive.tasks?.[0]?.min_score ?? 7),
+    batch_size: Number(archive.tasks?.[0]?.batch_size ?? 5) }
+  monthlyView.value = { task: { year: archive.year, month: archive.month }, items: [], counts: {}, total: 0, page: 1 }
   monthlyPage.value = 1
   monthlyMinScore.value = Math.max(7, Number(archive.minimum || 0))
   monthlySelected.value = []
@@ -233,7 +239,7 @@ async function openMonthlyArchive(archive) {
   monthlySearch.value = ''
   monthlyStatus.value = 'all'
   dialog.value = 'monthly'
-  await loadMonthly()
+  if (archive.latest || archive.tasks?.length) await loadMonthly()
   if (archive.latest) await searchMonthlyResources()
 }
 async function searchMonthlyResources(force = false) {
@@ -257,6 +263,7 @@ async function downloadMonthlySelected() {
 }
 function editMonthly(task) {
   monthlyForm.value = { task_id: task.id, year: task.year, month: task.month, min_score: task.min_score, batch_size: task.batch_size || 5 }
+  monthlyEditMode.value = true
 }
 function resetMonthlyForm() {
   monthlyForm.value = { task_id: '', year: new Date().getFullYear(), month: new Date().getMonth() + 1, min_score: 7, batch_size: 5 }
@@ -264,7 +271,12 @@ function resetMonthlyForm() {
 async function saveMonthly() {
   const form = { ...monthlyForm.value }
   await runAction('monthly_save', form)
-  if (!error.value) resetMonthlyForm()
+  if (!error.value) {
+    monthlyEditMode.value = false
+    const task = (state.value.monthly_tasks || []).find(item => Number(item.year) === Number(form.year) && Number(item.month) === Number(form.month))
+    if (task) monthlyTaskId.value = task.id
+    await loadMonthly()
+  }
 }
 let monthlySearchTimer
 watch(monthlySearch, () => {
@@ -521,9 +533,18 @@ function startRefresh() {
   window.clearInterval(refreshTimer)
   refreshTimer = window.setInterval(() => loadStatus(true), 5000)
   window.clearInterval(monthlyRefreshTimer)
-  monthlyRefreshTimer = window.setInterval(() => {
-    if (dialog.value === 'monthly' && !monthlyBusy.value) loadMonthly()
-  }, 30000)
+  monthlyRefreshTimer = window.setInterval(async () => {
+    if (dialog.value !== 'monthly' || monthlyBusy.value) return
+    if (!monthlyArchiveYear.value && monthlyTaskId.value) {
+      const task = (state.value.monthly_tasks || []).find(item => item.id === monthlyTaskId.value)
+      if (task?.scan_state === 'complete') {
+        monthlyArchiveYear.value = Number(task.year)
+        monthlyArchiveMonth.value = Number(task.month)
+        await searchMonthlyResources()
+      }
+    }
+    await loadMonthly()
+  }, 10000)
 }
 
 async function checkAccess() {
@@ -706,27 +727,17 @@ onUnmounted(() => {
 
     <VCard variant="outlined" class="pa-4 mb-4">
       <div class="d-flex align-center justify-space-between mb-1">
-        <div class="text-h6">按年月评分下载（最多 5 个独立任务）</div>
+        <div class="text-h6">按年月评分下载</div>
         <VChip size="small" color="primary">{{ (state.monthly_tasks || []).length }}/5</VChip>
       </div>
-      <div class="text-caption text-medium-emphasis mb-3">按 TMDB 首映月份和最低评分逐页扫描，再核对制作地区：美国、加拿大、欧洲、日本、韩国、中国大陆、台湾、香港。扫描后的月份点击下方月份卡片，可查看符合 MoviePilot 规则的站点资源并手动勾选下载；也可在名单内开启自动下载。自动任务每 10 分钟续跑，沿用同时下载上限、等候队列和硬盘保护。</div>
-      <VRow dense class="settings-row monthly-settings-row">
-        <VCol cols="6" md="2"><VTextField v-model.number="monthlyForm.year" label="年份" type="number" min="1900" :max="new Date().getFullYear()" density="compact" /></VCol>
-        <VCol cols="6" md="2"><VSelect v-model.number="monthlyForm.month" :items="Array.from({ length: 12 }, (_, index) => ({ title: `${index + 1} 月`, value: index + 1 }))" label="月份" density="compact" /></VCol>
-        <VCol cols="6" md="2"><VTextField v-model.number="monthlyForm.min_score" label="TMDB 最低评分" type="number" min="0" max="10" step="0.1" density="compact" /></VCol>
-        <VCol cols="6" md="2"><VTextField v-model.number="monthlyForm.batch_size" label="每轮下载（部）" type="number" min="1" max="50" density="compact" /></VCol>
-        <VCol cols="12" md="4" class="d-flex align-center ga-2">
-          <VBtn color="primary" variant="tonal" :loading="loading" :disabled="!monthlyForm.task_id && (state.monthly_tasks || []).length >= 5" @click="saveMonthly">{{ monthlyForm.task_id ? '保存并重扫' : '新建并扫描' }}</VBtn>
-          <VBtn v-if="monthlyForm.task_id" variant="text" @click="resetMonthlyForm">取消编辑</VBtn>
-        </VCol>
-      </VRow>
+      <div class="text-caption text-medium-emphasis mb-3">选择年份并点击月份；新建扫描、评分、资源选择和下载都在月份弹窗里操作。最多同时保留 5 个自动任务。</div>
       <div class="d-flex flex-wrap align-center ga-3 mt-5 mb-3">
         <div class="text-subtitle-1 font-weight-medium">已扫描月份</div>
         <VCombobox v-model="archiveYear" :items="archiveYearOptions" label="选择或输入年份" type="number" density="compact" hide-details class="monthly-year-select" />
         <div class="text-caption text-medium-emphasis">点击月份查看整月名单；已保存的扫描结果不受任务删除影响。</div>
       </div>
       <div v-if="Number(archiveYear) >= 1900 && Number(archiveYear) <= new Date().getFullYear()" class="monthly-month-grid">
-        <button v-for="item in archiveMonths" :key="item.month" type="button" class="monthly-month-tile" :class="{ 'monthly-month-scanned': item.latest || item.tasks.length }" :disabled="!item.latest && !item.tasks.length" @click="openMonthlyArchive(item)">
+        <button v-for="item in archiveMonths" :key="item.month" type="button" class="monthly-month-tile" :class="{ 'monthly-month-scanned': item.latest || item.tasks.length }" :disabled="Number(item.year) === new Date().getFullYear() && item.month > new Date().getMonth() + 1" @click="openMonthlyArchive(item)">
           <span class="monthly-month-name">{{ item.month }} 月</span>
           <span v-if="item.latest" class="monthly-month-summary">扫描 {{ item.scans }} 次 · {{ item.movies }} 部<span v-if="item.tasks.some(task => task.active)"> · 下载中</span></span>
           <span v-else-if="item.tasks.length" class="monthly-month-summary">{{ item.tasks[0].scan_progress || '扫描中' }}</span>
@@ -802,21 +813,34 @@ onUnmounted(() => {
           </div>
         </VCardText>
       </VCard>
-      <VCard v-else-if="dialog === 'monthly'" :title="`${monthlyView.task?.year || ''} 年 ${monthlyView.task?.month || ''} 月电影名单`">
+      <VCard v-else-if="dialog === 'monthly'" :title="`${monthlyView.task?.year || monthlyForm.year} 年 ${monthlyView.task?.month || monthlyForm.month} 月电影名单`">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
+          <div v-if="monthlyEditMode" class="monthly-task-row pa-4 mb-3">
+            <div class="text-subtitle-1 mb-3">{{ monthlyForm.task_id ? '修改月份任务并重扫' : '新建这个月份的扫描' }}</div>
+            <div class="d-flex flex-wrap align-center ga-3">
+              <VTextField v-model.number="monthlyForm.min_score" label="TMDB 最低评分" type="number" min="0" max="10" step="0.1" density="comfortable" hide-details style="max-width: 190px" />
+              <VTextField v-model.number="monthlyForm.batch_size" label="自动任务每轮下载（部）" type="number" min="1" max="50" density="comfortable" hide-details style="max-width: 210px" />
+              <VBtn color="primary" variant="tonal" size="default" :loading="loading" :disabled="!monthlyForm.task_id && (state.monthly_tasks || []).length >= 5" @click="saveMonthly">{{ monthlyForm.task_id ? '保存并重扫' : '创建并扫描' }}</VBtn>
+              <VBtn v-if="monthlyForm.task_id" variant="text" size="default" @click="monthlyEditMode = false">取消</VBtn>
+            </div>
+            <div v-if="!monthlyForm.task_id && (state.monthly_tasks || []).length >= 5" class="text-caption text-warning mt-2">已有 5 个任务，请先删除不需要的任务；已保存的月份名单不受删除影响。</div>
+          </div>
           <div v-for="task in selectedMonthTasks" :key="task.id" class="monthly-task-row pa-3 mb-3">
             <div class="d-flex flex-wrap align-center justify-space-between ga-2">
               <div class="text-caption">任务 ≥{{ task.min_score }} 分 · 每轮 {{ task.batch_size || 5 }} 部 · {{ task.scan_progress || '等待扫描' }}<span v-if="task.scan_error" class="text-error"> · {{ task.scan_error }}</span></div>
-              <div class="d-flex flex-wrap ga-1">
-                <VBtn size="x-small" variant="tonal" @click="editMonthly(task); dialog = ''">编辑任务</VBtn>
-                <VBtn size="x-small" variant="tonal" :disabled="task.scan_state === 'running'" @click="runAction('monthly_rescan', { task_id: task.id })">重扫</VBtn>
-                <VBtn v-if="!task.active" size="x-small" color="success" variant="tonal" :disabled="task.scan_state !== 'complete' || !controlForm.enabled" @click="runAction('monthly_start', { task_id: task.id })">自动下载</VBtn>
-                <VBtn v-else size="x-small" color="warning" variant="tonal" @click="runAction('monthly_pause', { task_id: task.id })">暂停</VBtn>
-                <VBtn size="x-small" color="error" variant="tonal" @click="runAction('monthly_delete', { task_id: task.id })">删除任务</VBtn>
+              <div class="d-flex flex-wrap ga-2">
+                <VBtn size="default" variant="tonal" @click="editMonthly(task)">编辑任务</VBtn>
+                <VBtn size="default" variant="tonal" :disabled="task.scan_state === 'running'" @click="runAction('monthly_rescan', { task_id: task.id })">重扫</VBtn>
+                <VBtn v-if="!task.active" size="default" color="success" variant="tonal" :disabled="task.scan_state !== 'complete' || !controlForm.enabled" @click="runAction('monthly_start', { task_id: task.id })">自动下载</VBtn>
+                <VBtn v-else size="default" color="warning" variant="tonal" @click="runAction('monthly_pause', { task_id: task.id })">暂停</VBtn>
+                <VBtn size="default" color="error" variant="tonal" @click="runAction('monthly_delete', { task_id: task.id })">删除任务</VBtn>
               </div>
             </div>
           </div>
+          <VBtn v-if="monthlyArchiveYear && !selectedMonthTasks.length && !monthlyEditMode" size="default" variant="tonal" class="mb-3" @click="monthlyEditMode = true">为本月创建自动任务</VBtn>
+          <VAlert v-if="!monthlyArchiveYear && !monthlyTaskId" type="info" variant="tonal" class="mb-3">此月尚未扫描。上方设置最低评分后点击“创建并扫描”，完成后即可查看资源并选择下载。</VAlert>
+          <template v-if="monthlyArchiveYear || monthlyTaskId">
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <VTextField v-model.number="monthlyMinScore" label="最低评分" type="number" min="0" max="10" step="0.1" density="compact" hide-details style="max-width: 125px" />
             <VBtn v-if="monthlyArchiveYear" variant="tonal" :loading="loading" @click="monthlyPage = 1; searchMonthlyResources()">按评分查资源</VBtn>
@@ -826,10 +850,11 @@ onUnmounted(() => {
             <VSelect v-model="monthlyPageSize" :items="[20, 30, 50, 100]" label="每页条数" density="compact" hide-details style="max-width: 135px" @update:model-value="monthlyPage = 1; loadMonthly()" />
             <VBtn variant="tonal" :loading="monthlyBusy" @click="loadMonthly(true)">立即核对 Emby</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-3">仅显示所选站点中符合 MoviePilot 过滤规则的资源；后台逐部查询，结果缓存 6 小时。默认优先最高分辨率，提交前会重新核验资源、已下载记录、Emby 和硬盘保护。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
+          <div class="text-caption text-medium-emphasis mb-3">仅显示所选站点中符合 MoviePilot 过滤规则的资源；每批优先查 60 部评价人数最多的电影，结果缓存 24 小时。默认优先最高分辨率，提交前会重新核验资源、已下载记录、Emby 和硬盘保护。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
           <div v-if="monthlyView.resource_progress?.total" class="mb-3">
-            <div class="text-caption">资源查询 {{ monthlyView.resource_progress.done || 0 }}/{{ monthlyView.resource_progress.total }} · 匹配 {{ monthlyView.resource_progress.found || 0 }} 部 · 异常 {{ monthlyView.resource_progress.errors || 0 }} 部{{ monthlyView.resource_progress.running ? ' · 查询中' : ' · 已完成' }}</div>
+            <div class="text-caption">本批查询 {{ monthlyView.resource_progress.done || 0 }}/{{ monthlyView.resource_progress.total }} · 全月已核对 {{ (monthlyView.resource_progress.checked || 0) + (monthlyView.resource_progress.done || 0) }}/{{ monthlyView.resource_progress.candidates || 0 }} · 本批匹配 {{ monthlyView.resource_progress.found || 0 }} 部 · 异常 {{ monthlyView.resource_progress.errors || 0 }} 部{{ monthlyView.resource_progress.running ? ' · 查询中' : ' · 本批完成' }}</div>
             <VProgressLinear :model-value="100 * (monthlyView.resource_progress.done || 0) / monthlyView.resource_progress.total" color="primary" height="6" rounded class="mt-1" />
+            <VBtn v-if="!monthlyView.resource_progress.running && (monthlyView.resource_progress.checked || 0) + (monthlyView.resource_progress.done || 0) < (monthlyView.resource_progress.candidates || 0)" class="mt-2" variant="tonal" @click="searchMonthlyResources()">继续查后 60 部</VBtn>
           </div>
           <div v-if="monthlyView.batch_progress?.total" class="text-caption mb-3">批量下载：已处理 {{ monthlyView.batch_progress.done || 0 }}/{{ monthlyView.batch_progress.total }} · 已提交 {{ monthlyView.batch_progress.submitted || 0 }} · 等候 {{ monthlyView.batch_progress.queued || 0 }} · 跳过 {{ monthlyView.batch_progress.skipped || 0 }} · 失败 {{ monthlyView.batch_progress.errors || 0 }}</div>
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
@@ -862,6 +887,7 @@ onUnmounted(() => {
             <VBtn size="small" variant="tonal" :disabled="monthlyBusy || monthlyPage <= 1" @click="monthlyPage--; loadMonthly()">上一页</VBtn>
             <VBtn size="small" variant="tonal" :disabled="monthlyBusy || monthlyPage * monthlyPageSize >= (monthlyView.total || 0)" @click="monthlyPage++; loadMonthly()">下一页</VBtn>
           </div>
+          </template>
         </VCardText>
       </VCard>
       <VCard v-else-if="dialog === 'suppressed'" title="不再推送列表">
@@ -956,6 +982,8 @@ onUnmounted(() => {
 .monthly-month-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .monthly-month-tile { min-height: 70px; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 5px; padding: 9px 12px; border: 1px solid rgba(var(--v-theme-on-surface), .16); border-radius: 10px; color: inherit; text-align: left; }
 .monthly-month-tile:disabled { opacity: .5; }
+.monthly-month-tile:not(:disabled) { cursor: pointer; }
+.monthly-month-tile:not(:disabled):hover { border-color: rgba(var(--v-theme-primary), .65); }
 .monthly-month-scanned { background: rgba(var(--v-theme-primary), .10); border-color: rgba(var(--v-theme-primary), .4); cursor: pointer; }
 .monthly-month-scanned:hover { background: rgba(var(--v-theme-primary), .20); }
 .monthly-month-name { font-size: 16px; font-weight: 700; }

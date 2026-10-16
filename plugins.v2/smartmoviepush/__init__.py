@@ -47,7 +47,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.34"
+    plugin_version = "0.9.35"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1982,7 +1982,7 @@ class SmartMoviePush(_PluginBase):
     def _load_monthly_resource_cache(self, year: int, month: int) -> dict:
         month_key = f"{year:04d}-{month:02d}"
         scope = self._monthly_resource_scope()
-        fresh_after = time.time() - 6 * 3600
+        fresh_after = time.time() - 24 * 3600
         with self._monthly_archive_lock:
             with closing(self._monthly_archive()) as db:
                 rows = db.execute(
@@ -2006,6 +2006,7 @@ class SmartMoviePush(_PluginBase):
             return {"success": False, "message": "这个月尚无扫描名单"}
         if minimum < float(archive["min_score"]):
             return {"success": False, "message": f"保存名单最低为 {archive['min_score']} 分；降低评分需先重新扫描月份"}
+        cached = self._load_monthly_resource_cache(year, month)
         if not self._monthly_resource_lock.acquire(blocking=False):
             job = self._monthly_resource_job
             if (job.get("running") and job.get("year") == year and job.get("month") == month
@@ -2015,18 +2016,27 @@ class SmartMoviePush(_PluginBase):
         candidates = [item for item in archive["candidates"] if float(item.get("score") or 0) >= minimum]
         candidates.sort(key=lambda item: (-int(item.get("vote_count") or 0),
                                           -float(item.get("score") or 0), str(item.get("tmdb_id"))))
+        pending = ([item for item in candidates if str(item["tmdb_id"]) in cached] if force else
+                   [item for item in candidates if str(item["tmdb_id"]) not in cached])
+        if force and not pending:
+            pending = candidates
+        batch = pending[:60]
+        if not batch:
+            self._monthly_resource_lock.release()
+            return {"success": True, "message": "这个月份的资源已全部核对；如需重新搜索请点击重新查站点"}
         job = {"year": year, "month": month, "min_score": minimum, "scope": self._monthly_resource_scope(),
-               "running": True, "done": 0, "total": len(candidates), "found": 0, "errors": 0,
+               "running": True, "done": 0, "total": len(batch), "found": 0, "errors": 0,
+               "checked": len(candidates) - len(pending), "candidates": len(candidates),
                "started_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")}
         with self._monthly_resource_job_lock:
             self._monthly_resource_job = job
         try:
             threading.Thread(target=self._scan_monthly_resources,
-                             args=(year, month, candidates, force), daemon=True).start()
+                             args=(year, month, batch, force), daemon=True).start()
         except Exception:
             self._monthly_resource_lock.release()
             raise
-        return {"success": True, "message": f"已开始核对 {len(candidates)} 部电影的站点资源；匹配结果会逐步显示"}
+        return {"success": True, "message": f"本批核对 {len(batch)} 部高评价人数电影；完成后可继续查后续候选"}
 
     def _scan_monthly_resources(self, year: int, month: int, candidates: list, force: bool) -> None:
         try:
