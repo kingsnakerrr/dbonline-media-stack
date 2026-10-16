@@ -22,7 +22,7 @@ plugin = next(node for node in tree.body if isinstance(node, ast.ClassDef) and n
 methods = {"_load_monthly_tasks", "_monthly_task", "_update_monthly_task",
            "_production_country_codes", "_scan_monthly_task", "_api_monthly_action",
            "_monthly_scan_key", "_monthly_archive", "_save_monthly_archive",
-           "_load_monthly_archive", "_monthly_archive_summaries", "_api_secure_monthly",
+           "_load_monthly_archive", "_load_monthly_archive_month", "_monthly_archive_summaries", "_api_secure_monthly",
            "_chinese_movie_title"}
 selected = [node for node in plugin.body if isinstance(node, ast.FunctionDef) and node.name in methods]
 
@@ -124,6 +124,22 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertEqual(self.subject._load_monthly_archive(key)["scan_count"], 1)
         self.subject._save_monthly_archive(task, movies, count_scan=True)
         self.assertEqual(self.subject._monthly_archive_summaries()[0]["scan_count"], 2)
+
+    def test_month_combines_different_score_scans_without_duplicates(self):
+        first = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-10"}
+        second = {"year": 2026, "month": 1, "min_score": 8, "scanned_at": "2026-01-11"}
+        self.subject._save_monthly_archive(first, [
+            {"tmdb_id": 1, "title": "旧名", "release_date": "2026-01-02"},
+            {"tmdb_id": 2, "title": "只在旧扫描", "release_date": "2026-01-03"},
+        ], count_scan=True)
+        self.subject._save_monthly_archive(second, [
+            {"tmdb_id": 1, "title": "新名", "release_date": "2026-01-02"},
+        ], count_scan=True)
+        month = self.subject._load_monthly_archive_month(2026, 1)
+        self.assertEqual(month["candidate_count"], 2)
+        self.assertEqual(month["scan_count"], 2)
+        self.assertEqual(next(item for item in month["candidates"] if item["tmdb_id"] == 1)["title"], "新名")
+        self.assertEqual(self.subject._monthly_archive_summaries()[0]["month_candidate_count"], 2)
 
     def test_legacy_archive_adds_scan_count_without_erasing_movies(self):
         path = Path(self.tempdir.name) / "monthly_scans.sqlite"

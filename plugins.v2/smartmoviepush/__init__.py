@@ -47,7 +47,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.32"
+    plugin_version = "0.9.33"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1354,8 +1354,15 @@ class SmartMoviePush(_PluginBase):
         if not self._valid_access_token(payload.get("access_token")):
             return {"success": False, "locked": True, "message": "插件未解锁"}
         archive_key = str(payload.get("archive_key") or "")
-        task = (self._load_monthly_archive(archive_key) if archive_key else
-                self._monthly_task(str(payload.get("task_id") or "")))
+        if payload.get("archive_year") and payload.get("archive_month"):
+            try:
+                task = self._load_monthly_archive_month(int(payload["archive_year"]),
+                                                        int(payload["archive_month"]))
+            except (TypeError, ValueError):
+                return {"success": False, "message": "年份或月份无效"}
+        else:
+            task = (self._load_monthly_archive(archive_key) if archive_key else
+                    self._monthly_task(str(payload.get("task_id") or "")))
         if not task:
             return {"success": False, "message": "已扫描月份不存在"}
         try:
@@ -1830,6 +1837,34 @@ class SmartMoviePush(_PluginBase):
                 "scanned_at": row[3], "candidate_count": row[4], "scan_count": row[5], "candidates": candidates,
                 "scan_state": "complete"}
 
+    def _load_monthly_archive_month(self, year: int, month: int) -> Optional[dict]:
+        """同月不同评分的归档合并去重，最新一次扫描的资料优先。"""
+        if not (1900 <= year <= datetime.now().year and 1 <= month <= 12):
+            return None
+        with self._monthly_archive_lock:
+            with closing(self._monthly_archive()) as db:
+                keys = [row[0] for row in db.execute(
+                    "SELECT scan_key FROM monthly_scans WHERE year=? AND month=? "
+                    "ORDER BY scanned_at DESC, min_score ASC", (year, month))]
+        if not keys:
+            return None
+        archives = [self._load_monthly_archive(key) for key in keys]
+        archives = [archive for archive in archives if archive]
+        movies = {}
+        for archive in archives:
+            for movie in archive["candidates"]:
+                movies.setdefault(str(movie["tmdb_id"]), movie)
+        candidates = sorted(movies.values(), key=lambda item: (
+            -float(item.get("popularity") or (item.get("info") or {}).get("popularity") or 0),
+            -int(item.get("vote_count") or (item.get("info") or {}).get("vote_count") or 0),
+            -float(item.get("score") or 0), str(item.get("release_date") or "")))
+        return {"year": year, "month": month, "scan_key": f"{year:04d}-{month:02d}",
+                "min_score": min(archive["min_score"] for archive in archives),
+                "scanned_at": archives[0]["scanned_at"],
+                "scan_count": sum(archive["scan_count"] for archive in archives),
+                "candidate_count": len(candidates), "candidates": candidates,
+                "scan_state": "complete"}
+
     def _monthly_archive_summaries(self) -> list:
         with self._monthly_archive_lock:
             with closing(self._monthly_archive()) as db:
@@ -1838,12 +1873,18 @@ class SmartMoviePush(_PluginBase):
                                    "ORDER BY year DESC, month DESC, scanned_at DESC, min_score DESC").fetchall()
                 days = db.execute("SELECT scan_key, release_date, COUNT(*) FROM monthly_scan_movies "
                                   "GROUP BY scan_key, release_date").fetchall()
+                month_counts = db.execute(
+                    "SELECT s.year, s.month, COUNT(DISTINCT m.tmdb_id) "
+                    "FROM monthly_scans s JOIN monthly_scan_movies m ON m.scan_key=s.scan_key "
+                    "GROUP BY s.year, s.month").fetchall()
         day_counts = {}
         for key, date, count in days:
             if date:
                 day_counts.setdefault(key, {})[date] = count
+        monthly_totals = {(year, month): count for year, month, count in month_counts}
         return [{"scan_key": key, "year": year, "month": month, "min_score": score,
                  "scanned_at": scanned_at, "candidate_count": count, "scan_count": scan_count,
+                 "month_candidate_count": monthly_totals.get((year, month), count),
                  "days": day_counts.get(key, {})}
                 for key, year, month, score, scanned_at, count, scan_count in scans]
 

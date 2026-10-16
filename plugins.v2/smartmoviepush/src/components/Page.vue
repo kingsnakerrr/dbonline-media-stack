@@ -30,6 +30,8 @@ const monthlyForm = ref({ task_id: '', year: new Date().getFullYear(), month: ne
 const monthlyView = ref({ task: {}, items: [], counts: {}, total: 0, page: 1 })
 const monthlyTaskId = ref('')
 const monthlyArchiveKey = ref('')
+const monthlyArchiveYear = ref(0)
+const monthlyArchiveMonth = ref(0)
 const archiveYear = ref(new Date().getFullYear())
 const archiveYearOptions = Array.from({ length: new Date().getFullYear() - 1899 }, (_, index) => new Date().getFullYear() - index)
 const monthlySearch = ref('')
@@ -56,7 +58,7 @@ const archiveMonths = computed(() => Array.from({ length: 12 }, (_, index) => {
   const month = index + 1
   const archives = (state.value.monthly_archives || []).filter(item => Number(item.year) === Number(archiveYear.value) && Number(item.month) === month)
   const latest = archives.reduce((current, item) => !current || String(item.scanned_at || '') > String(current.scanned_at || '') ? item : current, null)
-  return { month, latest, scans: archives.reduce((total, item) => total + Number(item.scan_count || 1), 0), movies: Number(latest?.candidate_count || 0) }
+  return { month, latest, scans: archives.reduce((total, item) => total + Number(item.scan_count || 1), 0), movies: Number(latest?.month_candidate_count || latest?.candidate_count || 0) }
 }))
 const countryNames = { US: '美国', CA: '加拿大', GB: '英国', IE: '爱尔兰', FR: '法国', DE: '德国', IT: '意大利', ES: '西班牙', PT: '葡萄牙', NL: '荷兰', BE: '比利时', CH: '瑞士', AT: '奥地利', SE: '瑞典', NO: '挪威', DK: '丹麦', FI: '芬兰', IS: '冰岛', PL: '波兰', CZ: '捷克', SK: '斯洛伐克', HU: '匈牙利', RO: '罗马尼亚', BG: '保加利亚', GR: '希腊', HR: '克罗地亚', SI: '斯洛文尼亚', RS: '塞尔维亚', BA: '波黑', ME: '黑山', MK: '北马其顿', AL: '阿尔巴尼亚', EE: '爱沙尼亚', LV: '拉脱维亚', LT: '立陶宛', LU: '卢森堡', MT: '马耳他', CY: '塞浦路斯', UA: '乌克兰', BY: '白俄罗斯', MD: '摩尔多瓦', RU: '俄罗斯', TR: '土耳其', JP: '日本', KR: '韩国', CN: '中国大陆', TW: '台湾', HK: '香港' }
 const countryLabel = item => (item.countries || []).map(code => countryNames[code] || code).join(' / ')
@@ -145,12 +147,13 @@ async function openHistory() {
   await loadHistory()
 }
 async function loadMonthly(refreshLibrary = false) {
-  if (!accessToken.value || (!monthlyTaskId.value && !monthlyArchiveKey.value)) return
+  if (!accessToken.value || (!monthlyTaskId.value && !monthlyArchiveKey.value && !monthlyArchiveYear.value)) return
   monthlyBusy.value = true
   try {
     const response = await props.api.post('plugin/SmartMoviePush/secure_monthly', {
       access_token: accessToken.value, task_id: monthlyTaskId.value,
       archive_key: monthlyArchiveKey.value,
+      archive_year: monthlyArchiveYear.value, archive_month: monthlyArchiveMonth.value,
       page: monthlyPage.value, search: monthlySearch.value, status: monthlyStatus.value,
       page_size: monthlyPageSize.value,
       refresh_library: refreshLibrary,
@@ -169,6 +172,8 @@ async function loadMonthly(refreshLibrary = false) {
 async function openMonthly(task) {
   monthlyTaskId.value = task.id
   monthlyArchiveKey.value = (state.value.monthly_archives || []).some(item => item.scan_key === task.scan_key) ? task.scan_key : ''
+  monthlyArchiveYear.value = 0
+  monthlyArchiveMonth.value = 0
   monthlyPage.value = 1
   monthlySearch.value = ''
   monthlyStatus.value = 'all'
@@ -177,7 +182,9 @@ async function openMonthly(task) {
 }
 async function openMonthlyArchive(archive) {
   monthlyTaskId.value = ''
-  monthlyArchiveKey.value = archive.scan_key
+  monthlyArchiveKey.value = ''
+  monthlyArchiveYear.value = Number(archive.year)
+  monthlyArchiveMonth.value = Number(archive.month)
   monthlyPage.value = 1
   monthlySearch.value = ''
   monthlyStatus.value = 'all'
