@@ -47,7 +47,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.35"
+    plugin_version = "0.9.36"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1359,7 +1359,7 @@ class SmartMoviePush(_PluginBase):
         if not self._valid_access_token(payload.get("access_token")):
             return {"success": False, "locked": True, "message": "插件未解锁"}
         archive_key = str(payload.get("archive_key") or "")
-        if payload.get("archive_year") and payload.get("archive_month"):
+        if payload.get("archive_year") and payload.get("archive_month") is not None:
             try:
                 task = self._load_monthly_archive_month(int(payload["archive_year"]),
                                                         int(payload["archive_month"]))
@@ -1375,9 +1375,10 @@ class SmartMoviePush(_PluginBase):
             page_size = min(100, max(10, int(payload.get("page_size") or 30)))
             minimum = float(payload.get("min_score") if payload.get("min_score") is not None
                             else task.get("min_score") or 0)
+            selected_month = int(payload.get("release_month") or 0)
         except (TypeError, ValueError):
             return {"success": False, "message": "页码、每页条数或评分无效"}
-        if not 0 <= minimum <= 10:
+        if not 0 <= minimum <= 10 or not 0 <= selected_month <= 12:
             return {"success": False, "message": "评分应为 0–10 分"}
         resources_only = bool(payload.get("resources_only"))
         resources = (self._load_monthly_resource_cache(int(task["year"]), int(task["month"]))
@@ -1394,10 +1395,18 @@ class SmartMoviePush(_PluginBase):
         library_snapshot = self._library_snapshot_for_scan(force=bool(payload.get("refresh_library")))
         now = datetime.now(tz=pytz.timezone(settings.TZ))
         selected_date = str(payload.get("date") or "").strip()
+        selected_category = str(payload.get("category") or "all")
+        if selected_category not in {"all", "mainstream", "high_quality"}:
+            return {"success": False, "message": "电影分类无效"}
         rows = []
         counts = {}
         for item in task.get("candidates") or []:
-            if float(item.get("score") or 0) < minimum:
+            categories = item.get("categories") or []
+            if float(item.get("score") or 0) < minimum and not (task["month"] == 0 and "mainstream" in categories):
+                continue
+            if selected_category != "all" and selected_category not in categories:
+                continue
+            if selected_month and str(item.get("release_date") or "")[5:7] != f"{selected_month:02d}":
                 continue
             if selected_date and str(item.get("release_date") or "") != selected_date:
                 continue
@@ -1466,24 +1475,25 @@ class SmartMoviePush(_PluginBase):
                 month = int(payload.get("month"))
                 minimum = float(payload.get("min_score"))
                 batch_size = int(payload.get("batch_size") or 5)
+                min_votes = int(payload.get("min_votes") if payload.get("min_votes") is not None else 50)
             except (TypeError, ValueError):
                 return {"success": False, "message": "年份、月份和最低评分必须是数字"}
             now = datetime.now(tz=pytz.timezone(settings.TZ))
-            if not (1900 <= year <= now.year and 1 <= month <= 12 and 0 <= minimum <= 10
-                    and 1 <= batch_size <= 50):
-                return {"success": False, "message": "请选择 1900 年至今年、1–12 月、0–10 分和每轮 1–50 部"}
-            if (year, month) > (now.year, now.month):
+            if not (1900 <= year <= now.year and 0 <= month <= 12 and 0 <= minimum <= 10
+                    and 1 <= batch_size <= 50 and 0 <= min_votes <= 10000):
+                return {"success": False, "message": "请选择有效年份、0–10 分、0–10000 人评价和每轮 1–50 部"}
+            if month and (year, month) > (now.year, now.month):
                 return {"success": False, "message": "不能扫描未来月份"}
             with self._monthly_tasks_lock:
                 tasks = self._load_monthly_tasks()
                 if not task and len(tasks) >= 5:
-                    return {"success": False, "message": "最多只能设置 5 个独立月份任务"}
+                    return {"success": False, "message": "最多只能设置 5 个独立任务"}
                 if task and task.get("scan_state") == "running":
                     return {"success": False, "message": "该月份正在扫描，完成后再修改"}
                 task_id = task_id if task else secrets.token_hex(6)
                 updated = {
                     "id": task_id, "year": year, "month": month, "min_score": minimum,
-                    "batch_size": batch_size,
+                    "batch_size": batch_size, "min_votes": min_votes,
                     "active": False, "scan_state": "pending", "scan_error": "",
                     "scan_progress": "等待扫描", "candidates": [], "scanned_at": "",
                     "created_at": (task or {}).get("created_at") or now.isoformat(timespec="seconds"),
@@ -1491,7 +1501,7 @@ class SmartMoviePush(_PluginBase):
                 tasks = [item for item in tasks if item.get("id") != task_id] + [updated]
                 self.save_data(self._monthly_tasks_key, tasks)
             threading.Thread(target=self._scan_monthly_task, args=(task_id,), daemon=True).start()
-            return {"success": True, "message": f"{year} 年 {month} 月任务已保存，正在扫描完整候选名单；扫描后手动点击开始下载"}
+            return {"success": True, "message": f"{year} 年{'全年' if month == 0 else str(month) + ' 月'}任务已保存，正在扫描完整候选名单"}
         if not task:
             return {"success": False, "message": "月份任务不存在"}
         if action == "monthly_rescan":
@@ -1707,7 +1717,7 @@ class SmartMoviePush(_PluginBase):
         elif action in {"monthly_resource_scan", "monthly_batch_download"}:
             try:
                 year, month = int(payload.get("year")), int(payload.get("month"))
-                if not 1900 <= year <= datetime.now().year or not 1 <= month <= 12:
+                if not 1900 <= year <= datetime.now().year or not 0 <= month <= 12:
                     raise ValueError("invalid month")
                 if action == "monthly_resource_scan":
                     minimum = float(payload.get("min_score") if payload.get("min_score") is not None else 7)
@@ -1800,7 +1810,8 @@ class SmartMoviePush(_PluginBase):
 
     @staticmethod
     def _monthly_scan_key(task: dict) -> str:
-        return f"{int(task['year']):04d}-{int(task['month']):02d}-{float(task['min_score']):g}"
+        key = f"{int(task['year']):04d}-{int(task['month']):02d}-{float(task['min_score']):g}"
+        return f"{key}-v{int(task.get('min_votes') or 0)}" if int(task['month']) == 0 else key
 
     @staticmethod
     def _chinese_movie_title(detail: dict) -> str:
@@ -1885,7 +1896,7 @@ class SmartMoviePush(_PluginBase):
 
     def _load_monthly_archive_month(self, year: int, month: int) -> Optional[dict]:
         """同月不同评分的归档合并去重，最新一次扫描的资料优先。"""
-        if not (1900 <= year <= datetime.now().year and 1 <= month <= 12):
+        if not (1900 <= year <= datetime.now().year and 0 <= month <= 12):
             return None
         with self._monthly_archive_lock:
             with closing(self._monthly_archive()) as db:
@@ -2013,14 +2024,15 @@ class SmartMoviePush(_PluginBase):
                     and job.get("min_score") == minimum and job.get("scope") == self._monthly_resource_scope()):
                 return {"success": True, "message": "这个月份的资源查询正在继续"}
             return {"success": False, "message": "已有月份资源搜索在运行，请等完成后再启动另一轮"}
-        candidates = [item for item in archive["candidates"] if float(item.get("score") or 0) >= minimum]
+        candidates = [item for item in archive["candidates"] if float(item.get("score") or 0) >= minimum
+                      or (month == 0 and "mainstream" in (item.get("categories") or []))]
         candidates.sort(key=lambda item: (-int(item.get("vote_count") or 0),
                                           -float(item.get("score") or 0), str(item.get("tmdb_id"))))
-        pending = ([item for item in candidates if str(item["tmdb_id"]) in cached] if force else
-                   [item for item in candidates if str(item["tmdb_id"]) not in cached])
-        if force and not pending:
-            pending = candidates
-        batch = pending[:60]
+        queued_ids = {str(item.get("tmdb_id")) for item in self._load_download_queue()}
+        pending = candidates if force else [item for item in candidates
+                   if str(item["tmdb_id"]) not in cached
+                   or (str(item["tmdb_id"]) in queued_ids and not cached[str(item["tmdb_id"])])]
+        batch = pending if month == 0 else pending[:60]
         if not batch:
             self._monthly_resource_lock.release()
             return {"success": True, "message": "这个月份的资源已全部核对；如需重新搜索请点击重新查站点"}
@@ -2036,7 +2048,7 @@ class SmartMoviePush(_PluginBase):
         except Exception:
             self._monthly_resource_lock.release()
             raise
-        return {"success": True, "message": f"本批核对 {len(batch)} 部高评价人数电影；完成后可继续查后续候选"}
+        return {"success": True, "message": f"后台开始核对 {len(batch)} 部电影的站点资源；匹配结果逐步显示"}
 
     def _scan_monthly_resources(self, year: int, month: int, candidates: list, force: bool) -> None:
         try:
@@ -2047,9 +2059,11 @@ class SmartMoviePush(_PluginBase):
             for item in candidates:
                 tmdb_id = str(item["tmdb_id"])
                 options = cached.get(tmdb_id)
+                if tmdb_id in queued and not options:
+                    options = None
                 try:
                     if options is None:
-                        if (library and tmdb_id in library["tmdb_ids"]) or tmdb_id in downloaded or tmdb_id in queued:
+                        if (library and tmdb_id in library["tmdb_ids"]) or tmdb_id in downloaded:
                             options = []
                         else:
                             contexts = SearchChain().search_by_id(
@@ -2115,7 +2129,7 @@ class SmartMoviePush(_PluginBase):
                     if not self._enabled or self._disk_guard_blocks_new():
                         self._monthly_batch_job["skipped"] += 1
                         continue
-                    if movie_id in plugin_ids or movie_id in queued_ids or (library and movie_id in library["tmdb_ids"]):
+                    if movie_id in plugin_ids or (library and movie_id in library["tmdb_ids"]):
                         self._monthly_batch_job["skipped"] += 1
                         continue
                     media = MediaInfo(tmdb_info=item["info"])
@@ -2136,6 +2150,8 @@ class SmartMoviePush(_PluginBase):
                         if not self._enabled or self._disk_guard_blocks_new():
                             self._monthly_batch_job["skipped"] += 1
                             continue
+                        current_queue = self._load_download_queue()
+                        already_queued = any(str(entry.get("tmdb_id")) == movie_id for entry in current_queue)
                         if self._active_download_count() < self._max_active_downloads:
                             ok, error = self._submit_download(media, context)
                             if not ok:
@@ -2144,6 +2160,13 @@ class SmartMoviePush(_PluginBase):
                                 continue
                             self._monthly_batch_job["submitted"] += 1
                             plugin_ids.add(movie_id)
+                            if already_queued:
+                                self.save_data(self._download_queue_key, [entry for entry in current_queue
+                                               if str(entry.get("tmdb_id")) != movie_id])
+                                queued_ids.discard(movie_id)
+                                self._append_plugin_log("年度下载", f"{media.title_year} 已提交，已从等候队列移除")
+                        elif already_queued:
+                            self._monthly_batch_job["queued"] += 1
                         elif self._enqueue_download(media, context):
                             self._monthly_batch_job["queued"] += 1
                             queued_ids.add(movie_id)
@@ -2207,7 +2230,7 @@ class SmartMoviePush(_PluginBase):
             logger.error(f"迁移月份名单归档失败：{type(err).__name__}：{err}")
 
     def _scan_monthly_task(self, task_id: str) -> None:
-        """按 TMDB 首映月完整翻页，再以电影详情中的制作国家核验地区。"""
+        """按首映年或月翻页，以电影详情中的制作国家核验地区。"""
         # 同时建立多个任务时排队扫描，避免其余任务被误标成失败。
         self._monthly_scan_lock.acquire()
         task = self._monthly_task(task_id)
@@ -2216,7 +2239,7 @@ class SmartMoviePush(_PluginBase):
                 return
             self._update_monthly_task(task_id, scan_state="running", scan_error="")
             year, month, minimum = int(task["year"]), int(task["month"]), float(task["min_score"])
-            last_day = calendar.monthrange(year, month)[1]
+            min_votes = int(task.get("min_votes") or 0) if month == 0 else 0
             module = ModuleManager().get_running_module("TheMovieDbModule")
             if not module or not getattr(module, "tmdb", None):
                 raise RuntimeError("MoviePilot 的 TMDB 模块尚未就绪")
@@ -2225,19 +2248,26 @@ class SmartMoviePush(_PluginBase):
             pages_done = 0
             examined = 0
 
-            def scan_window(first: int, last: int) -> None:
+            def scan_window(scan_month: int, first: int, last: int, profile: str) -> None:
                 nonlocal pages_done, examined
                 page = 1
-                while page <= 500:
+                while page <= (2 if profile == "mainstream" else 500):
                     current = self._monthly_task(task_id)
                     if not current or (current["year"], current["month"], current["min_score"]) != (year, month, minimum):
                         raise RuntimeError("任务设置已改变，取消旧扫描")
                     params = {
-                        "sort_by": "popularity.desc", "include_adult": False,
-                        "primary_release_date.gte": f"{year:04d}-{month:02d}-{first:02d}",
-                        "primary_release_date.lte": f"{year:04d}-{month:02d}-{last:02d}",
-                        "vote_average.gte": minimum, "page": page,
+                        "sort_by": "popularity.desc" if profile == "mainstream" else "vote_count.desc",
+                        "include_adult": False, "include_video": False,
+                        "primary_release_date.gte": f"{year:04d}-{scan_month:02d}-{first:02d}",
+                        "primary_release_date.lte": f"{year:04d}-{scan_month:02d}-{last:02d}",
+                        "page": page,
                     }
+                    if profile == "mainstream":
+                        params["vote_count.gte"] = max(20, min_votes // 2)
+                    else:
+                        params["vote_average.gte"] = minimum
+                        if min_votes:
+                            params["vote_count.gte"] = min_votes
                     discover = module.tmdb.discover
                     response = discover._request_obj(
                         discover._urls["movies"], urlencode(params), key=None, call_cached=False)
@@ -2245,12 +2275,12 @@ class SmartMoviePush(_PluginBase):
                         raise RuntimeError(f"TMDB 第 {page} 页未返回有效结果，扫描未完成")
                     raw = response["results"]
                     total_pages = int(response.get("total_pages") or 0)
-                    if total_pages > 500:
+                    if profile != "mainstream" and total_pages > 500:
                         if first == last:
                             raise RuntimeError(f"{first} 日超过 TMDB 500 页上限，不能保证完整名单")
                         midpoint = (first + last) // 2
-                        scan_window(first, midpoint)
-                        scan_window(midpoint + 1, last)
+                        scan_window(scan_month, first, midpoint, profile)
+                        scan_window(scan_month, midpoint + 1, last, profile)
                         return
                     if not raw:
                         break
@@ -2259,7 +2289,17 @@ class SmartMoviePush(_PluginBase):
                     for movie in raw:
                         try:
                             movie_id = int(movie.get("id") or 0)
-                            if not movie_id or movie_id in results or float(movie.get("vote_average") or 0) < minimum:
+                            if not movie_id:
+                                continue
+                            votes = int(movie.get("vote_count") or 0)
+                            score = float(movie.get("vote_average") or 0)
+                            if profile == "mainstream" and votes < max(20, min_votes // 2):
+                                continue
+                            if profile != "mainstream" and (score < minimum or votes < min_votes):
+                                continue
+                            if movie_id in results:
+                                if profile not in results[movie_id].setdefault("categories", []):
+                                    results[movie_id]["categories"].append(profile)
                                 continue
                             detail = None
                             for attempt in range(3):
@@ -2289,6 +2329,7 @@ class SmartMoviePush(_PluginBase):
                                 "score": float(movie.get("vote_average") or 0),
                                 "vote_count": int(movie.get("vote_count") or 0),
                                 "popularity": float(movie.get("popularity") or 0),
+                                "categories": [profile],
                                 "countries": sorted(countries.intersection(self._allowed_countries)),
                                 "poster_path": info.get("poster_path"), "localized": True,
                                 "localization_version": 2,
@@ -2296,23 +2337,28 @@ class SmartMoviePush(_PluginBase):
                             }
                         except Exception as err:
                             raise RuntimeError(f"TMDB {movie.get('id')} 详情核验中断：{err}") from err
-                    self._update_monthly_task(task_id, scan_progress=f"已读 {pages_done} 页 / {examined} 部，地区匹配 {len(results)} 部")
+                    self._update_monthly_task(task_id, scan_progress=f"{scan_month} 月：已读 {pages_done} 页 / {examined} 部，地区匹配 {len(results)} 部")
                     if page >= total_pages:
                         break
                     page += 1
 
-            scan_window(1, last_day)
+            scan_months = range(1, 13) if month == 0 else (month,)
+            for scan_month in scan_months:
+                last_day = calendar.monthrange(year, scan_month)[1]
+                scan_window(scan_month, 1, last_day, "high_quality")
+                if month == 0:
+                    scan_window(scan_month, 1, last_day, "mainstream")
             candidates = sorted(results.values(), key=lambda item: (
-                -item["popularity"], -item["vote_count"], -item["score"],
+                -item["vote_count"], -item["popularity"], -item["score"],
                 item["release_date"] or "", item["tmdb_id"]))
             scanned_at = datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")
             scan_key = self._save_monthly_archive({**task, "scanned_at": scanned_at}, candidates, count_scan=True)
             self._update_monthly_task(
                 task_id, candidates=candidates, scan_state="complete", scan_error="",
-                scan_progress=f"已扫描 {pages_done} 页、{examined} 部；符合地区和评分 {len(candidates)} 部",
+                scan_progress=f"已扫描 {pages_done} 页、{examined} 部；符合地区和规则 {len(candidates)} 部",
                 scanned_at=scanned_at, scan_key=scan_key,
             )
-            self._append_plugin_log("月份筛选", f"{year} 年 {month} 月、评分 ≥{minimum}：{len(candidates)} 部符合；已保存完整候选名单")
+            self._append_plugin_log("年度筛选" if month == 0 else "月份筛选", f"{year} 年{'全年' if month == 0 else str(month) + ' 月'}：{len(candidates)} 部符合；名单已保存")
         except Exception as err:
             self._update_monthly_task(task_id, scan_state="error", scan_error=str(err)[:300])
             self._append_plugin_log("月份筛选", f"{task_id} 扫描失败：{type(err).__name__}：{err}", "error")

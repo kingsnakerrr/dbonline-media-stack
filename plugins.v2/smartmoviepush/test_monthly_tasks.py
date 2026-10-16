@@ -94,6 +94,7 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._monthly_batch_lock = threading.Lock()
         self.subject._enabled = True
         self.subject._disk_guard_blocks_new = lambda: False
+        self.subject._load_download_queue = lambda: []
         self.subject.get_data_path = lambda: Path(self.tempdir.name)
         self.subject._allowed_countries = {"US", "TW", "JP", "KR", "CN", "HK"}
         self.store = {}
@@ -116,6 +117,43 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertEqual(self.subject._monthly_resource_job["checked"], 1)
         self.assertEqual(self.subject._monthly_resource_job["candidates"], 130)
 
+    def test_annual_resource_scan_covers_all_candidates_including_mainstream(self):
+        candidates = [{"tmdb_id": index, "score": 5 if index == 1 else 8,
+                       "vote_count": index, "categories": ["mainstream"] if index == 1 else ["high_quality"]}
+                      for index in range(1, 132)]
+        self.subject._load_monthly_archive_month = lambda *_args: {
+            "min_score": 7, "candidates": candidates}
+        self.subject._load_monthly_resource_cache = lambda *_args: {}
+        self.subject._load_download_queue = lambda: []
+        self.subject._monthly_resource_scope = lambda: "sites"
+        self.subject._scan_monthly_resources = lambda *_args: None
+        result = self.subject._start_monthly_resource_scan(2026, 0, 7)
+        self.assertTrue(result["success"])
+        self.assertEqual(self.subject._monthly_resource_job["total"], 131)
+
+    def test_annual_archive_filters_category_and_release_month(self):
+        task = {"year": 2026, "month": 0, "min_score": 7, "min_votes": 50,
+                "scanned_at": "2026-10-16"}
+        self.subject._save_monthly_archive(task, [
+            {"tmdb_id": 1, "release_date": "2026-01-02", "score": 5,
+             "categories": ["mainstream"], "title": "主流低分"},
+            {"tmdb_id": 2, "release_date": "2026-02-03", "score": 8,
+             "categories": ["high_quality"], "title": "高口碑"},
+        ])
+        self.subject._valid_access_token = lambda _token: True
+        self.subject._load_stats_history = lambda: []
+        self.subject._load_download_queue = lambda: []
+        self.subject._load_recent_pushes = lambda: {}
+        self.subject._load_suppressed = lambda: {}
+        self.subject._load_scan_cache = lambda **_kwargs: {}
+        self.subject._library_snapshot_for_scan = lambda **_kwargs: {"tmdb_ids": set()}
+        result = self.subject._api_secure_monthly({
+            "archive_year": 2026, "archive_month": 0, "category": "mainstream",
+            "release_month": 1, "min_score": 7, "access_token": "test",
+        })
+        self.assertTrue(result["success"])
+        self.assertEqual([item["tmdb_id"] for item in result["data"]["items"]], [1])
+
     def test_month_scan_includes_us_taiwan_and_excludes_other_country(self):
         self.store["monthly_movie_tasks"] = [{
             "id": "one", "year": 2026, "month": 1, "min_score": 7.0,
@@ -129,6 +167,33 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertEqual(task["candidates"][0]["display_title"], "中文影片 1")
         self.assertEqual(task["candidates"][0]["poster_path"], "/1.jpg")
         self.assertEqual(self.subject._load_monthly_archive(task["scan_key"])["candidate_count"], 2)
+
+    def test_annual_scan_keeps_mainstream_below_score_floor_and_deduplicates(self):
+        class AnnualDiscover(FakeDiscover):
+            def _request_obj(self, _url, _params, **_kwargs):
+                return {"total_pages": 1, "results": [
+                    {"id": 1, "release_date": "2026-01-02", "vote_average": 8.0,
+                     "vote_count": 100},
+                    {"id": 2, "release_date": "2026-01-03", "vote_average": 5.0,
+                     "vote_count": 80},
+                ]}
+
+        original = namespace["ModuleManager"]
+        namespace["ModuleManager"] = lambda: SimpleNamespace(get_running_module=lambda _name:
+            SimpleNamespace(tmdb=SimpleNamespace(discover=AnnualDiscover())))
+        self.addCleanup(lambda: namespace.__setitem__("ModuleManager", original))
+        self.store["monthly_movie_tasks"] = [{
+            "id": "annual", "year": 2026, "month": 0, "min_score": 7.0,
+            "min_votes": 50, "scan_state": "pending", "candidates": [],
+        }]
+        self.subject._scan_monthly_task("annual")
+        task = self.subject._monthly_task("annual")
+        self.assertEqual(task["scan_state"], "complete")
+        self.assertEqual(len(task["candidates"]), 2)
+        categories = {item["tmdb_id"]: item["categories"] for item in task["candidates"]}
+        self.assertEqual(categories[1], ["high_quality", "mainstream"])
+        self.assertEqual(categories[2], ["mainstream"])
+        self.assertEqual(self.subject._load_monthly_archive_month(2026, 0)["candidate_count"], 2)
 
     def test_saved_calendar_survives_task_removal(self):
         task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
