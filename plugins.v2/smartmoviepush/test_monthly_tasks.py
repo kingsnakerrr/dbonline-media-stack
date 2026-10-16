@@ -116,6 +116,24 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertEqual(self.subject._monthly_archive_summaries()[0]["days"]["2026-01-02"], 2)
         self.assertEqual(len(self.subject._load_monthly_archive(key)["candidates"]), 2)
 
+    def test_scan_count_increases_only_for_real_rescans(self):
+        task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
+        movies = [{"tmdb_id": 1, "release_date": "2026-01-02", "title": "影片"}]
+        key = self.subject._save_monthly_archive(task, movies, count_scan=True)
+        self.subject._save_monthly_archive(task, movies)
+        self.assertEqual(self.subject._load_monthly_archive(key)["scan_count"], 1)
+        self.subject._save_monthly_archive(task, movies, count_scan=True)
+        self.assertEqual(self.subject._monthly_archive_summaries()[0]["scan_count"], 2)
+
+    def test_legacy_archive_adds_scan_count_without_erasing_movies(self):
+        path = Path(self.tempdir.name) / "monthly_scans.sqlite"
+        with closing(sqlite3.connect(path)) as db:
+            with db:
+                db.execute("CREATE TABLE monthly_scans (scan_key TEXT PRIMARY KEY, year INTEGER, "
+                           "month INTEGER, min_score REAL, scanned_at TEXT, candidate_count INTEGER)")
+                db.execute("INSERT INTO monthly_scans VALUES ('2026-01-7', 2026, 1, 7, '', 1)")
+        self.assertEqual(self.subject._monthly_archive_summaries()[0]["scan_count"], 1)
+
     def test_archive_day_uses_live_plugin_history_and_emby_index(self):
         task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
         key = self.subject._save_monthly_archive(task, [

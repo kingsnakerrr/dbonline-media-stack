@@ -47,7 +47,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.31"
+    plugin_version = "0.9.32"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1360,8 +1360,9 @@ class SmartMoviePush(_PluginBase):
             return {"success": False, "message": "已扫描月份不存在"}
         try:
             page = max(1, int(payload.get("page") or 1))
+            page_size = min(100, max(10, int(payload.get("page_size") or 30)))
         except (TypeError, ValueError):
-            return {"success": False, "message": "页码无效"}
+            return {"success": False, "message": "页码或每页条数无效"}
         history = {}
         for item in self._load_stats_history():
             movie_id = str(item.get("tmdb_id") or "")
@@ -1414,12 +1415,12 @@ class SmartMoviePush(_PluginBase):
         if status_filter != "all":
             rows = [item for item in rows if item["status"] == status_filter]
         total = len(rows)
-        page = min(page, max(1, (total + 99) // 100))
+        page = min(page, max(1, (total + page_size - 1) // page_size))
         return {"success": True, "data": {
             "task": {key: value for key, value in task.items() if key != "candidates"} | {
                 "candidate_count": counts["all"]},
-            "items": rows[(page - 1) * 100:page * 100], "counts": counts,
-            "total": total, "page": page, "page_size": 100, "date": selected_date,
+            "items": rows[(page - 1) * page_size:page * page_size], "counts": counts,
+            "total": total, "page": page, "page_size": page_size, "date": selected_date,
             "emby_fresh": bool(library_snapshot),
         }}
 
@@ -1779,7 +1780,12 @@ class SmartMoviePush(_PluginBase):
         connection = sqlite3.connect(str(self.get_data_path() / "monthly_scans.sqlite"), timeout=20)
         connection.execute("CREATE TABLE IF NOT EXISTS monthly_scans "
                            "(scan_key TEXT PRIMARY KEY, year INTEGER, month INTEGER, "
-                           "min_score REAL, scanned_at TEXT, candidate_count INTEGER)")
+                           "min_score REAL, scanned_at TEXT, candidate_count INTEGER, "
+                           "scan_count INTEGER NOT NULL DEFAULT 1)")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(monthly_scans)")}
+        if "scan_count" not in columns:
+            connection.execute("ALTER TABLE monthly_scans ADD COLUMN scan_count INTEGER NOT NULL DEFAULT 1")
+            connection.commit()
         connection.execute("CREATE TABLE IF NOT EXISTS monthly_scan_movies "
                            "(scan_key TEXT NOT NULL, tmdb_id TEXT NOT NULL, release_date TEXT, "
                            "payload TEXT NOT NULL, PRIMARY KEY(scan_key, tmdb_id))")
@@ -1787,14 +1793,18 @@ class SmartMoviePush(_PluginBase):
                            "ON monthly_scan_movies(scan_key, release_date)")
         return connection
 
-    def _save_monthly_archive(self, task: dict, candidates: list) -> str:
+    def _save_monthly_archive(self, task: dict, candidates: list, count_scan: bool = False) -> str:
         key = self._monthly_scan_key(task)
         with self._monthly_archive_lock:
             with closing(self._monthly_archive()) as db:
                 with db:
-                    db.execute("INSERT OR REPLACE INTO monthly_scans VALUES (?, ?, ?, ?, ?, ?)",
+                    previous = db.execute("SELECT scan_count FROM monthly_scans WHERE scan_key=?", (key,)).fetchone()
+                    scan_count = (int(previous[0]) + int(count_scan)) if previous else 1
+                    db.execute("INSERT OR REPLACE INTO monthly_scans "
+                               "(scan_key, year, month, min_score, scanned_at, candidate_count, scan_count) "
+                               "VALUES (?, ?, ?, ?, ?, ?, ?)",
                                (key, int(task["year"]), int(task["month"]), float(task["min_score"]),
-                                str(task.get("scanned_at") or ""), len(candidates)))
+                                str(task.get("scanned_at") or ""), len(candidates), scan_count))
                     db.execute("DELETE FROM monthly_scan_movies WHERE scan_key=?", (key,))
                     db.executemany("INSERT INTO monthly_scan_movies VALUES (?, ?, ?, ?)", [
                         (key, str(item["tmdb_id"]), str(item.get("release_date") or ""),
@@ -1805,7 +1815,7 @@ class SmartMoviePush(_PluginBase):
     def _load_monthly_archive(self, key: str) -> Optional[dict]:
         with self._monthly_archive_lock:
             with closing(self._monthly_archive()) as db:
-                row = db.execute("SELECT year, month, min_score, scanned_at, candidate_count "
+                row = db.execute("SELECT year, month, min_score, scanned_at, candidate_count, scan_count "
                                  "FROM monthly_scans WHERE scan_key=?", (key,)).fetchone()
                 if not row:
                     return None
@@ -1817,15 +1827,15 @@ class SmartMoviePush(_PluginBase):
             -int(item.get("vote_count") or (item.get("info") or {}).get("vote_count") or 0),
             -float(item.get("score") or 0), str(item.get("release_date") or "")))
         return {"scan_key": key, "year": row[0], "month": row[1], "min_score": row[2],
-                "scanned_at": row[3], "candidate_count": row[4], "candidates": candidates,
+                "scanned_at": row[3], "candidate_count": row[4], "scan_count": row[5], "candidates": candidates,
                 "scan_state": "complete"}
 
     def _monthly_archive_summaries(self) -> list:
         with self._monthly_archive_lock:
             with closing(self._monthly_archive()) as db:
                 scans = db.execute("SELECT scan_key, year, month, min_score, scanned_at, "
-                                   "candidate_count FROM monthly_scans "
-                                   "ORDER BY year DESC, month DESC, min_score DESC").fetchall()
+                                   "candidate_count, scan_count FROM monthly_scans "
+                                   "ORDER BY year DESC, month DESC, scanned_at DESC, min_score DESC").fetchall()
                 days = db.execute("SELECT scan_key, release_date, COUNT(*) FROM monthly_scan_movies "
                                   "GROUP BY scan_key, release_date").fetchall()
         day_counts = {}
@@ -1833,9 +1843,9 @@ class SmartMoviePush(_PluginBase):
             if date:
                 day_counts.setdefault(key, {})[date] = count
         return [{"scan_key": key, "year": year, "month": month, "min_score": score,
-                 "scanned_at": scanned_at, "candidate_count": count,
+                 "scanned_at": scanned_at, "candidate_count": count, "scan_count": scan_count,
                  "days": day_counts.get(key, {})}
-                for key, year, month, score, scanned_at, count in scans]
+                for key, year, month, score, scanned_at, count, scan_count in scans]
 
     def _archive_existing_monthly_scans(self) -> None:
         """升级时先归档旧名单，再在后台补齐中文资料，不阻塞插件启动。"""
@@ -1980,7 +1990,7 @@ class SmartMoviePush(_PluginBase):
                 -item["popularity"], -item["vote_count"], -item["score"],
                 item["release_date"] or "", item["tmdb_id"]))
             scanned_at = datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds")
-            scan_key = self._save_monthly_archive({**task, "scanned_at": scanned_at}, candidates)
+            scan_key = self._save_monthly_archive({**task, "scanned_at": scanned_at}, candidates, count_scan=True)
             self._update_monthly_task(
                 task_id, candidates=candidates, scan_state="complete", scan_error="",
                 scan_progress=f"已扫描 {pages_done} 页、{examined} 部；符合地区和评分 {len(candidates)} 部",
