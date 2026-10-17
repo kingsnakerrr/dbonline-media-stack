@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.53"
+    plugin_version = "0.9.54"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2315,102 +2315,72 @@ class SmartMoviePush(_PluginBase):
         except Exception:
             self._monthly_batch_lock.release()
             raise
-        return {"success": True, "message": f"已开始提交 {len(validated)} 部；下载空位不足的会进入本插件等候队列"}
+        return {"success": True, "message": f"正在登记选中的 {len(validated)} 部；已有下载或等候的影片会跳过，空位出现后按顺序搜索并提交"}
 
     def _run_monthly_batch_download(self, year: int, month: int, validated: list) -> None:
         try:
             plugin_ids = {str(item.get("tmdb_id")) for item in self._load_stats_history()}
-            queued_ids = {str(item.get("tmdb_id")) for item in self._load_download_queue()}
             library = self._library_snapshot_for_scan(force=True)
             if not library:
                 self._monthly_batch_job["errors"] = len(validated)
                 self._monthly_batch_job["done"] = len(validated)
                 self._append_plugin_log("月份下载", "Emby 目录暂不可核对，未提交下载；请稍后重试", "error")
                 return
-            for item, resource_id in validated:
-                movie_id = str(item["tmdb_id"])
+            # 勾选操作只登记候选；搜索 PT 和提交种子由共享补位器在空位出现时处理。
+            # 这样 20 部可立即显示为等候，而不是每搜完一部才出现一条。
+            with self._queue_lock:
                 try:
-                    if not self._enabled or self._disk_guard_blocks_new():
-                        self._monthly_batch_job["skipped"] += 1
-                        continue
-                    if movie_id in plugin_ids or movie_id in library["tmdb_ids"]:
-                        with self._queue_lock:
-                            self._remove_queued_movie(movie_id, "已有下载记录或 Emby 已入库")
-                        self._monthly_batch_job["skipped"] += 1
-                        continue
-                    media = MediaInfo(tmdb_info=item["info"])
-                    if self._already_in_library(media):
-                        self._monthly_batch_job["skipped"] += 1
-                        continue
-                    # 与随机下载相同：已在 MoviePilot 下载的电影不再消耗 PT 查询。
+                    active_torrents = DownloadChain().downloading() or []
+                except Exception as err:
+                    self._monthly_batch_job["errors"] = len(validated)
+                    self._monthly_batch_job["done"] = len(validated)
+                    self._monthly_batch_job["message"] = f"无法核对 MoviePilot 正在下载任务：{type(err).__name__}"
+                    return
+                active_ids = self._mp_active_movie_ids(active_torrents)
+                queue = self._load_download_queue()
+                new_entries = []
+                queued_ids = {str(entry.get("tmdb_id")) for entry in queue}
+                duplicates = 0
+                for item, _ in validated:
+                    movie_id = str(item["tmdb_id"])
                     try:
-                        active_torrents = DownloadChain().downloading() or []
-                    except Exception as err:
-                        raise RuntimeError(f"无法核对 MoviePilot 正在下载任务：{type(err).__name__}") from err
-                    if movie_id in self._mp_active_movie_ids(active_torrents):
-                        with self._queue_lock:
-                            self._remove_queued_movie(movie_id, "MoviePilot 已在下载")
-                        self._monthly_batch_job["skipped"] += 1
-                        continue
-                    # 已在随机/年度共享队列中且没有空位时，无须重新搜一次 PT。
-                    if (len(active_torrents) >= self._max_active_downloads
-                            and any(str(entry.get("tmdb_id")) == movie_id
-                                    for entry in self._load_download_queue())):
-                        self._monthly_batch_job["queued"] += 1
-                        continue
-                    context = self._search_best(media)
-                    if not context:
-                        self._monthly_batch_job["skipped"] += 1
-                        self._append_plugin_log("月份下载", f"{media.title_year}：PT 站没有符合 MoviePilot 规则的资源")
-                        continue
-                    # 与定时推送、队列补位共用锁，原子地检查活动数并提交，不能越过并发上限。
-                    with self._queue_lock:
                         if not self._enabled or self._disk_guard_blocks_new():
                             self._monthly_batch_job["skipped"] += 1
-                            continue
-                        try:
-                            active_torrents = DownloadChain().downloading() or []
-                        except Exception as err:
-                            raise RuntimeError(f"无法核对 MoviePilot 正在下载任务：{type(err).__name__}") from err
-                        if movie_id in self._mp_active_movie_ids(active_torrents):
-                            self._remove_queued_movie(movie_id, "MoviePilot 已在下载")
+                        elif movie_id in plugin_ids or movie_id in library["tmdb_ids"] or movie_id in active_ids:
                             self._monthly_batch_job["skipped"] += 1
-                            self._append_plugin_log("月份下载", f"{media.title_year} 已由 MoviePilot 下载，移除等候项")
-                            continue
-                        already_queued = any(str(entry.get("tmdb_id")) == movie_id
-                                             for entry in self._load_download_queue())
-                        if len(active_torrents) < self._max_active_downloads:
-                            ok, error = self._submit_download(media, context, origin="annual")
-                            if not ok:
-                                self._monthly_batch_job["errors"] += 1
-                                self._append_plugin_log("月份下载", f"{media.title_year} 提交失败：{error}", "error")
-                                continue
-                            self._monthly_batch_job["submitted"] += 1
-                            plugin_ids.add(movie_id)
-                            if already_queued:
-                                queued_ids.discard(movie_id)
-                        elif already_queued:
-                            self._monthly_batch_job["queued"] += 1
-                        elif self._enqueue_download(media, context, source="annual"):
-                            self._monthly_batch_job["queued"] += 1
-                            queued_ids.add(movie_id)
+                        elif movie_id in queued_ids:
+                            # 随机队列已经负责下载，不复制到年度队列。
+                            duplicates += 1
+                            self._monthly_batch_job["skipped"] += 1
                         else:
-                            self._monthly_batch_job["skipped"] += 1
-                except PTSearchUnavailable as err:
-                    self._monthly_batch_job["errors"] += 1
-                    self._monthly_batch_job["message"] = str(err)
-                    self._append_plugin_log("月份下载", f"{media.title_year}：{err}；暂停本批后续 PT 查询", "error")
-                    break
-                except Exception as err:
-                    self._monthly_batch_job["errors"] += 1
-                    logger.error(f"月份批量下载 {movie_id} 失败：{err}", exc_info=True)
-                finally:
-                    self._monthly_batch_job["done"] += 1
-            self._append_plugin_log("月份下载", "批量完成：提交 "
-                                    f"{self._monthly_batch_job['submitted']} 部、等候 "
-                                    f"{self._monthly_batch_job['queued']} 部、跳过 "
-                                    f"{self._monthly_batch_job['skipped']} 部、失败 "
-                                    f"{self._monthly_batch_job['errors']} 部")
+                            media = MediaInfo(tmdb_info=item["info"])
+                            new_entries.append({
+                                "key": hashlib.sha1(f"{movie_id}|{datetime.now().isoformat()}".encode()).hexdigest()[:12],
+                                "tmdb_id": media.tmdb_id, "title": media.title_year,
+                                "source": "annual", "torrent_identity": "",
+                                "channel": None, "userid": None,
+                                "created_at": datetime.now().isoformat(timespec="seconds"),
+                                "attempts": 0,
+                            })
+                            queued_ids.add(movie_id)
+                            self._monthly_batch_job["queued"] += 1
+                    except Exception as err:
+                        self._monthly_batch_job["errors"] += 1
+                        logger.error(f"年度候选登记 {movie_id} 失败：{err}", exc_info=True)
+                    finally:
+                        self._monthly_batch_job["done"] += 1
+                if self._monthly_batch_job["queued"]:
+                    # 手动勾选的年度候选优先于自动随机队列补位；旧年度顺序不变。
+                    ordered = ([entry for entry in queue if entry.get("source") == "annual"]
+                               + new_entries
+                               + [entry for entry in queue if entry.get("source") != "annual"])
+                    self.save_data(self._download_queue_key, ordered[:2000])
+                self._monthly_batch_job["message"] = (
+                    f"已登记 {self._monthly_batch_job['queued']} 部；{duplicates} 部已在随机/年度等候队列，"
+                    f"当前下载 {len(active_torrents)}/{self._max_active_downloads}，空位出现后逐部搜索资源")
+            self._append_plugin_log("月份下载", self._monthly_batch_job["message"])
+            if self._monthly_batch_job["queued"]:
+                threading.Thread(target=self.process_download_queue, daemon=True).start()
         finally:
             self._monthly_batch_job["running"] = False
             self._monthly_batch_lock.release()
@@ -3376,14 +3346,17 @@ class SmartMoviePush(_PluginBase):
                 return
             active = len(active_torrents)
             active_movie_ids = self._mp_active_movie_ids(active_torrents)
+            submitted_movie_ids = {str(row.get("tmdb_id")) for row in self._load_stats_history()
+                                   if row.get("tmdb_id")}
             slots = max(0, self._max_active_downloads - active)
             # 有下载空位时强制更新 Emby 索引，避免其他来源刚入库的影片被重复提交。
             library = self._library_snapshot_for_scan(force=slots > 0)
             emby_ids = set(library["tmdb_ids"]) if library else set()
-            retained = [item for item in queue if str(item.get("tmdb_id") or "") not in (emby_ids | active_movie_ids)]
+            retained = [item for item in queue if str(item.get("tmdb_id") or "")
+                        not in (emby_ids | active_movie_ids | submitted_movie_ids)]
             if len(retained) != len(queue):
                 self.save_data(self._download_queue_key, retained)
-                self._append_plugin_log("队列去重", f"Emby 已入库或 MoviePilot 正在下载，移除 {len(queue) - len(retained)} 条同片等候任务")
+                self._append_plugin_log("队列去重", f"Emby 已入库或 MoviePilot 已有下载记录/正在下载，移除 {len(queue) - len(retained)} 条同片等候任务")
                 queue = retained
             if not queue:
                 return
@@ -3409,6 +3382,12 @@ class SmartMoviePush(_PluginBase):
                         results[0] if results else None,
                     )
                     if not context:
+                        if item.get("source") == "annual":
+                            remaining = [row for row in self._load_download_queue()
+                                         if row.get("key") != item.get("key")]
+                            self.save_data(self._download_queue_key, remaining)
+                            self._append_plugin_log("年度下载", f"{item.get('title')}：PT 站没有符合 MoviePilot 规则的资源，已从候选队列移除")
+                            continue
                         raise RuntimeError("所选站点中已找不到可下载资源")
                     media = context.media_info
                     ok, error = self._submit_download(

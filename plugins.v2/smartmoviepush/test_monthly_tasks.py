@@ -115,6 +115,7 @@ class MonthlyTasksTest(unittest.TestCase):
         self.store = {}
         self.subject.get_data = self.store.get
         self.subject.save_data = self.store.__setitem__
+        self.subject._load_stats_history = lambda: []
         self.logs = []
         self.subject._append_plugin_log = lambda *args: self.logs.append(args)
         self.subject._search_site_contexts = lambda movie_id: namespace["SearchChain"]().search_by_id(
@@ -143,6 +144,17 @@ class MonthlyTasksTest(unittest.TestCase):
         self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
         self.subject.process_download_queue()
         self.assertEqual(len(self.store["download_queue"]), 1)
+
+    def test_queue_removes_movie_already_submitted_by_random_download(self):
+        self.store["download_queue"] = [{"key": "annual", "tmdb_id": 11,
+                                         "title": "重复电影", "source": "annual"}]
+        self.subject._load_stats_history = lambda: [{"tmdb_id": 11, "source": "random"}]
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        self.subject.process_download_queue()
+        self.assertEqual(self.store["download_queue"], [])
 
     def test_clearing_annual_waiting_keeps_random_waiting(self):
         self.store["download_queue"] = [
@@ -515,7 +527,7 @@ class MonthlyTasksTest(unittest.TestCase):
         ])
         self.assertFalse(result["success"])
 
-    def test_no_resource_selection_is_accepted_and_searched_on_submit(self):
+    def test_no_resource_selection_is_queued_without_pt_search(self):
         task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
         self.subject._save_monthly_archive(task, [
             {"tmdb_id": 1, "release_date": "2026-01-02", "score": 8,
@@ -545,8 +557,36 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._run_monthly_batch_download(2026, 1, [
             ({"tmdb_id": 1, "info": {"id": 1, "title": "待搜影片"}}, ""),
         ])
-        self.assertEqual(searches, [1])
-        self.assertEqual(self.subject._monthly_batch_job["submitted"], 1)
+        self.assertEqual(searches, [])
+        self.assertEqual(self.subject._monthly_batch_job["queued"], 1)
+        self.assertEqual(self.store["download_queue"][0]["source"], "annual")
+
+    def test_selected_twenty_register_immediately_and_skip_random_duplicates(self):
+        movies = [( {"tmdb_id": movie_id, "info": {"id": movie_id, "title": f"影片 {movie_id}"}}, "")
+                  for movie_id in range(1, 21)]
+        self.subject._load_stats_history = lambda: []
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
+        self.store["download_queue"] = [
+            {"key": f"random-{movie_id}", "tmdb_id": movie_id, "source": "random"}
+            for movie_id in range(1, 6)]
+        original_media = namespace["MediaInfo"]
+        original_download = namespace.get("DownloadChain")
+        namespace["MediaInfo"] = lambda tmdb_info: SimpleNamespace(
+            title_year=tmdb_info["title"], tmdb_id=tmdb_info["id"])
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [
+            SimpleNamespace(media={"tmdbid": 999}) for _ in range(10)])
+        self.addCleanup(lambda: namespace.__setitem__("MediaInfo", original_media))
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original_download))
+        self.subject._monthly_batch_job = {"running": True, "total": 20, "done": 0,
+                                           "submitted": 0, "queued": 0, "skipped": 0,
+                                           "errors": 0, "message": ""}
+        self.subject._monthly_batch_lock.acquire()
+        self.subject._run_monthly_batch_download(2024, 0, movies)
+        queue = self.store["download_queue"]
+        self.assertEqual(len(queue), 20)
+        self.assertEqual(sum(row["source"] == "annual" for row in queue), 15)
+        self.assertEqual([row["tmdb_id"] for row in queue[:15]], list(range(6, 21)))
+        self.assertEqual(self.subject._monthly_batch_job["done"], 20)
 
     def test_previously_matched_resource_reuses_context_without_new_search(self):
         context = SimpleNamespace()
@@ -612,6 +652,47 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._submit_download = submit
         self.subject.process_download_queue()
         self.assertEqual(self.store["download_queue"], [])
+
+    def test_annual_no_resource_does_not_block_next_candidate(self):
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
+        self.subject._search_site_contexts = lambda movie_id: ([] if movie_id == 1 else [
+            SimpleNamespace(media_info=SimpleNamespace(tmdb_id=2))])
+        self.subject._torrent_identity = lambda _context: "resource"
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        self.store["download_queue"] = [
+            {"key": "one", "tmdb_id": 1, "title": "无资源", "source": "annual"},
+            {"key": "two", "tmdb_id": 2, "title": "有资源", "source": "annual"},
+        ]
+        def submit(movie, _context, **_kwargs):
+            self.subject._remove_queued_movie(movie.tmdb_id)
+            return True, None
+        self.subject._submit_download = submit
+        self.subject.process_download_queue()
+        self.assertEqual(self.store["download_queue"], [])
+
+    def test_twenty_annual_candidates_fill_five_available_slots(self):
+        self.subject._max_active_downloads = 5
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
+        self.subject._search_site_contexts = lambda movie_id: [
+            SimpleNamespace(media_info=SimpleNamespace(tmdb_id=movie_id))]
+        self.subject._torrent_identity = lambda _context: "resource"
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        self.store["download_queue"] = [
+            {"key": str(movie_id), "tmdb_id": movie_id, "title": f"影片 {movie_id}",
+             "source": "annual", "torrent_identity": ""} for movie_id in range(1, 21)]
+        submitted = []
+        def submit(movie, _context, **_kwargs):
+            submitted.append(movie.tmdb_id)
+            self.subject._remove_queued_movie(movie.tmdb_id)
+            return True, None
+        self.subject._submit_download = submit
+        self.subject.process_download_queue()
+        self.assertEqual(submitted, [1, 2, 3, 4, 5])
+        self.assertEqual(len(self.store["download_queue"]), 15)
 
     def test_five_task_limit_does_not_overwrite_existing_tasks(self):
         self.store["monthly_movie_tasks"] = [{"id": str(i)} for i in range(5)]

@@ -783,7 +783,7 @@ onUnmounted(() => {
       <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；创建任务只保存电影名单，不会开始下载。扫描完成后可勾选电影手动下载，或点击“启动自动下载”按每轮数量定时下载；最多保留 5 个自动任务。</div>
       <VRow dense class="mb-3">
         <VCol cols="12" sm="4"><VCard variant="tonal" color="info" class="pa-3 h-100 list-card" @click="openActive('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度正在下载</div><div class="text-h6 font-weight-bold">{{ annualActiveItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
-        <VCol cols="12" sm="4"><VCard variant="tonal" color="secondary" class="pa-3 h-100 list-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度等候下载</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+        <VCol cols="12" sm="4"><VCard variant="tonal" color="secondary" class="pa-3 h-100 list-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度待下载候选</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
         <VCol cols="12" sm="4"><VCard variant="tonal" color="primary" class="pa-3 h-100 list-card" @click="openHistory('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度下载记录</div><div class="text-h6 font-weight-bold">{{ summary.annual_history_count || 0 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
       </VRow>
       <div class="d-flex flex-wrap align-center ga-3 mt-4 mb-3">
@@ -917,7 +917,7 @@ onUnmounted(() => {
           <div v-if="monthlyArchiveYear" class="d-flex flex-wrap align-center justify-start ga-2 mb-3">
             <VBtn variant="tonal" :loading="monthlyBusy" @click="loadMonthly(true)">立即核对 Emby</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-3">电影名单只读取 TMDB，不提前查询 PT 站。选中后点击“下载选中”，系统会先核对 Emby 和 MoviePilot 下载状态，再按随机下载的规则逐部搜索资源；找到才提交或进入等候队列。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
+          <div class="text-caption text-medium-emphasis mb-3">电影名单只读取 TMDB。点击“下载选中”后先核对 Emby、MoviePilot 下载和随机等候队列；未重复的影片立即进入年度候选队列，并优先于随机候选补位。出现下载空位时再逐部搜索 PT，找到符合规则的资源才提交；全局同时下载上限仍然生效。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
           <div v-if="monthlyView.batch_progress?.total" class="text-caption mb-3">批量下载：已处理 {{ monthlyView.batch_progress.done || 0 }}/{{ monthlyView.batch_progress.total }} · 已提交 {{ monthlyView.batch_progress.submitted || 0 }} · 等候 {{ monthlyView.batch_progress.queued || 0 }} · 跳过 {{ monthlyView.batch_progress.skipped || 0 }} · 失败 {{ monthlyView.batch_progress.errors || 0 }}<span v-if="monthlyView.batch_progress.message" class="text-error"> · {{ monthlyView.batch_progress.message }}</span></div>
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <VBtn size="small" variant="tonal" :disabled="!(monthlyView.items || []).some(monthlyCanDownload)" @click="selectMonthlyPage">全选当前页</VBtn>

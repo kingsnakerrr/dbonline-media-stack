@@ -1474,7 +1474,7 @@ return (_ctx, _cache) => {
                           default: _withCtx(() => [
                             _createElementVNode("div", _hoisted_37, [
                               _createElementVNode("div", null, [
-                                _cache[101] || (_cache[101] = _createElementVNode("div", { class: "text-caption" }, "年度等候下载", -1)),
+                                _cache[101] || (_cache[101] = _createElementVNode("div", { class: "text-caption" }, "年度待下载候选", -1)),
                                 _createElementVNode("div", _hoisted_38, _toDisplayString(annualQueueItems.value.length), 1)
                               ]),
                               _createVNode(_component_VIcon, { icon: "mdi-chevron-right" })
@@ -2209,7 +2209,7 @@ return (_ctx, _cache) => {
                                               }, 8, ["loading"])
                                             ]))
                                           : _createCommentVNode("", true),
-                                        _createElementVNode("div", _hoisted_68, "电影名单只读取 TMDB，不提前查询 PT 站。选中后点击“下载选中”，系统会先核对 Emby 和 MoviePilot 下载状态，再按随机下载的规则逐部搜索资源；找到才提交或进入等候队列。" + _toDisplayString(monthlyView.value.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。'), 1),
+                                        _createElementVNode("div", _hoisted_68, "电影名单只读取 TMDB。点击“下载选中”后先核对 Emby、MoviePilot 下载和随机等候队列；未重复的影片立即进入年度候选队列，并优先于随机候选补位。出现下载空位时再逐部搜索 PT，找到符合规则的资源才提交；全局同时下载上限仍然生效。" + _toDisplayString(monthlyView.value.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。'), 1),
                                         (monthlyView.value.batch_progress?.total)
                                           ? (_openBlock(), _createElementBlock("div", _hoisted_69, [
                                               _createTextVNode("批量下载：已处理 " + _toDisplayString(monthlyView.value.batch_progress.done || 0) + "/" + _toDisplayString(monthlyView.value.batch_progress.total) + " · 已提交 " + _toDisplayString(monthlyView.value.batch_progress.submitted || 0) + " · 等候 " + _toDisplayString(monthlyView.value.batch_progress.queued || 0) + " · 跳过 " + _toDisplayString(monthlyView.value.batch_progress.skipped || 0) + " · 失败 " + _toDisplayString(monthlyView.value.batch_progress.errors || 0), 1),
@@ -2525,6 +2525,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e2eedb40"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-647b2ddd"]]);
 
 export { Page as default };
