@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.50"
+    plugin_version = "0.9.51"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1395,9 +1395,6 @@ class SmartMoviePush(_PluginBase):
             return {"success": False, "message": "页码、每页条数或评分无效"}
         if not 0 <= minimum <= 10 or not 0 <= selected_month <= 12:
             return {"success": False, "message": "评分应为 0–10 分"}
-        resources_only = bool(payload.get("resources_only"))
-        resources = (self._load_monthly_resource_cache(int(task["year"]), int(task["month"]))
-                     if resources_only else {})
         history = {}
         for item in self._load_stats_history():
             movie_id = str(item.get("tmdb_id") or "")
@@ -1427,8 +1424,7 @@ class SmartMoviePush(_PluginBase):
             if selected_date and str(item.get("release_date") or "") != selected_date:
                 continue
             movie_id = str(item.get("tmdb_id"))
-            options = resources.get(movie_id) or []
-            # 年度名单也展示暂无资源的候选，供手动勾选并重新匹配 PT 站。
+            # 名单只来自 TMDB；打开名单不预查 PT，避免数百部影片耗尽站点额度。
             record = history.get(movie_id)
             in_emby = bool(library_snapshot and movie_id in library_snapshot["tmdb_ids"])
             if record:
@@ -1450,14 +1446,10 @@ class SmartMoviePush(_PluginBase):
             elif movie_id in suppressed_ids:
                 status = "suppressed"
             else:
-                status = {"library": "library", "no_resource": "no_resource"}.get(
-                    (cache.get(movie_id) or {}).get("status"), "candidate")
-            if status in {"candidate", "no_resource"} and resources_only and movie_id in resources:
-                # 年度 PT 重查结果比随机扫描的旧缓存更接近当前站点状态。
-                status = "candidate" if options else "no_resource"
+                status = "library" if (cache.get(movie_id) or {}).get("status") == "library" else "candidate"
             counts[status] = counts.get(status, 0) + 1
             rows.append({key: value for key, value in item.items() if key != "info"} |
-                        {"status": status, "resources": options,
+                        {"status": status,
                          "queue_source": (queue_by_id.get(movie_id) or {}).get("source") or "random"
                          if status == "queued" else ""})
         rows.sort(key=lambda item: (-int(item.get("vote_count") or 0),
@@ -1482,9 +1474,6 @@ class SmartMoviePush(_PluginBase):
             "items": rows[(page - 1) * page_size:page * page_size], "counts": counts,
             "total": total, "page": page, "page_size": page_size, "date": selected_date,
             "emby_fresh": bool(library_snapshot),
-            "resource_progress": dict(self._monthly_resource_job)
-                if self._monthly_resource_job.get("year") == task["year"]
-                and self._monthly_resource_job.get("month") == task["month"] else {},
             "batch_progress": dict(self._monthly_batch_job)
                 if self._monthly_batch_job.get("year") == task["year"]
                 and self._monthly_batch_job.get("month") == task["month"] else {},
@@ -1744,12 +1733,7 @@ class SmartMoviePush(_PluginBase):
                 if not 1900 <= year <= datetime.now().year or not 0 <= month <= 12:
                     raise ValueError("invalid month")
                 if action == "monthly_resource_scan":
-                    minimum = float(payload.get("min_score") if payload.get("min_score") is not None else 7)
-                    if not 0 <= minimum <= 10:
-                        raise ValueError("invalid score")
-                    result = self._start_monthly_resource_scan(
-                        year, month, minimum, bool(payload.get("force")),
-                        str(payload.get("tmdb_id") or ""), payload.get("tmdb_ids"))
+                    result = {"success": False, "message": "已取消名单预查资源；请选择电影后点击下载，提交时才会搜索 PT 站"}
                 else:
                     result = self._start_monthly_batch_download(
                         year, month, payload.get("selections"))
@@ -2290,7 +2274,7 @@ class SmartMoviePush(_PluginBase):
                 self._monthly_resource_lock.release()
 
     def _start_monthly_batch_download(self, year: int, month: int, selections: list) -> dict:
-        """有资源的复用已匹配候选；无资源的提交时再搜索一次 MoviePilot 站点。"""
+        """只保存选中的电影；下载时与随机任务共用 MoviePilot 站点搜索。"""
         if not self._enabled or self._disk_guard_blocks_new():
             return {"success": False, "message": "插件或硬盘保护已停止新增下载"}
         if not isinstance(selections, list) or not 1 <= len(selections) <= 1000:
@@ -2299,21 +2283,19 @@ class SmartMoviePush(_PluginBase):
         if not archive:
             return {"success": False, "message": "月份名单不存在"}
         movies = {str(item["tmdb_id"]): item for item in archive["candidates"]}
-        cached = self._load_monthly_resource_cache(year, month)
         validated, seen = [], set()
         for choice in selections:
             movie_id = str(choice.get("tmdb_id") or "") if isinstance(choice, dict) else ""
             resource_id = str(choice.get("resource_id") or "") if isinstance(choice, dict) else ""
-            if movie_id in seen or movie_id not in movies or (resource_id and not any(
-                    option["id"] == resource_id for option in cached.get(movie_id, []))):
-                return {"success": False, "message": "选择中包含重复、已过期或不符合 MP 规则的资源，请重新搜索"}
+            if movie_id in seen or movie_id not in movies or resource_id:
+                return {"success": False, "message": "选择中包含重复、无效影片或旧版预查资源，请刷新名单后重试"}
             seen.add(movie_id)
-            validated.append((movies[movie_id], resource_id))
+            validated.append((movies[movie_id], ""))
         if not self._monthly_batch_lock.acquire(blocking=False):
             return {"success": False, "message": "上一次批量下载还在提交中"}
         self._monthly_batch_job = {"running": True, "total": len(validated), "done": 0,
                                    "submitted": 0, "queued": 0, "skipped": 0, "errors": 0,
-                                   "year": year, "month": month}
+                                   "year": year, "month": month, "message": ""}
         try:
             threading.Thread(target=self._run_monthly_batch_download,
                              args=(year, month, validated), daemon=True).start()
@@ -2347,21 +2329,20 @@ class SmartMoviePush(_PluginBase):
                     if self._already_in_library(media):
                         self._monthly_batch_job["skipped"] += 1
                         continue
-                    context = (self._cached_monthly_resource_context(year, month, movie_id, resource_id)
-                               if resource_id else None)
-                    if context is None:
-                        contexts = self._search_site_contexts(int(movie_id))
-                        options = self._monthly_resource_options(contexts)
-                        self._save_monthly_resource_cache(year, month, movie_id, options)
-                        self._remember_monthly_resource_contexts(year, month, movie_id, contexts, options)
-                        if not resource_id and options:
-                            resource_id = options[0]["id"]
-                        context = next((ctx for ctx in contexts
-                                        if self._torrent_identity(ctx) == resource_id), None)
+                    # 与随机下载相同：已在 MoviePilot 下载的电影不再消耗 PT 查询。
+                    try:
+                        active_torrents = DownloadChain().downloading() or []
+                    except Exception as err:
+                        raise RuntimeError(f"无法核对 MoviePilot 正在下载任务：{type(err).__name__}") from err
+                    if movie_id in self._mp_active_movie_ids(active_torrents):
+                        with self._queue_lock:
+                            self._remove_queued_movie(movie_id, "MoviePilot 已在下载")
+                        self._monthly_batch_job["skipped"] += 1
+                        continue
+                    context = self._search_best(media)
                     if not context:
                         self._monthly_batch_job["skipped"] += 1
-                        reason = "PT 站没有符合 MoviePilot 规则的资源" if not resource_id else "所选资源已失效或不再符合规则"
-                        self._append_plugin_log("月份下载", f"{media.title_year} {reason}")
+                        self._append_plugin_log("月份下载", f"{media.title_year}：PT 站没有符合 MoviePilot 规则的资源")
                         continue
                     # 与定时推送、队列补位共用锁，原子地检查活动数并提交，不能越过并发上限。
                     with self._queue_lock:
@@ -2396,6 +2377,11 @@ class SmartMoviePush(_PluginBase):
                             queued_ids.add(movie_id)
                         else:
                             self._monthly_batch_job["skipped"] += 1
+                except PTSearchUnavailable as err:
+                    self._monthly_batch_job["errors"] += 1
+                    self._monthly_batch_job["message"] = str(err)
+                    self._append_plugin_log("月份下载", f"{media.title_year}：{err}；暂停本批后续 PT 查询", "error")
+                    break
                 except Exception as err:
                     self._monthly_batch_job["errors"] += 1
                     logger.error(f"月份批量下载 {movie_id} 失败：{err}", exc_info=True)

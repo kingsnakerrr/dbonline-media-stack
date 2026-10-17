@@ -45,7 +45,6 @@ const annualReleaseMonth = ref(0)
 const annualCategory = ref('all')
 const monthlyEditMode = ref(false)
 const monthlySelected = ref([])
-const monthlyResourceChoice = ref({})
 const monthlyBusy = ref(false)
 const monthlyStatusOptions = [
   { title: '全部', value: 'all', color: 'primary' },
@@ -58,7 +57,6 @@ const monthlyStatusOptions = [
   { title: '已整理未入库', value: 'organized_not_ingested', color: 'error' },
   { title: 'Emby 已入库', value: 'emby_ingested', color: 'success' },
   { title: 'Emby 已入库（其他来源）', value: 'library', color: 'success' },
-  { title: '无资源', value: 'no_resource', color: 'secondary' },
   { title: '已推送', value: 'pushed', color: 'primary' },
   { title: '不再推送', value: 'suppressed', color: 'error' },
 ]
@@ -116,25 +114,21 @@ const archiveMonths = computed(() => Array.from({ length: 12 }, (_, index) => {
 const selectedMonthTasks = computed(() => (state.value.monthly_tasks || []).filter(item =>
   Number(item.year) === Number(monthlyArchiveYear.value || monthlyView.value.task?.year)
   && Number(item.month) === Number(monthlyArchiveMonth.value || monthlyView.value.task?.month)))
-const monthlyCanDownload = item => ['candidate', 'no_resource', 'pushed', 'queued'].includes(item.status)
+const monthlyCanDownload = item => ['candidate', 'pushed', 'queued'].includes(item.status)
 function selectMonthlyPage() {
   const values = new Set(monthlySelected.value)
-  const choices = { ...monthlyResourceChoice.value }
   for (const item of monthlyView.value.items || []) {
     if (!monthlyCanDownload(item)) continue
     const id = String(item.tmdb_id)
     values.add(id)
-    choices[id] = choices[id] || item.resources?.[0]?.id || ''
   }
   monthlySelected.value = [...values]
-  monthlyResourceChoice.value = choices
 }
 function toggleMonthlyMovie(item, checked) {
   const id = String(item.tmdb_id)
   monthlySelected.value = checked
     ? [...new Set([...monthlySelected.value, id])]
     : monthlySelected.value.filter(value => value !== id)
-  if (checked && !monthlyResourceChoice.value[id]) monthlyResourceChoice.value = { ...monthlyResourceChoice.value, [id]: item.resources?.[0]?.id || '' }
 }
 const posterUrl = path => typeof path === 'string' && /^\/[a-zA-Z0-9_./-]+$/.test(path) ? `https://image.tmdb.org/t/p/w342${path}` : ''
 const movieTitle = item => item.display_title || item.title || `TMDB ${item.tmdb_id}`
@@ -244,7 +238,6 @@ async function loadMonthly(refreshLibrary = false) {
       page: monthlyPage.value, search: monthlySearch.value, status: monthlyStatus.value,
       page_size: monthlyPageSize.value, min_score: monthlyMinScore.value,
       release_month: annualReleaseMonth.value, category: annualCategory.value,
-      resources_only: Boolean(monthlyArchiveYear.value),
       refresh_library: refreshLibrary,
     })
     const body = envelope(response)
@@ -252,12 +245,6 @@ async function loadMonthly(refreshLibrary = false) {
     if (body?.success === false) { error.value = body?.message || '加载月份名单失败'; return }
     monthlyView.value = unwrap(response)
     monthlyPage.value = monthlyView.value.page || 1
-    const choices = { ...monthlyResourceChoice.value }
-    for (const item of monthlyView.value.items || []) {
-      const id = String(item.tmdb_id)
-      if (!item.resources?.some(option => option.id === choices[id])) choices[id] = item.resources?.[0]?.id || ''
-    }
-    monthlyResourceChoice.value = choices
   } catch (err) {
     error.value = err?.message || '加载月份名单失败'
   } finally {
@@ -272,7 +259,6 @@ async function openMonthly(task) {
   monthlyPage.value = 1
   monthlyMinScore.value = Math.max(7, Number(task.min_score || 0))
   monthlySelected.value = []
-  monthlyResourceChoice.value = {}
   monthlySearch.value = ''
   monthlyStatus.value = 'all'
   dialog.value = 'monthly'
@@ -294,42 +280,14 @@ async function openMonthlyArchive(archive) {
   annualReleaseMonth.value = 0
   annualCategory.value = 'all'
   monthlySelected.value = []
-  monthlyResourceChoice.value = {}
   monthlySearch.value = ''
   monthlyStatus.value = 'all'
   dialog.value = 'monthly'
   if (archive.latest || archive.tasks?.length) await loadMonthly()
-  if (archive.latest) await searchMonthlyResources()
-}
-async function searchMonthlyResources(force = false) {
-  if (!monthlyArchiveYear.value) return
-  await runAction('monthly_resource_scan', {
-    year: monthlyArchiveYear.value, month: monthlyArchiveMonth.value,
-    min_score: monthlyMinScore.value, force,
-  })
-  await loadMonthly()
-}
-async function refreshMonthlyMovie(item) {
-  if (!monthlyArchiveYear.value || !item?.tmdb_id) return
-  await runAction('monthly_resource_scan', {
-    year: monthlyArchiveYear.value, month: monthlyArchiveMonth.value,
-    min_score: monthlyMinScore.value, force: true, tmdb_id: String(item.tmdb_id),
-  })
-  await loadMonthly()
-}
-async function matchMonthlySelected() {
-  if (!monthlySelected.value.length || !monthlyArchiveYear.value) return
-  await runAction('monthly_resource_scan', {
-    year: monthlyArchiveYear.value, month: monthlyArchiveMonth.value,
-    min_score: monthlyMinScore.value, force: true, tmdb_ids: monthlySelected.value,
-  })
-  await loadMonthly()
 }
 async function downloadMonthlySelected() {
   if (!monthlySelected.value.length) return
-  const selections = monthlySelected.value.map(tmdb_id => ({
-    tmdb_id, resource_id: monthlyResourceChoice.value[tmdb_id] || '',
-  }))
+  const selections = monthlySelected.value.map(tmdb_id => ({ tmdb_id }))
   await runAction('monthly_batch_download', {
     year: monthlyArchiveYear.value, month: monthlyArchiveMonth.value, selections,
   })
@@ -623,13 +581,12 @@ function startRefresh() {
   monthlyRefreshTimer = window.setInterval(async () => {
     if (dialog.value !== 'monthly' || monthlyBusy.value) return
     monthlyRefreshTick += 1
-    if (!monthlyView.value.batch_progress?.running && !monthlyView.value.resource_progress?.running && monthlyRefreshTick % 3 !== 0) return
+    if (!monthlyView.value.batch_progress?.running && monthlyRefreshTick % 3 !== 0) return
     if (!monthlyArchiveYear.value && monthlyTaskId.value) {
       const task = (state.value.monthly_tasks || []).find(item => item.id === monthlyTaskId.value)
       if (task?.scan_state === 'complete') {
         monthlyArchiveYear.value = Number(task.year)
         monthlyArchiveMonth.value = Number(task.month)
-        await searchMonthlyResources()
       }
     }
     await loadMonthly()
@@ -953,25 +910,16 @@ onUnmounted(() => {
             <VSelect v-model="monthlyPageSize" :items="[{ title: '20', value: 20 }, { title: '50', value: 50 }, { title: '100', value: 100 }, { title: '1000（全部）', value: 1000 }]" label="每页条数" density="compact" hide-details style="max-width: 155px" @update:model-value="monthlyPage = 1; loadMonthly()" />
           </div>
           <div v-if="monthlyArchiveYear" class="d-flex flex-wrap align-center justify-start ga-2 mb-3">
-            <VBtn variant="tonal" :loading="loading" @click="monthlyPage = 1; searchMonthlyResources()">按评分查资源</VBtn>
-            <VBtn variant="tonal" :loading="loading" @click="monthlyPage = 1; searchMonthlyResources(true)">重新查站点</VBtn>
             <VBtn variant="tonal" :loading="monthlyBusy" @click="loadMonthly(true)">立即核对 Emby</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-3">名单也显示暂未匹配资源的影片，可勾选后点击“匹配 PT 站资源”，或直接下载时逐部搜索一次；已有资源优先使用本次搜索得到的链接。{{ Number(monthlyArchiveMonth) === 0 ? '全年名单在后台逐部查询' : '每批优先查 60 部评价人数最多的电影' }}。提交前仍核验 Emby、MoviePilot 下载状态和硬盘保护；同片只保留一条等候任务。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
-          <div v-if="monthlyView.resource_progress?.total" class="mb-3">
-            <div class="text-caption">本批查询 {{ monthlyView.resource_progress.done || 0 }}/{{ monthlyView.resource_progress.total }} · 全月已核对 {{ (monthlyView.resource_progress.checked || 0) + (monthlyView.resource_progress.done || 0) }}/{{ monthlyView.resource_progress.candidates || 0 }} · 本批匹配 {{ monthlyView.resource_progress.found || 0 }} 部 · 异常 {{ monthlyView.resource_progress.errors || 0 }} 部{{ monthlyView.resource_progress.running ? ' · 查询中' : ' · 本批完成' }}</div>
-            <VProgressLinear :model-value="100 * (monthlyView.resource_progress.done || 0) / monthlyView.resource_progress.total" color="primary" height="6" rounded class="mt-1" />
-            <div v-if="monthlyView.resource_progress.message" class="text-caption mt-2">{{ monthlyView.resource_progress.message }}</div>
-            <VBtn v-if="Number(monthlyArchiveMonth) !== 0 && !monthlyView.resource_progress.running && (monthlyView.resource_progress.checked || 0) + (monthlyView.resource_progress.done || 0) < (monthlyView.resource_progress.candidates || 0)" class="mt-2" variant="tonal" @click="searchMonthlyResources()">继续查后 60 部</VBtn>
-          </div>
-          <div v-if="monthlyView.batch_progress?.total" class="text-caption mb-3">批量下载：已处理 {{ monthlyView.batch_progress.done || 0 }}/{{ monthlyView.batch_progress.total }} · 已提交 {{ monthlyView.batch_progress.submitted || 0 }} · 等候 {{ monthlyView.batch_progress.queued || 0 }} · 跳过 {{ monthlyView.batch_progress.skipped || 0 }} · 失败 {{ monthlyView.batch_progress.errors || 0 }}</div>
+          <div class="text-caption text-medium-emphasis mb-3">电影名单只读取 TMDB，不提前查询 PT 站。选中后点击“下载选中”，系统会先核对 Emby 和 MoviePilot 下载状态，再按随机下载的规则逐部搜索资源；找到才提交或进入等候队列。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
+          <div v-if="monthlyView.batch_progress?.total" class="text-caption mb-3">批量下载：已处理 {{ monthlyView.batch_progress.done || 0 }}/{{ monthlyView.batch_progress.total }} · 已提交 {{ monthlyView.batch_progress.submitted || 0 }} · 等候 {{ monthlyView.batch_progress.queued || 0 }} · 跳过 {{ monthlyView.batch_progress.skipped || 0 }} · 失败 {{ monthlyView.batch_progress.errors || 0 }}<span v-if="monthlyView.batch_progress.message" class="text-error"> · {{ monthlyView.batch_progress.message }}</span></div>
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <VBtn size="small" variant="tonal" :disabled="!(monthlyView.items || []).some(monthlyCanDownload)" @click="selectMonthlyPage">全选当前页</VBtn>
             <VBtn size="small" variant="text" :disabled="!monthlySelected.length" @click="monthlySelected = []">清空选择</VBtn>
-            <VBtn size="small" variant="tonal" color="primary" :disabled="!monthlySelected.length || !monthlyArchiveYear" @click="matchMonthlySelected">匹配 PT 站资源（{{ monthlySelected.length }}）</VBtn>
             <VBtn size="small" color="success" :disabled="!monthlySelected.length || !monthlyArchiveYear || !controlForm.enabled" @click="downloadMonthlySelected">下载选中 {{ monthlySelected.length }} 部</VBtn>
           </div>
-          <div v-if="!monthlyView.items?.length" class="text-center text-medium-emphasis pa-8">{{ monthlyView.resource_progress?.running ? '正在查找符合 MP 规则的资源，找到后会逐步显示…' : '暂无符合当前筛选条件的电影' }}</div>
+          <div v-if="!monthlyView.items?.length" class="text-center text-medium-emphasis pa-8">暂无符合当前筛选条件的电影</div>
           <div v-else class="monthly-movie-list">
             <div v-for="item in monthlyView.items" :key="item.tmdb_id" class="monthly-movie-row">
               <div class="monthly-row-check"><VCheckboxBtn :model-value="monthlySelected.includes(String(item.tmdb_id))" :disabled="!monthlyCanDownload(item)" density="compact" @update:model-value="toggleMonthlyMovie(item, $event)" /></div>
@@ -981,12 +929,6 @@ onUnmounted(() => {
                 <a class="monthly-row-title" :href="`https://www.themoviedb.org/movie/${item.tmdb_id}?language=zh-CN`" target="_blank" rel="noopener noreferrer">{{ movieTitle(item) }} ({{ item.year }})</a>
                 <div v-if="item.original_title && item.original_title !== movieTitle(item)" class="monthly-row-subtitle">{{ item.original_title }}</div>
                 <div class="monthly-row-subtitle">{{ item.release_date || '日期未知' }}</div>
-                <div class="monthly-resource-options">
-                  <button v-for="option in item.resources || []" :key="option.id" type="button" class="monthly-resource-option" :class="{ 'monthly-resource-active': monthlyResourceChoice[String(item.tmdb_id)] === option.id }" :title="option.title" @click="monthlyResourceChoice[String(item.tmdb_id)] = option.id">
-                    {{ option.resolution }} · {{ option.size_gb }} GB · 做种 {{ option.seeders }} · {{ option.site }}
-                  </button>
-                  <VBtn v-if="!item.resources?.length && monthlyArchiveYear && monthlyCanDownload(item)" size="x-small" variant="tonal" :loading="loading && monthlyView.resource_progress?.target_tmdb_id === String(item.tmdb_id)" @click="refreshMonthlyMovie(item)">无可选资源 · 单片重查</VBtn>
-                </div>
               </div>
               <div class="monthly-row-score">⭐ {{ Number(item.score || 0).toFixed(1) }}<span class="monthly-row-votes">{{ item.vote_count || 0 }} 人评价</span></div>
               <VChip size="small" :color="monthlyStatusMeta[item.status]?.color || 'secondary'" class="monthly-row-status">{{ monthlyStatusLabel(item) }}</VChip>
