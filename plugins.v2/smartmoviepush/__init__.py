@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.49"
+    plugin_version = "0.9.50"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2137,7 +2137,9 @@ class SmartMoviePush(_PluginBase):
             delay = cls._pt_next_request_at - now
             if delay > 0:
                 time.sleep(delay)
-            cls._pt_next_request_at = time.monotonic() + 12
+            # 馒头官方建议 /torrent/search 近 24 小时不超过约 1000 次；
+            # 本插件留出余量给 MoviePilot 其他搜索，平均最多约 576 次/天。
+            cls._pt_next_request_at = time.monotonic() + 150
             try:
                 response = RequestUtils(
                     headers={"Content-Type": "application/json",
@@ -2161,8 +2163,8 @@ class SmartMoviePush(_PluginBase):
             if not isinstance(data, dict):
                 message = str(payload.get("message") or "接口未返回数据") if isinstance(payload, dict) else "接口未返回数据"
                 if "頻繁" in message or "频繁" in message or str(payload.get("code")) == "4":
-                    cls._pt_cooldown_until = time.monotonic() + 300
-                    raise PTSearchUnavailable("馒头接口请求过于频繁，已暂停站点查询 5 分钟；不会标记为无资源")
+                    cls._pt_cooldown_until = time.monotonic() + 3600
+                    raise PTSearchUnavailable("馒头接口请求过于频繁，已暂停站点查询 1 小时；不会标记为无资源")
                 raise PTSearchUnavailable(f"馒头接口错误：{message[:100]}；未缓存为无资源")
             rows = data.get("data") or []
             if not isinstance(rows, list):
