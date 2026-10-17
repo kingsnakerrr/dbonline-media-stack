@@ -116,7 +116,7 @@ const archiveMonths = computed(() => Array.from({ length: 12 }, (_, index) => {
 const selectedMonthTasks = computed(() => (state.value.monthly_tasks || []).filter(item =>
   Number(item.year) === Number(monthlyArchiveYear.value || monthlyView.value.task?.year)
   && Number(item.month) === Number(monthlyArchiveMonth.value || monthlyView.value.task?.month)))
-const monthlyCanDownload = item => ['candidate', 'pushed', 'queued'].includes(item.status)
+const monthlyCanDownload = item => ['candidate', 'no_resource', 'pushed', 'queued'].includes(item.status)
 function selectMonthlyPage() {
   const values = new Set(monthlySelected.value)
   const choices = { ...monthlyResourceChoice.value }
@@ -946,14 +946,16 @@ onUnmounted(() => {
           <template v-if="monthlyArchiveYear || monthlyTaskId">
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <VTextField v-model.number="monthlyMinScore" label="最低评分" type="number" min="0" max="10" step="0.1" density="compact" hide-details style="max-width: 125px" />
-            <VBtn v-if="monthlyArchiveYear" variant="tonal" :loading="loading" @click="monthlyPage = 1; searchMonthlyResources()">按评分查资源</VBtn>
-            <VBtn v-if="monthlyArchiveYear" variant="text" :loading="loading" @click="monthlyPage = 1; searchMonthlyResources(true)">重新查站点</VBtn>
             <VSelect v-if="Number(monthlyArchiveMonth) === 0" v-model="annualCategory" :items="[{ title: '全部电影', value: 'all' }, { title: '主流电影', value: 'mainstream' }, { title: '高口碑电影', value: 'high_quality' }]" label="类型" density="compact" hide-details style="min-width: 155px; max-width: 180px" />
             <VSelect v-if="Number(monthlyArchiveMonth) === 0" v-model="annualReleaseMonth" :items="[{ title: '全年', value: 0 }, ...Array.from({ length: 12 }, (_, index) => ({ title: `${index + 1} 月`, value: index + 1 }))]" label="上映月份" density="compact" hide-details style="min-width: 135px; max-width: 155px" />
             <VSelect v-model="monthlyStatus" :items="monthlyStatusOptions.map(item => ({ title: `${item.title} ${monthlyView.counts?.[item.value] ?? (item.value === 'all' ? monthlyView.task?.candidate_count || 0 : 0)}`, value: item.value }))" label="状态" density="compact" hide-details style="min-width: 190px; max-width: 250px" />
             <VTextField v-model="monthlySearch" label="搜索电影或 TMDB ID" prepend-inner-icon="mdi-magnify" clearable density="compact" hide-details style="min-width: 220px" />
             <VSelect v-model="monthlyPageSize" :items="[{ title: '20', value: 20 }, { title: '50', value: 50 }, { title: '100', value: 100 }, { title: '1000（全部）', value: 1000 }]" label="每页条数" density="compact" hide-details style="max-width: 155px" @update:model-value="monthlyPage = 1; loadMonthly()" />
             <VBtn variant="tonal" :loading="monthlyBusy" @click="loadMonthly(true)">立即核对 Emby</VBtn>
+          </div>
+          <div v-if="monthlyArchiveYear" class="d-flex flex-wrap justify-end ga-2 mb-3">
+            <VBtn variant="tonal" :loading="loading" @click="monthlyPage = 1; searchMonthlyResources()">按评分查资源</VBtn>
+            <VBtn variant="tonal" :loading="loading" @click="monthlyPage = 1; searchMonthlyResources(true)">重新查站点</VBtn>
           </div>
           <div class="text-caption text-medium-emphasis mb-3">名单也显示暂未匹配资源的影片，可勾选后点击“匹配 PT 站资源”，或直接下载时逐部搜索一次；已有资源优先使用本次搜索得到的链接。{{ Number(monthlyArchiveMonth) === 0 ? '全年名单在后台逐部查询' : '每批优先查 60 部评价人数最多的电影' }}。提交前仍核验 Emby、MoviePilot 下载状态和硬盘保护；同片只保留一条等候任务。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
           <div v-if="monthlyView.resource_progress?.total" class="mb-3">
@@ -983,7 +985,7 @@ onUnmounted(() => {
                   <button v-for="option in item.resources || []" :key="option.id" type="button" class="monthly-resource-option" :class="{ 'monthly-resource-active': monthlyResourceChoice[String(item.tmdb_id)] === option.id }" :title="option.title" @click="monthlyResourceChoice[String(item.tmdb_id)] = option.id">
                     {{ option.resolution }} · {{ option.size_gb }} GB · 做种 {{ option.seeders }} · {{ option.site }}
                   </button>
-                  <VBtn v-if="!item.resources?.length && monthlyArchiveYear && ['candidate', 'pushed', 'queued'].includes(item.status)" size="x-small" variant="tonal" :loading="loading && monthlyView.resource_progress?.target_tmdb_id === String(item.tmdb_id)" @click="refreshMonthlyMovie(item)">无可选资源 · 单片重查</VBtn>
+                  <VBtn v-if="!item.resources?.length && monthlyArchiveYear && monthlyCanDownload(item)" size="x-small" variant="tonal" :loading="loading && monthlyView.resource_progress?.target_tmdb_id === String(item.tmdb_id)" @click="refreshMonthlyMovie(item)">无可选资源 · 单片重查</VBtn>
                 </div>
               </div>
               <div class="monthly-row-score">⭐ {{ Number(item.score || 0).toFixed(1) }}<span class="monthly-row-votes">{{ item.vote_count || 0 }} 人评价</span></div>
@@ -1098,7 +1100,7 @@ onUnmounted(() => {
 .monthly-month-name { font-size: 16px; font-weight: 700; }
 .monthly-month-summary { font-size: 12px; opacity: .78; }
 .monthly-movie-list { border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 10px; overflow: hidden; }
-.monthly-movie-row { display: grid; grid-template-columns: 28px 52px minmax(0, 1fr) 80px 138px; align-items: center; column-gap: 12px; min-height: 88px; padding: 8px 14px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .10); }
+.monthly-movie-row { display: grid; grid-template-columns: 28px 52px minmax(0, 1fr) 86px 200px; align-items: center; column-gap: 12px; min-height: 88px; padding: 8px 14px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .10); }
 .monthly-row-check { width: 28px; min-width: 28px; justify-self: start; }
 .monthly-row-check :deep(.v-selection-control) { min-width: 28px; width: 28px; }
 .monthly-movie-row:last-child { border-bottom: 0; }
@@ -1112,9 +1114,9 @@ onUnmounted(() => {
 .monthly-resource-options { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
 .monthly-resource-option { max-width: 100%; padding: 4px 7px; border: 1px solid rgba(var(--v-theme-on-surface), .18); border-radius: 6px; color: inherit; font-size: 11px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .monthly-resource-active { color: rgb(var(--v-theme-primary)); border-color: rgb(var(--v-theme-primary)); background: rgba(var(--v-theme-primary), .12); }
-.monthly-row-score { width: 80px; justify-self: end; text-align: right; font-weight: 600; }
+.monthly-row-score { width: 86px; justify-self: start; text-align: left; font-weight: 600; }
 .monthly-row-votes { display: block; font-size: 11px; font-weight: 400; opacity: .65; }
-.monthly-row-status { width: max-content; max-width: 138px; justify-self: start; white-space: nowrap; }
+.monthly-row-status { width: max-content; max-width: 200px; justify-self: start; white-space: nowrap; }
 @media (max-width: 850px) { .monthly-month-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .monthly-month-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .monthly-movie-row { grid-template-columns: 28px 44px minmax(0, 1fr); gap: 8px; padding: 8px; } .monthly-row-poster { width: 44px; height: 62px; } .monthly-row-score { grid-column: 3; width: auto; } .monthly-row-status { grid-column: 3; } .monthly-row-votes { display: none; } }
 </style>

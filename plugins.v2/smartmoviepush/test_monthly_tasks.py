@@ -415,15 +415,36 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._load_download_queue = lambda: []
         self.subject._load_recent_pushes = lambda: {}
         self.subject._load_suppressed = lambda: {}
-        self.subject._load_scan_cache = lambda **_kwargs: {}
+        self.subject._load_scan_cache = lambda **_kwargs: {"2": {"status": "no_resource"}}
         self.subject._library_snapshot_for_scan = lambda **_kwargs: {"tmdb_ids": set()}
         result = self.subject._api_secure_monthly({
             "archive_key": key, "resources_only": True, "min_score": 7,
-            "access_token": "test",
+            "status": "not_downloaded", "access_token": "test",
         })
         self.assertEqual(result["data"]["total"], 2)
         unmatched = next(item for item in result["data"]["items"] if item["tmdb_id"] == 2)
+        self.assertEqual(unmatched["status"], "no_resource")
         self.assertEqual(unmatched["resources"], [])
+
+    def test_new_pt_match_replaces_stale_no_resource_status(self):
+        task = {"year": 2026, "month": 0, "min_score": 7, "scanned_at": "2026-12-31"}
+        key = self.subject._save_monthly_archive(task, [
+            {"tmdb_id": 2, "release_date": "2026-01-03", "score": 8, "title": "重新找到资源"},
+        ])
+        self.subject._valid_access_token = lambda _token: True
+        self.subject._load_monthly_resource_cache = lambda *_args: {"2": [{"id": "new-match"}]}
+        self.subject._load_stats_history = lambda: []
+        self.subject._load_download_queue = lambda: []
+        self.subject._load_recent_pushes = lambda: {}
+        self.subject._load_suppressed = lambda: {}
+        self.subject._load_scan_cache = lambda **_kwargs: {"2": {"status": "no_resource"}}
+        self.subject._library_snapshot_for_scan = lambda **_kwargs: {"tmdb_ids": set()}
+        result = self.subject._api_secure_monthly({
+            "archive_key": key, "resources_only": True, "min_score": 7,
+            "status": "not_downloaded", "access_token": "test",
+        })
+        self.assertEqual(result["data"]["total"], 1)
+        self.assertEqual(result["data"]["items"][0]["status"], "candidate")
 
     def test_annual_list_shows_random_queue_and_filters_not_downloaded(self):
         task = {"year": 2026, "month": 0, "min_score": 7, "scanned_at": "2026-12-31"}

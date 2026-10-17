@@ -47,7 +47,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.46"
+    plugin_version = "0.9.47"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1442,6 +1442,9 @@ class SmartMoviePush(_PluginBase):
             else:
                 status = {"library": "library", "no_resource": "no_resource"}.get(
                     (cache.get(movie_id) or {}).get("status"), "candidate")
+            if status in {"candidate", "no_resource"} and resources_only and movie_id in resources:
+                # 年度 PT 重查结果比随机扫描的旧缓存更接近当前站点状态。
+                status = "candidate" if options else "no_resource"
             counts[status] = counts.get(status, 0) + 1
             rows.append({key: value for key, value in item.items() if key != "info"} |
                         {"status": status, "resources": options,
@@ -1450,7 +1453,7 @@ class SmartMoviePush(_PluginBase):
         rows.sort(key=lambda item: (-int(item.get("vote_count") or 0),
                                     -float(item.get("score") or 0), str(item.get("tmdb_id"))))
         counts["all"] = len(rows)
-        counts["not_downloaded"] = sum(row["status"] in {"candidate", "pushed", "queued"} for row in rows)
+        counts["not_downloaded"] = sum(row["status"] in {"candidate", "no_resource", "pushed", "queued"} for row in rows)
         search = str(payload.get("search") or "").strip().casefold()[:100]
         if search:
             rows = [item for item in rows if search in str(item.get("display_title") or item.get("title") or "").casefold()
@@ -1458,7 +1461,7 @@ class SmartMoviePush(_PluginBase):
                     or search in str(item.get("tmdb_id") or "")]
         status_filter = str(payload.get("status") or "all")
         if status_filter == "not_downloaded":
-            rows = [item for item in rows if item["status"] in {"candidate", "pushed", "queued"}]
+            rows = [item for item in rows if item["status"] in {"candidate", "no_resource", "pushed", "queued"}]
         elif status_filter != "all":
             rows = [item for item in rows if item["status"] == status_filter]
         total = len(rows)
