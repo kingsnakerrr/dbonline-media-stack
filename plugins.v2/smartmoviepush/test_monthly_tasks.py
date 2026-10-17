@@ -290,6 +290,24 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertEqual(first["poster_path"], "/1.jpg")
         self.assertEqual(self.subject._load_monthly_archive(task["scan_key"])["candidate_count"], 3)
 
+    def test_annual_scan_error_identifies_rejected_tmdb_window(self):
+        class RejectingDiscover(FakeDiscover):
+            def _request_obj(self, _url, _params, **_kwargs):
+                raise RuntimeError("Invalid parameters: Your request parameters are incorrect.")
+
+        original = namespace["TmdbApi"]
+        namespace["TmdbApi"] = lambda language: SimpleNamespace(discover=RejectingDiscover())
+        self.addCleanup(lambda: namespace.__setitem__("TmdbApi", original))
+        self.store["monthly_movie_tasks"] = [{
+            "id": "year2024", "year": 2024, "month": 0, "min_score": 6.0,
+            "min_votes": 50, "scan_state": "pending", "candidates": [],
+        }]
+        self.subject._scan_monthly_task("year2024")
+        task = self.subject._monthly_task("year2024")
+        self.assertEqual(task["scan_state"], "error")
+        self.assertIn("2024 年 1 月 1–31 日", task["scan_error"])
+        self.assertIn("Invalid parameters", task["scan_error"])
+
     def test_annual_scan_keeps_mainstream_below_score_floor_and_deduplicates(self):
         class AnnualDiscover(FakeDiscover):
             def _request_obj(self, _url, _params, **_kwargs):

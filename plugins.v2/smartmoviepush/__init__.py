@@ -47,7 +47,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.47"
+    plugin_version = "0.9.48"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2389,8 +2389,13 @@ class SmartMoviePush(_PluginBase):
                         params["vote_average.gte"] = minimum
                         if min_votes:
                             params["vote_count.gte"] = min_votes
-                    response = discover._request_obj(
-                        discover._urls["movies"], urlencode(params), key=None, call_cached=False)
+                    try:
+                        response = discover._request_obj(
+                            discover._urls["movies"], urlencode(params), key=None, call_cached=False)
+                    except Exception as err:
+                        raise RuntimeError(
+                            f"TMDB {year} 年 {scan_month} 月 {first}–{last} 日"
+                            f"（{profile}，第 {page} 页）查询失败：{err}") from err
                     if not isinstance(response, dict) or not isinstance(response.get("results"), list):
                         raise RuntimeError(f"TMDB 第 {page} 页未返回有效结果，扫描未完成")
                     raw = response["results"]

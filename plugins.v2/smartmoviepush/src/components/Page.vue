@@ -819,7 +819,7 @@ onUnmounted(() => {
         <div class="text-h6">按年份筛选电影</div>
         <VChip size="small" color="primary">{{ (state.monthly_tasks || []).length }}/5</VChip>
       </div>
-      <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；名单分“主流”和“高口碑”，也可以按上映月份筛选。资源查询在后台进行，最多同时保留 5 个自动任务。</div>
+      <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；创建任务只保存电影名单，不会开始下载。扫描完成后可勾选电影手动下载，或点击“启动自动下载”按每轮数量定时下载；最多保留 5 个自动任务。</div>
       <VRow dense class="mb-3">
         <VCol cols="12" sm="4"><VCard variant="tonal" color="info" class="pa-3 h-100 list-card" @click="openActive('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度正在下载</div><div class="text-h6 font-weight-bold">{{ annualActiveItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
         <VCol cols="12" sm="4"><VCard variant="tonal" color="secondary" class="pa-3 h-100 list-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度等候下载</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
@@ -924,7 +924,7 @@ onUnmounted(() => {
               <VTextField v-model.number="monthlyForm.min_score" label="TMDB 最低评分" type="number" min="0" max="10" step="0.1" density="comfortable" hide-details style="max-width: 190px" />
               <VTextField v-if="Number(monthlyForm.month) === 0" v-model.number="monthlyForm.min_votes" label="高口碑最低评价人数" type="number" min="0" max="10000" density="comfortable" hide-details style="max-width: 200px" />
               <VTextField v-model.number="monthlyForm.batch_size" label="自动任务每轮下载（部）" type="number" min="1" max="50" density="comfortable" hide-details style="max-width: 210px" />
-              <VBtn color="primary" variant="tonal" size="default" :loading="loading" :disabled="!monthlyForm.task_id && (state.monthly_tasks || []).length >= 5" @click="saveMonthly">{{ monthlyForm.task_id ? '保存并重扫' : '创建并扫描' }}</VBtn>
+              <VBtn color="primary" variant="tonal" size="default" :loading="loading" :disabled="!monthlyForm.task_id && (state.monthly_tasks || []).length >= 5" @click="saveMonthly">{{ monthlyForm.task_id ? '保存并重扫' : '创建并扫描（不下载）' }}</VBtn>
               <VBtn v-if="monthlyForm.task_id" variant="text" size="default" @click="monthlyEditMode = false">取消</VBtn>
             </div>
             <div v-if="!monthlyForm.task_id && (state.monthly_tasks || []).length >= 5" class="text-caption text-warning mt-2">已有 5 个任务，请先删除不需要的任务；已保存的月份名单不受删除影响。</div>
@@ -935,14 +935,14 @@ onUnmounted(() => {
               <div class="d-flex flex-wrap ga-2">
                 <VBtn size="default" variant="tonal" @click="editMonthly(task)">编辑任务</VBtn>
                 <VBtn size="default" variant="tonal" :disabled="task.scan_state === 'running'" @click="runAction('monthly_rescan', { task_id: task.id })">重扫</VBtn>
-                <VBtn v-if="!task.active" size="default" color="success" variant="tonal" :disabled="task.scan_state !== 'complete' || !controlForm.enabled" @click="runAction('monthly_start', { task_id: task.id })">自动下载</VBtn>
-                <VBtn v-else size="default" color="warning" variant="tonal" @click="runAction('monthly_pause', { task_id: task.id })">暂停</VBtn>
+                <VBtn v-if="!task.active" size="default" color="success" variant="tonal" :disabled="task.scan_state !== 'complete' || !controlForm.enabled" @click="runAction('monthly_start', { task_id: task.id })">启动自动下载</VBtn>
+                <VBtn v-else size="default" color="warning" variant="tonal" @click="runAction('monthly_pause', { task_id: task.id })">暂停自动下载</VBtn>
                 <VBtn size="default" color="error" variant="tonal" @click="runAction('monthly_delete', { task_id: task.id })">删除任务</VBtn>
               </div>
             </div>
           </div>
           <VBtn v-if="monthlyArchiveYear && !selectedMonthTasks.length && !monthlyEditMode" size="default" variant="tonal" class="mb-3" @click="monthlyEditMode = true">创建年度自动任务</VBtn>
-          <VAlert v-if="!monthlyArchiveYear && !monthlyTaskId" type="info" variant="tonal" class="mb-3">此年度尚未扫描。设置最低评分和评价人数后点击“创建并扫描”；扫描时间可能较长，完成后可查看资源并选择下载。</VAlert>
+          <VAlert v-if="!monthlyArchiveYear && !monthlyTaskId" type="info" variant="tonal" class="mb-3">此年度尚未扫描。设置最低评分和评价人数后点击“创建并扫描（不下载）”；扫描可能较长，完成后可手动选择下载或启动自动任务。</VAlert>
           <template v-if="monthlyArchiveYear || monthlyTaskId">
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <VTextField v-model.number="monthlyMinScore" label="最低评分" type="number" min="0" max="10" step="0.1" density="compact" hide-details style="max-width: 125px" />
@@ -951,11 +951,11 @@ onUnmounted(() => {
             <VSelect v-model="monthlyStatus" :items="monthlyStatusOptions.map(item => ({ title: `${item.title} ${monthlyView.counts?.[item.value] ?? (item.value === 'all' ? monthlyView.task?.candidate_count || 0 : 0)}`, value: item.value }))" label="状态" density="compact" hide-details style="min-width: 190px; max-width: 250px" />
             <VTextField v-model="monthlySearch" label="搜索电影或 TMDB ID" prepend-inner-icon="mdi-magnify" clearable density="compact" hide-details style="min-width: 220px" />
             <VSelect v-model="monthlyPageSize" :items="[{ title: '20', value: 20 }, { title: '50', value: 50 }, { title: '100', value: 100 }, { title: '1000（全部）', value: 1000 }]" label="每页条数" density="compact" hide-details style="max-width: 155px" @update:model-value="monthlyPage = 1; loadMonthly()" />
-            <VBtn variant="tonal" :loading="monthlyBusy" @click="loadMonthly(true)">立即核对 Emby</VBtn>
           </div>
-          <div v-if="monthlyArchiveYear" class="d-flex flex-wrap justify-end ga-2 mb-3">
+          <div v-if="monthlyArchiveYear" class="d-flex flex-wrap align-center justify-start ga-2 mb-3">
             <VBtn variant="tonal" :loading="loading" @click="monthlyPage = 1; searchMonthlyResources()">按评分查资源</VBtn>
             <VBtn variant="tonal" :loading="loading" @click="monthlyPage = 1; searchMonthlyResources(true)">重新查站点</VBtn>
+            <VBtn variant="tonal" :loading="monthlyBusy" @click="loadMonthly(true)">立即核对 Emby</VBtn>
           </div>
           <div class="text-caption text-medium-emphasis mb-3">名单也显示暂未匹配资源的影片，可勾选后点击“匹配 PT 站资源”，或直接下载时逐部搜索一次；已有资源优先使用本次搜索得到的链接。{{ Number(monthlyArchiveMonth) === 0 ? '全年名单在后台逐部查询' : '每批优先查 60 部评价人数最多的电影' }}。提交前仍核验 Emby、MoviePilot 下载状态和硬盘保护；同片只保留一条等候任务。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
           <div v-if="monthlyView.resource_progress?.total" class="mb-3">
