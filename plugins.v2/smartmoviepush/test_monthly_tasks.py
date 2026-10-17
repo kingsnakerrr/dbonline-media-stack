@@ -7,6 +7,7 @@ import re
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timezone
@@ -20,12 +21,16 @@ SOURCE = Path(__file__).with_name("__init__.py")
 tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
 plugin = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "SmartMoviePush")
 methods = {"_load_monthly_tasks", "_monthly_task", "_update_monthly_task",
-           "_production_country_codes", "_scan_monthly_task", "_api_monthly_action",
+           "_scan_monthly_task", "_api_monthly_action",
            "_monthly_scan_key", "_monthly_archive", "_save_monthly_archive",
            "_load_monthly_archive", "_load_monthly_archive_month", "_monthly_archive_summaries", "_api_secure_monthly",
            "_chinese_movie_title", "_monthly_resource_rank", "_monthly_resource_options",
-           "_torrent_identity", "_start_monthly_batch_download", "_start_monthly_resource_scan",
-           "_load_download_queue", "_remove_queued_movie", "_submit_download",
+           "_torrent_identity", "_start_monthly_batch_download", "_run_monthly_batch_download",
+           "_remember_monthly_resource_contexts", "_cached_monthly_resource_context",
+           "_start_monthly_resource_scan",
+           "_scan_monthly_resources", "_load_monthly_resource_cache", "_save_monthly_resource_cache",
+           "_load_download_queue", "_remove_queued_movie", "_mp_active_movie_ids",
+           "_submit_download", "_api_clear_queue",
            "process_download_queue"}
 selected = [node for node in plugin.body if isinstance(node, ast.FunctionDef) and node.name in methods]
 
@@ -34,8 +39,11 @@ class FakeDiscover:
     _urls = {"movies": "discover/movie"}
 
     def _request_obj(self, _url, _params, **_kwargs):
+        self.last_params = _params
+        assert "language=" not in _params, "TMDB client appends language automatically"
         return {"total_pages": 1, "results": [
-            {"id": 1, "title": "美国电影", "release_date": "2026-01-02", "vote_average": 8.0},
+            {"id": 1, "title": "美国电影", "release_date": "2026-01-02", "vote_average": 8.0,
+             "poster_path": "/1.jpg"},
             {"id": 2, "title": "台湾电影", "release_date": "2026-01-03", "vote_average": 7.4},
             {"id": 3, "title": "其他地区", "release_date": "2026-01-04", "vote_average": 9.0},
         ]}
@@ -44,6 +52,7 @@ class FakeDiscover:
 class FakeTmdbApi:
     def __init__(self, language=None):
         assert language == "zh-CN"
+        self.discover = FakeDiscover()
 
     def get_info(self, _type, movie_id):
         countries = {1: "US", 2: "TW", 3: "IN"}
@@ -60,7 +69,7 @@ class NoopThread:
 
 
 namespace = {
-    "calendar": calendar, "datetime": datetime,
+    "calendar": calendar, "datetime": datetime, "time": time,
     "sqlite3": sqlite3, "json": json, "re": re, "closing": closing,
     "hashlib": __import__("hashlib"),
     "Context": SimpleNamespace,
@@ -99,14 +108,46 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._queue_lock = threading.RLock()
         self.subject._download_queue_key = "download_queue"
         self.subject._enabled = True
+        self.subject._max_active_downloads = 10
         self.subject._disk_guard_blocks_new = lambda: False
         self.subject.get_data_path = lambda: Path(self.tempdir.name)
-        self.subject._allowed_countries = {"US", "TW", "JP", "KR", "CN", "HK"}
         self.store = {}
         self.subject.get_data = self.store.get
         self.subject.save_data = self.store.__setitem__
         self.logs = []
         self.subject._append_plugin_log = lambda *args: self.logs.append(args)
+
+    def test_queue_removes_movies_already_in_emby_or_active_in_mp(self):
+        self.store["download_queue"] = [
+            {"key": "emby", "tmdb_id": 11, "title": "已入库"},
+            {"key": "mp", "tmdb_id": 22, "title": "MP 下载中"},
+        ]
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": {"11"}}
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [
+            SimpleNamespace(media={"tmdbid": 22})])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        self.subject.process_download_queue()
+        self.assertEqual(self.store["download_queue"], [])
+        self.assertTrue(any("移除 2 条" in log[1] for log in self.logs))
+
+    def test_queue_waits_when_emby_cannot_be_verified(self):
+        self.store["download_queue"] = [{"key": "waiting", "tmdb_id": 33, "title": "待核对"}]
+        self.subject._library_snapshot_for_scan = lambda force=False: None
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        self.subject.process_download_queue()
+        self.assertEqual(len(self.store["download_queue"]), 1)
+
+    def test_clearing_annual_waiting_keeps_random_waiting(self):
+        self.store["download_queue"] = [
+            {"key": "year", "tmdb_id": 1, "source": "annual"},
+            {"key": "random", "tmdb_id": 2, "source": "random"},
+        ]
+        result = self.subject._api_clear_queue("annual")
+        self.assertTrue(result["success"])
+        self.assertEqual([item["key"] for item in self.store["download_queue"]], ["random"])
 
     def test_resource_scan_limits_one_click_to_sixty_top_voted_candidates(self):
         candidates = [{"tmdb_id": index, "score": 7.5, "vote_count": index}
@@ -136,6 +177,81 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(self.subject._monthly_resource_job["total"], 131)
 
+    def test_single_movie_recheck_ignores_empty_cache_and_scans_only_target(self):
+        candidates = [
+            {"tmdb_id": 1136867, "score": 6.3, "vote_count": 1467, "title": "物质主义者"},
+            {"tmdb_id": 2, "score": 8.0, "vote_count": 2000, "title": "其他影片"},
+        ]
+        self.subject._load_monthly_archive_month = lambda *_args: {
+            "min_score": 6, "candidates": candidates}
+        self.subject._load_monthly_resource_cache = lambda *_args: {"1136867": []}
+        self.subject._load_download_queue = lambda: [{"tmdb_id": 1136867, "source": "random"}]
+        self.subject._monthly_resource_scope = lambda: "sites"
+        self.subject._scan_monthly_resources = lambda *_args: None
+        result = self.subject._start_monthly_resource_scan(
+            2025, 0, 6, force=True, target_tmdb_id="1136867")
+        self.assertTrue(result["success"])
+        self.assertEqual(self.subject._monthly_resource_job["total"], 1)
+        self.assertEqual(self.subject._monthly_resource_job["target_tmdb_id"], "1136867")
+
+    def test_single_movie_recheck_jumps_ahead_of_running_annual_scan(self):
+        candidates = [
+            {"tmdb_id": 2, "score": 8, "vote_count": 2000, "title": "其他影片"},
+            {"tmdb_id": 1136867, "score": 6.3, "vote_count": 1467, "title": "物质主义者"},
+        ]
+        self.subject._load_monthly_archive_month = lambda *_args: {
+            "min_score": 6, "candidates": candidates}
+        self.subject._load_monthly_resource_cache = lambda *_args: {"1136867": []}
+        self.subject._load_download_queue = lambda: [{"tmdb_id": 1136867}]
+        self.subject._load_stats_history = lambda: []
+        self.subject._library_snapshot_for_scan = lambda: {"tmdb_ids": set()}
+        self.subject._monthly_resource_scope = lambda: "sites"
+        self.subject._site_ids = [1]
+        self.subject._monthly_resource_options = lambda contexts: [{"id": "found"}] if contexts else []
+        self.subject._remember_monthly_resource_contexts = lambda *_args: None
+        saved, searched = [], []
+        self.subject._save_monthly_resource_cache = lambda _year, _month, movie_id, options: saved.append((movie_id, options))
+        def search_by_id(**kwargs):
+            searched.append(kwargs["tmdbid"])
+            return [SimpleNamespace()] if kwargs["tmdbid"] == 1136867 else []
+        original = namespace.get("SearchChain")
+        namespace["SearchChain"] = lambda: SimpleNamespace(search_by_id=search_by_id)
+        self.addCleanup(lambda: namespace.__setitem__("SearchChain", original))
+        self.assertTrue(self.subject._start_monthly_resource_scan(2025, 0, 6)["success"])
+        self.assertTrue(self.subject._start_monthly_resource_scan(
+            2025, 0, 6, force=True, target_tmdb_id="1136867")["success"])
+        self.assertEqual(self.subject._monthly_resource_job["priority_ids"], ["1136867"])
+        self.subject._scan_monthly_resources(2025, 0, candidates, False)
+        self.assertEqual(searched, [1136867, 2], (self.subject._monthly_resource_job, self.logs))
+        self.assertIn(("1136867", [{"id": "found"}]), saved)
+
+    def test_bulk_recheck_prioritizes_selected_movies_during_scan(self):
+        candidates = [{"tmdb_id": index, "score": 8, "vote_count": index}
+                      for index in range(1, 5)]
+        self.subject._load_monthly_archive_month = lambda *_args: {
+            "min_score": 7, "candidates": candidates}
+        self.subject._load_monthly_resource_cache = lambda *_args: {}
+        self.subject._load_download_queue = lambda: []
+        self.subject._monthly_resource_scope = lambda: "sites"
+        self.subject._scan_monthly_resources = lambda *_args: None
+        self.assertTrue(self.subject._start_monthly_resource_scan(2026, 0, 7)["success"])
+        result = self.subject._start_monthly_resource_scan(
+            2026, 0, 7, force=True, target_tmdb_ids=["1", "3"])
+        self.assertTrue(result["success"])
+        self.assertEqual(self.subject._monthly_resource_job["priority_ids"], ["1", "3"])
+
+    def test_empty_resource_cache_expires_earlier_than_matched_resources(self):
+        self.subject._monthly_resource_scope = lambda: "sites"
+        self.subject._save_monthly_resource_cache(2025, 0, "empty", [])
+        self.subject._save_monthly_resource_cache(2025, 0, "found", [{"id": "torrent"}])
+        with closing(self.subject._monthly_archive()) as db:
+            db.execute("UPDATE monthly_resource_cache SET checked_at=?",
+                       (time.time() - 10 * 60,))
+            db.commit()
+        cached = self.subject._load_monthly_resource_cache(2025, 0)
+        self.assertNotIn("empty", cached)
+        self.assertEqual(cached["found"], [{"id": "torrent"}])
+
     def test_annual_archive_filters_category_and_release_month(self):
         task = {"year": 2026, "month": 0, "min_score": 7, "min_votes": 50,
                 "scanned_at": "2026-10-16"}
@@ -159,7 +275,7 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual([item["tmdb_id"] for item in result["data"]["items"]], [1])
 
-    def test_month_scan_includes_us_taiwan_and_excludes_other_country(self):
+    def test_month_scan_does_not_filter_production_country(self):
         self.store["monthly_movie_tasks"] = [{
             "id": "one", "year": 2026, "month": 1, "min_score": 7.0,
             "scan_state": "pending", "candidates": [],
@@ -167,11 +283,12 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._scan_monthly_task("one")
         task = self.subject._monthly_task("one")
         self.assertEqual(task["scan_state"], "complete")
-        self.assertEqual([item["tmdb_id"] for item in task["candidates"]], [1, 2])
+        self.assertEqual({item["tmdb_id"] for item in task["candidates"]}, {1, 2, 3})
         self.assertTrue(all("info" in item for item in task["candidates"]))
-        self.assertEqual(task["candidates"][0]["display_title"], "中文影片 1")
-        self.assertEqual(task["candidates"][0]["poster_path"], "/1.jpg")
-        self.assertEqual(self.subject._load_monthly_archive(task["scan_key"])["candidate_count"], 2)
+        first = next(item for item in task["candidates"] if item["tmdb_id"] == 1)
+        self.assertEqual(first["display_title"], "美国电影")
+        self.assertEqual(first["poster_path"], "/1.jpg")
+        self.assertEqual(self.subject._load_monthly_archive(task["scan_key"])["candidate_count"], 3)
 
     def test_annual_scan_keeps_mainstream_below_score_floor_and_deduplicates(self):
         class AnnualDiscover(FakeDiscover):
@@ -183,10 +300,9 @@ class MonthlyTasksTest(unittest.TestCase):
                      "vote_count": 80},
                 ]}
 
-        original = namespace["ModuleManager"]
-        namespace["ModuleManager"] = lambda: SimpleNamespace(get_running_module=lambda _name:
-            SimpleNamespace(tmdb=SimpleNamespace(discover=AnnualDiscover())))
-        self.addCleanup(lambda: namespace.__setitem__("ModuleManager", original))
+        original = namespace["TmdbApi"]
+        namespace["TmdbApi"] = lambda language: SimpleNamespace(discover=AnnualDiscover())
+        self.addCleanup(lambda: namespace.__setitem__("TmdbApi", original))
         self.store["monthly_movie_tasks"] = [{
             "id": "annual", "year": 2026, "month": 0, "min_score": 7.0,
             "min_votes": 50, "scan_state": "pending", "candidates": [],
@@ -287,7 +403,7 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertEqual([item["seeders"] for item in options], [20, 2])
         self.assertEqual(options[0]["resolution"], "2160P")
 
-    def test_resource_only_hides_unmatched_titles(self):
+    def test_annual_list_keeps_unmatched_titles_for_manual_pt_search(self):
         task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
         key = self.subject._save_monthly_archive(task, [
             {"tmdb_id": 1, "release_date": "2026-01-02", "score": 8, "title": "有资源"},
@@ -305,8 +421,35 @@ class MonthlyTasksTest(unittest.TestCase):
             "archive_key": key, "resources_only": True, "min_score": 7,
             "access_token": "test",
         })
-        self.assertEqual(result["data"]["total"], 1)
-        self.assertEqual(result["data"]["items"][0]["tmdb_id"], 1)
+        self.assertEqual(result["data"]["total"], 2)
+        unmatched = next(item for item in result["data"]["items"] if item["tmdb_id"] == 2)
+        self.assertEqual(unmatched["resources"], [])
+
+    def test_annual_list_shows_random_queue_and_filters_not_downloaded(self):
+        task = {"year": 2026, "month": 0, "min_score": 7, "scanned_at": "2026-12-31"}
+        key = self.subject._save_monthly_archive(task, [
+            {"tmdb_id": 1, "release_date": "2026-01-02", "score": 8, "title": "随机等候"},
+            {"tmdb_id": 2, "release_date": "2026-01-03", "score": 8, "title": "可下载"},
+            {"tmdb_id": 3, "release_date": "2026-01-04", "score": 8, "title": "已入库"},
+        ])
+        self.subject._valid_access_token = lambda _token: True
+        self.subject._load_monthly_resource_cache = lambda *_args: {
+            str(movie_id): [{"id": f"option{movie_id}"}] for movie_id in (2, 3)}
+        self.subject._load_stats_history = lambda: []
+        self.subject._load_download_queue = lambda: [{"tmdb_id": 1, "source": "random"}]
+        self.subject._load_recent_pushes = lambda: {}
+        self.subject._load_suppressed = lambda: {}
+        self.subject._load_scan_cache = lambda **_kwargs: {}
+        self.subject._library_snapshot_for_scan = lambda **_kwargs: {"tmdb_ids": {"3"}}
+        result = self.subject._api_secure_monthly({
+            "archive_key": key, "resources_only": True, "min_score": 7,
+            "page_size": 1000, "status": "not_downloaded", "access_token": "test",
+        })
+        self.assertEqual(result["data"]["total"], 2)
+        self.assertEqual(result["data"]["page_size"], 1000)
+        queued = next(item for item in result["data"]["items"] if item["tmdb_id"] == 1)
+        self.assertEqual((queued["status"], queued["queue_source"]), ("queued", "random"))
+        self.assertEqual(queued["resources"], [])
 
     def test_manual_batch_rejects_forged_or_duplicate_resource_ids(self):
         task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
@@ -324,9 +467,58 @@ class MonthlyTasksTest(unittest.TestCase):
         ])
         self.assertFalse(result["success"])
 
+    def test_no_resource_selection_is_accepted_and_searched_on_submit(self):
+        task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
+        self.subject._save_monthly_archive(task, [
+            {"tmdb_id": 1, "release_date": "2026-01-02", "score": 8,
+             "title": "待搜影片", "info": {"id": 1, "title": "待搜影片"}},
+        ])
+        self.subject._load_monthly_resource_cache = lambda *_args: {"1": []}
+        self.subject._load_stats_history = lambda: []
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
+        self.subject._already_in_library = lambda _media: False
+        self.subject._site_ids = [1]
+        self.subject._monthly_resource_options = lambda _contexts: [{"id": "matched"}]
+        self.subject._remember_monthly_resource_contexts = lambda *_args: None
+        self.subject._save_monthly_resource_cache = lambda *_args: None
+        self.subject._torrent_identity = lambda _context: "matched"
+        self.subject._submit_download = lambda *_args, **_kwargs: (True, "")
+        original_media = namespace["MediaInfo"]
+        original_search = namespace.get("SearchChain")
+        original_download = namespace.get("DownloadChain")
+        namespace["MediaInfo"] = lambda tmdb_info: SimpleNamespace(title_year=tmdb_info["title"])
+        searches = []
+        namespace["SearchChain"] = lambda: SimpleNamespace(search_by_id=lambda **kwargs: (
+            searches.append(kwargs["tmdbid"]) or [SimpleNamespace()]))
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [])
+        self.addCleanup(lambda: namespace.__setitem__("MediaInfo", original_media))
+        self.addCleanup(lambda: namespace.__setitem__("SearchChain", original_search))
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original_download))
+        result = self.subject._start_monthly_batch_download(2026, 1, [
+            {"tmdb_id": 1, "resource_id": ""},
+        ])
+        self.assertTrue(result["success"])
+        self.subject._run_monthly_batch_download(2026, 1, [
+            ({"tmdb_id": 1, "info": {"id": 1, "title": "待搜影片"}}, ""),
+        ])
+        self.assertEqual(searches, [1])
+        self.assertEqual(self.subject._monthly_batch_job["submitted"], 1)
+
+    def test_previously_matched_resource_reuses_context_without_new_search(self):
+        context = SimpleNamespace()
+        self.subject._monthly_resource_scope = lambda: "sites"
+        self.subject._torrent_identity = lambda _context: "matched"
+        self.subject._monthly_resource_contexts = {}
+        self.subject._remember_monthly_resource_contexts(2026, 1, "1", [context], [{"id": "matched"}])
+        self.assertIs(self.subject._cached_monthly_resource_context(2026, 1, "1", "matched"), context)
+        self.assertIsNone(self.subject._cached_monthly_resource_context(2026, 1, "1", "other"))
+
     def test_successful_submission_removes_same_movie_from_shared_waiting_queue(self):
         class FakeDownloadChain:
             succeed = False
+
+            def downloading(self):
+                return []
 
             def download_single(self, **_kwargs):
                 return ("download-id", None) if self.succeed else (None, "下载失败")
@@ -334,7 +526,8 @@ class MonthlyTasksTest(unittest.TestCase):
         original = namespace.get("DownloadChain")
         namespace["DownloadChain"] = FakeDownloadChain
         self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
-        self.subject._record_download = lambda *_args: None
+        recorded = []
+        self.subject._record_download = lambda *_args, **kwargs: recorded.append(kwargs)
         self.store["download_queue"] = [
             {"key": "same", "tmdb_id": 1}, {"key": "other", "tmdb_id": 2},
         ]
@@ -344,8 +537,9 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertEqual(len(self.store["download_queue"]), 2)
         FakeDownloadChain.succeed = True
         with self.subject._queue_lock:
-            self.assertTrue(self.subject._submit_download(media, SimpleNamespace())[0])
+            self.assertTrue(self.subject._submit_download(media, SimpleNamespace(), origin="annual")[0])
         self.assertEqual([item["key"] for item in self.store["download_queue"]], ["other"])
+        self.assertEqual(recorded[-1]["source"], "annual")
 
     def test_queue_drain_does_not_restore_removed_entry_from_old_snapshot(self):
         media = SimpleNamespace(tmdb_id=1, title_year="测试影片")
@@ -357,6 +551,10 @@ class MonthlyTasksTest(unittest.TestCase):
         original = namespace.get("SearchChain")
         namespace["SearchChain"] = FakeSearchChain
         self.addCleanup(lambda: namespace.__setitem__("SearchChain", original))
+        original_download = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original_download))
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
         self.subject._torrent_identity = lambda _context: "resource"
         self.subject._active_download_count = lambda: 0
         self.subject._max_active_downloads = 2

@@ -13,6 +13,7 @@ const accessPassword = ref('')
 const accessToken = ref('')
 const accessTokenKey = 'smartmoviepush_access_token'
 const dialog = ref('')
+const dialogSource = ref('all')
 const dialogOpen = computed({
   get: () => Boolean(dialog.value),
   set: value => { if (!value) dialog.value = '' },
@@ -24,6 +25,7 @@ const historyDate = ref('')
 const historyStatus = ref('all')
 const historyPage = ref(1)
 const historyPageSize = ref(100)
+const historySource = ref('all')
 const historyBusy = ref(false)
 const historyView = ref({ dates: [], items: [], total: 0, page: 1 })
 const monthlyForm = ref({ task_id: '', year: new Date().getFullYear(), month: 0, min_score: 7, min_votes: 50, batch_size: 5 })
@@ -37,7 +39,7 @@ const archiveYearOptions = Array.from({ length: new Date().getFullYear() - 1899 
 const monthlySearch = ref('')
 const monthlyStatus = ref('all')
 const monthlyPage = ref(1)
-const monthlyPageSize = ref(30)
+const monthlyPageSize = ref(20)
 const monthlyMinScore = ref(7)
 const annualReleaseMonth = ref(0)
 const annualCategory = ref('all')
@@ -47,6 +49,7 @@ const monthlyResourceChoice = ref({})
 const monthlyBusy = ref(false)
 const monthlyStatusOptions = [
   { title: '全部', value: 'all', color: 'primary' },
+  { title: '只看未下载', value: 'not_downloaded', color: 'info' },
   { title: '候选', value: 'candidate', color: 'info' },
   { title: '等候下载', value: 'queued', color: 'warning' },
   { title: '未下载完成', value: 'unfinished', color: 'secondary' },
@@ -54,21 +57,52 @@ const monthlyStatusOptions = [
   { title: '已整理', value: 'organized', color: 'warning' },
   { title: '已整理未入库', value: 'organized_not_ingested', color: 'error' },
   { title: 'Emby 已入库', value: 'emby_ingested', color: 'success' },
-  { title: '媒体库已有', value: 'library', color: 'success' },
+  { title: 'Emby 已入库（其他来源）', value: 'library', color: 'success' },
   { title: '无资源', value: 'no_resource', color: 'secondary' },
   { title: '已推送', value: 'pushed', color: 'primary' },
   { title: '不再推送', value: 'suppressed', color: 'error' },
 ]
 const monthlyStatusMeta = Object.fromEntries(monthlyStatusOptions.map(item => [item.value, item]))
+function monthlyStatusLabel(item) {
+  if (item.status === 'queued') return item.queue_source === 'annual' ? '已在年度下载队列' : '已在随机下载队列'
+  return monthlyStatusMeta[item.status]?.title || item.status
+}
 const annualEntry = computed(() => {
   const year = Number(archiveYear.value)
   const archives = (state.value.monthly_archives || []).filter(item => Number(item.year) === year && Number(item.month) === 0)
   const tasks = (state.value.monthly_tasks || []).filter(item => Number(item.year) === year && Number(item.month) === 0)
   const latest = archives.reduce((current, item) => !current || String(item.scanned_at || '') > String(current.scanned_at || '') ? item : current, null)
-  return { year, month: 0, latest, tasks, minimum: latest?.min_score ?? 7,
+  const scanTask = tasks.find(item => item.scan_state === 'running') || tasks.find(item => item.scan_state === 'pending')
+  const failedTask = scanTask ? null : tasks.find(item => item.scan_state === 'error')
+  return { year, month: 0, latest, tasks, scanTask, failedTask, minimum: latest?.min_score ?? 7,
     scans: archives.reduce((total, item) => total + Number(item.scan_count || 1), 0),
     movies: Number(latest?.month_candidate_count || latest?.candidate_count || 0) }
 })
+const yearScanBadges = computed(() => {
+  const badges = new Map()
+  for (const archive of state.value.monthly_archives || []) {
+    if (Number(archive.month) !== 0) continue
+    const year = Number(archive.year)
+    const badge = badges.get(year) || { scans: 0, status: '' }
+    badge.scans += Number(archive.scan_count || 1)
+    badges.set(year, badge)
+  }
+  for (const task of state.value.monthly_tasks || []) {
+    if (Number(task.month) !== 0) continue
+    const year = Number(task.year)
+    const badge = badges.get(year) || { scans: 0, status: '' }
+    if (task.scan_state === 'running' || (task.scan_state === 'pending' && badge.status !== 'running') || (task.scan_state === 'error' && !badge.status)) badge.status = task.scan_state
+    badges.set(year, badge)
+  }
+  return badges
+})
+function yearScanBadge(year) {
+  const badge = yearScanBadges.value.get(Number(year)) || { scans: 0, status: '' }
+  if (badge.status === 'running') return { text: `正在扫第 ${badge.scans + 1} 次`, color: 'info' }
+  if (badge.status === 'pending') return { text: `等待第 ${badge.scans + 1} 次`, color: 'warning' }
+  if (badge.status === 'error') return { text: badge.scans ? `扫描失败 · 已扫 ${badge.scans} 次` : '扫描失败', color: 'error' }
+  return badge.scans ? { text: `已扫 ${badge.scans} 次`, color: 'success' } : { text: '未扫描', color: 'secondary' }
+}
 const archiveMonths = computed(() => Array.from({ length: 12 }, (_, index) => {
   const month = index + 1
   const archives = (state.value.monthly_archives || []).filter(item => Number(item.year) === Number(archiveYear.value) && Number(item.month) === month)
@@ -82,7 +116,7 @@ const archiveMonths = computed(() => Array.from({ length: 12 }, (_, index) => {
 const selectedMonthTasks = computed(() => (state.value.monthly_tasks || []).filter(item =>
   Number(item.year) === Number(monthlyArchiveYear.value || monthlyView.value.task?.year)
   && Number(item.month) === Number(monthlyArchiveMonth.value || monthlyView.value.task?.month)))
-const monthlyCanDownload = item => ['candidate', 'pushed', 'queued'].includes(item.status) && Boolean(item.resources?.length)
+const monthlyCanDownload = item => ['candidate', 'pushed', 'queued'].includes(item.status)
 function selectMonthlyPage() {
   const values = new Set(monthlySelected.value)
   const choices = { ...monthlyResourceChoice.value }
@@ -90,7 +124,7 @@ function selectMonthlyPage() {
     if (!monthlyCanDownload(item)) continue
     const id = String(item.tmdb_id)
     values.add(id)
-    choices[id] = choices[id] || item.resources[0].id
+    choices[id] = choices[id] || item.resources?.[0]?.id || ''
   }
   monthlySelected.value = [...values]
   monthlyResourceChoice.value = choices
@@ -100,10 +134,8 @@ function toggleMonthlyMovie(item, checked) {
   monthlySelected.value = checked
     ? [...new Set([...monthlySelected.value, id])]
     : monthlySelected.value.filter(value => value !== id)
-  if (checked && !monthlyResourceChoice.value[id]) monthlyResourceChoice.value = { ...monthlyResourceChoice.value, [id]: item.resources[0].id }
+  if (checked && !monthlyResourceChoice.value[id]) monthlyResourceChoice.value = { ...monthlyResourceChoice.value, [id]: item.resources?.[0]?.id || '' }
 }
-const countryNames = { US: '美国', CA: '加拿大', GB: '英国', IE: '爱尔兰', FR: '法国', DE: '德国', IT: '意大利', ES: '西班牙', PT: '葡萄牙', NL: '荷兰', BE: '比利时', CH: '瑞士', AT: '奥地利', SE: '瑞典', NO: '挪威', DK: '丹麦', FI: '芬兰', IS: '冰岛', PL: '波兰', CZ: '捷克', SK: '斯洛伐克', HU: '匈牙利', RO: '罗马尼亚', BG: '保加利亚', GR: '希腊', HR: '克罗地亚', SI: '斯洛文尼亚', RS: '塞尔维亚', BA: '波黑', ME: '黑山', MK: '北马其顿', AL: '阿尔巴尼亚', EE: '爱沙尼亚', LV: '拉脱维亚', LT: '立陶宛', LU: '卢森堡', MT: '马耳他', CY: '塞浦路斯', UA: '乌克兰', BY: '白俄罗斯', MD: '摩尔多瓦', RU: '俄罗斯', TR: '土耳其', JP: '日本', KR: '韩国', CN: '中国大陆', TW: '台湾', HK: '香港' }
-const countryLabel = item => (item.countries || []).map(code => countryNames[code] || code).join(' / ')
 const posterUrl = path => typeof path === 'string' && /^\/[a-zA-Z0-9_./-]+$/.test(path) ? `https://image.tmdb.org/t/p/w342${path}` : ''
 const movieTitle = item => item.display_title || item.title || `TMDB ${item.tmdb_id}`
 const historyPeriodOptions = [
@@ -169,6 +201,7 @@ async function loadHistory() {
       search: historySearch.value,
       page: historyPage.value,
       page_size: historyPageSize.value,
+      source: historySource.value,
     })
     const body = envelope(response)
     if (body?.locked) { lockLocally(); return }
@@ -181,12 +214,24 @@ async function loadHistory() {
     historyBusy.value = false
   }
 }
-async function openHistory() {
+async function openHistory(source = 'all') {
+  historySource.value = source
   historyPeriod.value = 'all'
   historyStatus.value = 'all'
   historyPage.value = 1
   dialog.value = 'history'
   await loadHistory()
+}
+function openActive(source = 'all') {
+  dialogSource.value = source
+  dialog.value = 'active'
+  loadStatus(true)
+}
+function openQueue(source = 'all') {
+  dialogSource.value = source
+  queueSearch.value = ''
+  dialog.value = 'queue'
+  loadStatus(true)
 }
 async function loadMonthly(refreshLibrary = false) {
   if (!accessToken.value || (!monthlyTaskId.value && !monthlyArchiveKey.value && !monthlyArchiveYear.value)) return
@@ -209,9 +254,8 @@ async function loadMonthly(refreshLibrary = false) {
     monthlyPage.value = monthlyView.value.page || 1
     const choices = { ...monthlyResourceChoice.value }
     for (const item of monthlyView.value.items || []) {
-      if (item.resources?.length && !item.resources.some(option => option.id === choices[String(item.tmdb_id)])) {
-        choices[String(item.tmdb_id)] = item.resources[0].id
-      }
+      const id = String(item.tmdb_id)
+      if (!item.resources?.some(option => option.id === choices[id])) choices[id] = item.resources?.[0]?.id || ''
     }
     monthlyResourceChoice.value = choices
   } catch (err) {
@@ -265,16 +309,32 @@ async function searchMonthlyResources(force = false) {
   })
   await loadMonthly()
 }
+async function refreshMonthlyMovie(item) {
+  if (!monthlyArchiveYear.value || !item?.tmdb_id) return
+  await runAction('monthly_resource_scan', {
+    year: monthlyArchiveYear.value, month: monthlyArchiveMonth.value,
+    min_score: monthlyMinScore.value, force: true, tmdb_id: String(item.tmdb_id),
+  })
+  await loadMonthly()
+}
+async function matchMonthlySelected() {
+  if (!monthlySelected.value.length || !monthlyArchiveYear.value) return
+  await runAction('monthly_resource_scan', {
+    year: monthlyArchiveYear.value, month: monthlyArchiveMonth.value,
+    min_score: monthlyMinScore.value, force: true, tmdb_ids: monthlySelected.value,
+  })
+  await loadMonthly()
+}
 async function downloadMonthlySelected() {
   if (!monthlySelected.value.length) return
   const selections = monthlySelected.value.map(tmdb_id => ({
-    tmdb_id, resource_id: monthlyResourceChoice.value[tmdb_id],
+    tmdb_id, resource_id: monthlyResourceChoice.value[tmdb_id] || '',
   }))
   await runAction('monthly_batch_download', {
     year: monthlyArchiveYear.value, month: monthlyArchiveMonth.value, selections,
   })
   if (!error.value) monthlySelected.value = []
-  await loadMonthly()
+  await Promise.all([loadMonthly(), loadStatus(true)])
 }
 function editMonthly(task) {
   monthlyForm.value = { task_id: task.id, year: task.year, month: task.month, min_score: task.min_score,
@@ -494,6 +554,10 @@ async function savePushSettings() {
 }
 
 const summary = computed(() => state.value.summary || {})
+const annualActiveItems = computed(() => (summary.value.active_download_items || []).filter(item => item.source === 'annual'))
+const annualQueueItems = computed(() => (state.value.queue || []).filter(item => item.source === 'annual'))
+const visibleActiveItems = computed(() => dialogSource.value === 'annual' ? annualActiveItems.value : (summary.value.active_download_items || []))
+const visibleQueueItems = computed(() => dialogSource.value === 'annual' ? annualQueueItems.value : (state.value.queue || []))
 const diskGuard = computed(() => state.value.disk_guard || {})
 const queueHeaders = [
   { title: '影片', key: 'title' },
@@ -532,6 +596,7 @@ const logHeaders = [
 
 let refreshTimer
 let monthlyRefreshTimer
+let monthlyRefreshTick = 0
 let messageTimer
 let errorTimer
 watch(message, value => {
@@ -557,6 +622,8 @@ function startRefresh() {
   window.clearInterval(monthlyRefreshTimer)
   monthlyRefreshTimer = window.setInterval(async () => {
     if (dialog.value !== 'monthly' || monthlyBusy.value) return
+    monthlyRefreshTick += 1
+    if (!monthlyView.value.batch_progress?.running && !monthlyView.value.resource_progress?.running && monthlyRefreshTick % 3 !== 0) return
     if (!monthlyArchiveYear.value && monthlyTaskId.value) {
       const task = (state.value.monthly_tasks || []).find(item => item.id === monthlyTaskId.value)
       if (task?.scan_state === 'complete') {
@@ -566,7 +633,7 @@ function startRefresh() {
       }
     }
     await loadMonthly()
-  }, 10000)
+  }, 3000)
 }
 
 async function checkAccess() {
@@ -672,12 +739,12 @@ onUnmounted(() => {
         </VCard>
       </div>
       <div class="status-item">
-        <VCard variant="tonal" color="info" class="pa-4 h-100 list-card status-card" @click="dialog = 'active'">
+        <VCard variant="tonal" color="info" class="pa-4 h-100 list-card status-card" @click="openActive()">
           <div class="d-flex align-center justify-space-between"><div><div class="text-caption">正在下载（点击看实时详情）</div><div class="text-h6 font-weight-bold">{{ summary.active_downloads || 0 }}/{{ summary.max_active_downloads || 20 }}</div></div><VIcon icon="mdi-chevron-right" /></div>
         </VCard>
       </div>
       <div class="status-item">
-        <VCard variant="tonal" color="secondary" class="pa-4 h-100 list-card status-card" @click="dialog = 'queue'">
+        <VCard variant="tonal" color="secondary" class="pa-4 h-100 list-card status-card" @click="openQueue()">
           <div class="d-flex align-center justify-space-between"><div><div class="text-caption">等候下载</div><div class="text-h6 font-weight-bold">{{ state.queue.length }}</div><div class="text-caption mt-1">搜索、取消任务或批量清空</div></div><VIcon icon="mdi-chevron-right" /></div>
         </VCard>
       </div>
@@ -753,12 +820,24 @@ onUnmounted(() => {
         <VChip size="small" color="primary">{{ (state.monthly_tasks || []).length }}/5</VChip>
       </div>
       <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；名单分“主流”和“高口碑”，也可以按上映月份筛选。资源查询在后台进行，最多同时保留 5 个自动任务。</div>
+      <VRow dense class="mb-3">
+        <VCol cols="12" sm="4"><VCard variant="tonal" color="info" class="pa-3 h-100 list-card" @click="openActive('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度正在下载</div><div class="text-h6 font-weight-bold">{{ annualActiveItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+        <VCol cols="12" sm="4"><VCard variant="tonal" color="secondary" class="pa-3 h-100 list-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度等候下载</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+        <VCol cols="12" sm="4"><VCard variant="tonal" color="primary" class="pa-3 h-100 list-card" @click="openHistory('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度下载记录</div><div class="text-h6 font-weight-bold">{{ summary.annual_history_count || 0 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+      </VRow>
       <div class="d-flex flex-wrap align-center ga-3 mt-4 mb-3">
-        <VCombobox v-model="archiveYear" :items="archiveYearOptions" label="选择或输入年份" type="number" density="compact" hide-details class="monthly-year-select" />
+        <VCombobox v-model="archiveYear" :items="archiveYearOptions" label="选择或输入年份" type="number" density="compact" hide-details class="monthly-year-select">
+          <template #item="{ props: listProps, item }">
+            <VListItem v-bind="listProps">
+              <template #append><span class="year-option-badge" :class="`text-${yearScanBadge(item.raw).color}`">{{ yearScanBadge(item.raw).text }}</span></template>
+            </VListItem>
+          </template>
+        </VCombobox>
         <VBtn color="primary" variant="tonal" size="large" :disabled="Number(archiveYear) < 1900 || Number(archiveYear) > new Date().getFullYear()" @click="openMonthlyArchive(annualEntry)">{{ annualEntry.latest || annualEntry.tasks.length ? '查看年度名单' : '扫描这一年' }}</VBtn>
       </div>
-      <div v-if="annualEntry.latest" class="text-caption">{{ archiveYear }} 年已扫描 {{ annualEntry.scans }} 次，保存 {{ annualEntry.movies }} 部电影；重新打开会读取已有名单。</div>
-      <div v-else-if="annualEntry.tasks.length" class="text-caption">{{ annualEntry.tasks[0].scan_progress || '全年扫描中' }}</div>
+      <div v-if="annualEntry.scanTask" class="text-caption text-info">{{ annualEntry.scanTask.scan_progress || '全年扫描中' }}</div>
+      <div v-if="annualEntry.failedTask" class="text-caption text-error">{{ annualEntry.failedTask.scan_error || '扫描中断，请查看日志后重试' }}</div>
+      <div v-if="annualEntry.latest" class="text-caption">{{ archiveYear }} 年已保存 {{ annualEntry.movies }} 部电影；重新打开会读取已有名单。</div>
       <details v-if="archiveMonths.some(item => item.latest || item.tasks.length)" class="mt-4">
         <summary class="text-caption">查看以前保存的按月任务与名单</summary>
         <div class="monthly-month-grid mt-3">
@@ -789,26 +868,26 @@ onUnmounted(() => {
     </VCard>
 
     <VDialog v-model="dialogOpen" max-width="75rem" scrollable>
-      <VCard v-if="dialog === 'active'" title="正在下载 · 实时状态">
+      <VCard v-if="dialog === 'active'" :title="dialogSource === 'annual' ? '年度正在下载 · 实时状态' : '全部正在下载 · 实时状态'">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
-          <VAlert v-if="!(summary.active_download_items || []).length" type="info" variant="tonal" class="mb-3">当前没有 MoviePilot 正在下载的任务，或下载器暂未返回详情。</VAlert>
-          <VDataTable v-else :headers="activeHeaders" :items="summary.active_download_items || []" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover>
+          <VAlert v-if="!visibleActiveItems.length" type="info" variant="tonal" class="mb-3">当前没有此类正在下载的任务，或下载器暂未返回详情。</VAlert>
+          <VDataTable v-else :headers="activeHeaders" :items="visibleActiveItems" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover>
             <template #item.progress="{ item }"><div class="d-flex align-center ga-2"><VProgressLinear :model-value="item.progress" color="info" height="8" rounded /><span class="text-caption text-no-wrap">{{ item.progress }}%</span></div></template>
           </VDataTable>
           <div class="text-caption text-medium-emphasis mt-3">每 5 秒自动刷新。</div>
         </VCardText>
       </VCard>
-      <VCard v-else-if="dialog === 'queue'" title="等候下载">
+      <VCard v-else-if="dialog === 'queue'" :title="dialogSource === 'annual' ? '年度等候下载' : '全部等候下载'">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
-          <div class="d-flex ga-2 mb-3"><VTextField v-model="queueSearch" label="搜索影片" prepend-inner-icon="mdi-magnify" clearable hide-details /><VBtn color="error" variant="tonal" @click="runAction('clear_queue')">批量清空</VBtn></div>
-          <VDataTable :headers="queueHeaders" :items="state.queue" :search="queueSearch" :items-per-page="20" :items-per-page-options="pageSizes" item-value="key" density="compact" hover>
+          <div class="d-flex ga-2 mb-3"><VTextField v-model="queueSearch" label="搜索影片" prepend-inner-icon="mdi-magnify" clearable hide-details /><VBtn color="error" variant="tonal" @click="runAction('clear_queue', { source: dialogSource })">{{ dialogSource === 'annual' ? '清空年度等候' : '批量清空' }}</VBtn></div>
+          <VDataTable :headers="queueHeaders" :items="visibleQueueItems" :search="queueSearch" :items-per-page="20" :items-per-page-options="pageSizes" item-value="key" density="compact" hover>
             <template #item.actions="{ item }"><VBtn size="small" color="error" variant="tonal" @click="runAction('remove_queue', { key: item.key })">取消下载</VBtn></template>
           </VDataTable>
         </VCardText>
       </VCard>
-      <VCard v-else-if="dialog === 'history'" title="下载记录">
+      <VCard v-else-if="dialog === 'history'" :title="historySource === 'annual' ? '年度下载记录' : '全部下载记录'">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
           <VTabs v-model="historyStatus" show-arrows class="mb-3">
@@ -823,7 +902,7 @@ onUnmounted(() => {
             <VSelect v-model="historyPageSize" :items="pageSizes" label="每页条数" density="compact" hide-details style="max-width: 140px" />
             <VBtn variant="tonal" :loading="historyBusy" @click="loadHistory">刷新</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-2">当前列表 {{ historyView.total || 0 }} 条；仅统计本插件提交的任务，含历史归档。默认每页 100 条。待入库＝下载完成、等待 MP 整理；已整理＝MP 已整理、等待上传及 Emby 扫描；已整理未入库＝整理超过 24 小时仍未在 Emby 找到，需排查上传、扫描或匹配情况。</div>
+          <div class="text-caption text-medium-emphasis mb-2">当前列表 {{ historyView.total || 0 }} 条；{{ historySource === 'annual' ? '只显示明确标记为年度方式提交的任务；旧版未记录来源的任务不猜测归属。' : '仅统计本插件提交的任务，含历史归档。' }}默认每页 100 条。待入库＝下载完成、等待 MP 整理；已整理＝MP 已整理、等待上传及 Emby 扫描；已整理未入库＝整理超过 24 小时仍未在 Emby 找到，需排查上传、扫描或匹配情况。</div>
           <VDataTable :headers="historyHeaders" :items="historyView.items || []" :items-per-page="historyPageSize" hide-default-footer density="compact" hover>
             <template #item.result="{ item }">
               <VChip size="small" :color="historyStatusMeta[item.view_status]?.color || 'secondary'" :title="item.organize_error || ''">{{ historyStatusMeta[item.view_status]?.title || '未知状态' }}</VChip>
@@ -873,39 +952,42 @@ onUnmounted(() => {
             <VSelect v-if="Number(monthlyArchiveMonth) === 0" v-model="annualReleaseMonth" :items="[{ title: '全年', value: 0 }, ...Array.from({ length: 12 }, (_, index) => ({ title: `${index + 1} 月`, value: index + 1 }))]" label="上映月份" density="compact" hide-details style="min-width: 135px; max-width: 155px" />
             <VSelect v-model="monthlyStatus" :items="monthlyStatusOptions.map(item => ({ title: `${item.title} ${monthlyView.counts?.[item.value] ?? (item.value === 'all' ? monthlyView.task?.candidate_count || 0 : 0)}`, value: item.value }))" label="状态" density="compact" hide-details style="min-width: 190px; max-width: 250px" />
             <VTextField v-model="monthlySearch" label="搜索电影或 TMDB ID" prepend-inner-icon="mdi-magnify" clearable density="compact" hide-details style="min-width: 220px" />
-            <VSelect v-model="monthlyPageSize" :items="[20, 30, 50, 100]" label="每页条数" density="compact" hide-details style="max-width: 135px" @update:model-value="monthlyPage = 1; loadMonthly()" />
+            <VSelect v-model="monthlyPageSize" :items="[{ title: '20', value: 20 }, { title: '50', value: 50 }, { title: '100', value: 100 }, { title: '1000（全部）', value: 1000 }]" label="每页条数" density="compact" hide-details style="max-width: 155px" @update:model-value="monthlyPage = 1; loadMonthly()" />
             <VBtn variant="tonal" :loading="monthlyBusy" @click="loadMonthly(true)">立即核对 Emby</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-3">仅显示所选站点中符合 MoviePilot 过滤规则的资源；{{ Number(monthlyArchiveMonth) === 0 ? '全年名单在后台逐部查询' : '每批优先查 60 部评价人数最多的电影' }}，结果缓存 24 小时。默认优先最高分辨率，提交前会重新核验资源、已下载记录、Emby 和硬盘保护。等候队列中的影片可在这里优先提交，成功后才从队列移除。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
+          <div class="text-caption text-medium-emphasis mb-3">名单也显示暂未匹配资源的影片，可勾选后点击“匹配 PT 站资源”，或直接下载时逐部搜索一次；已有资源优先使用本次搜索得到的链接。{{ Number(monthlyArchiveMonth) === 0 ? '全年名单在后台逐部查询' : '每批优先查 60 部评价人数最多的电影' }}。提交前仍核验 Emby、MoviePilot 下载状态和硬盘保护；同片只保留一条等候任务。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
           <div v-if="monthlyView.resource_progress?.total" class="mb-3">
             <div class="text-caption">本批查询 {{ monthlyView.resource_progress.done || 0 }}/{{ monthlyView.resource_progress.total }} · 全月已核对 {{ (monthlyView.resource_progress.checked || 0) + (monthlyView.resource_progress.done || 0) }}/{{ monthlyView.resource_progress.candidates || 0 }} · 本批匹配 {{ monthlyView.resource_progress.found || 0 }} 部 · 异常 {{ monthlyView.resource_progress.errors || 0 }} 部{{ monthlyView.resource_progress.running ? ' · 查询中' : ' · 本批完成' }}</div>
             <VProgressLinear :model-value="100 * (monthlyView.resource_progress.done || 0) / monthlyView.resource_progress.total" color="primary" height="6" rounded class="mt-1" />
+            <div v-if="monthlyView.resource_progress.message" class="text-caption mt-2">{{ monthlyView.resource_progress.message }}</div>
             <VBtn v-if="Number(monthlyArchiveMonth) !== 0 && !monthlyView.resource_progress.running && (monthlyView.resource_progress.checked || 0) + (monthlyView.resource_progress.done || 0) < (monthlyView.resource_progress.candidates || 0)" class="mt-2" variant="tonal" @click="searchMonthlyResources()">继续查后 60 部</VBtn>
           </div>
           <div v-if="monthlyView.batch_progress?.total" class="text-caption mb-3">批量下载：已处理 {{ monthlyView.batch_progress.done || 0 }}/{{ monthlyView.batch_progress.total }} · 已提交 {{ monthlyView.batch_progress.submitted || 0 }} · 等候 {{ monthlyView.batch_progress.queued || 0 }} · 跳过 {{ monthlyView.batch_progress.skipped || 0 }} · 失败 {{ monthlyView.batch_progress.errors || 0 }}</div>
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <VBtn size="small" variant="tonal" :disabled="!(monthlyView.items || []).some(monthlyCanDownload)" @click="selectMonthlyPage">全选当前页</VBtn>
             <VBtn size="small" variant="text" :disabled="!monthlySelected.length" @click="monthlySelected = []">清空选择</VBtn>
+            <VBtn size="small" variant="tonal" color="primary" :disabled="!monthlySelected.length || !monthlyArchiveYear" @click="matchMonthlySelected">匹配 PT 站资源（{{ monthlySelected.length }}）</VBtn>
             <VBtn size="small" color="success" :disabled="!monthlySelected.length || !monthlyArchiveYear || !controlForm.enabled" @click="downloadMonthlySelected">下载选中 {{ monthlySelected.length }} 部</VBtn>
           </div>
-          <div v-if="!monthlyView.items?.length" class="text-center text-medium-emphasis pa-8">{{ monthlyView.resource_progress?.running ? '正在查找符合 MP 规则的资源，找到后会逐步显示…' : '暂无符合评分、站点和 MP 规则的可选资源' }}</div>
+          <div v-if="!monthlyView.items?.length" class="text-center text-medium-emphasis pa-8">{{ monthlyView.resource_progress?.running ? '正在查找符合 MP 规则的资源，找到后会逐步显示…' : '暂无符合当前筛选条件的电影' }}</div>
           <div v-else class="monthly-movie-list">
             <div v-for="item in monthlyView.items" :key="item.tmdb_id" class="monthly-movie-row">
-              <VCheckboxBtn :model-value="monthlySelected.includes(String(item.tmdb_id))" :disabled="!monthlyCanDownload(item)" density="compact" @update:model-value="toggleMonthlyMovie(item, $event)" />
+              <div class="monthly-row-check"><VCheckboxBtn :model-value="monthlySelected.includes(String(item.tmdb_id))" :disabled="!monthlyCanDownload(item)" density="compact" @update:model-value="toggleMonthlyMovie(item, $event)" /></div>
               <VImg v-if="posterUrl(item.poster_path)" :src="posterUrl(item.poster_path)" width="52" height="72" cover class="monthly-row-poster" />
               <div v-else class="monthly-row-poster monthly-row-poster-empty"><VIcon icon="mdi-movie-open" size="23" /></div>
               <div class="monthly-row-main">
                 <a class="monthly-row-title" :href="`https://www.themoviedb.org/movie/${item.tmdb_id}?language=zh-CN`" target="_blank" rel="noopener noreferrer">{{ movieTitle(item) }} ({{ item.year }})</a>
                 <div v-if="item.original_title && item.original_title !== movieTitle(item)" class="monthly-row-subtitle">{{ item.original_title }}</div>
-                <div class="monthly-row-subtitle">{{ item.release_date || '日期未知' }} · {{ countryLabel(item) || '地区未知' }}</div>
+                <div class="monthly-row-subtitle">{{ item.release_date || '日期未知' }}</div>
                 <div class="monthly-resource-options">
                   <button v-for="option in item.resources || []" :key="option.id" type="button" class="monthly-resource-option" :class="{ 'monthly-resource-active': monthlyResourceChoice[String(item.tmdb_id)] === option.id }" :title="option.title" @click="monthlyResourceChoice[String(item.tmdb_id)] = option.id">
                     {{ option.resolution }} · {{ option.size_gb }} GB · 做种 {{ option.seeders }} · {{ option.site }}
                   </button>
+                  <VBtn v-if="!item.resources?.length && monthlyArchiveYear && ['candidate', 'pushed', 'queued'].includes(item.status)" size="x-small" variant="tonal" :loading="loading && monthlyView.resource_progress?.target_tmdb_id === String(item.tmdb_id)" @click="refreshMonthlyMovie(item)">无可选资源 · 单片重查</VBtn>
                 </div>
               </div>
               <div class="monthly-row-score">⭐ {{ Number(item.score || 0).toFixed(1) }}<span class="monthly-row-votes">{{ item.vote_count || 0 }} 人评价</span></div>
-              <VChip size="small" :color="monthlyStatusMeta[item.status]?.color || 'secondary'" class="monthly-row-status">{{ monthlyStatusMeta[item.status]?.title || item.status }}</VChip>
+              <VChip size="small" :color="monthlyStatusMeta[item.status]?.color || 'secondary'" class="monthly-row-status">{{ monthlyStatusLabel(item) }}</VChip>
             </div>
           </div>
           <div class="d-flex align-center justify-end ga-3 mt-3">
@@ -1005,6 +1087,7 @@ onUnmounted(() => {
 .list-card:hover { border-color: rgb(var(--v-theme-primary)); transform: translateY(-2px); }
 .monthly-task-row { border: 1px solid rgba(var(--v-theme-on-surface), .14); border-radius: 10px; }
 .monthly-year-select { width: 190px; max-width: 100%; flex: none; }
+.year-option-badge { min-width: 125px; text-align: right; font-size: 12px; white-space: nowrap; }
 .monthly-month-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
 .monthly-month-tile { min-height: 70px; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 5px; padding: 9px 12px; border: 1px solid rgba(var(--v-theme-on-surface), .16); border-radius: 10px; color: inherit; text-align: left; }
 .monthly-month-tile:disabled { opacity: .5; }
@@ -1015,10 +1098,12 @@ onUnmounted(() => {
 .monthly-month-name { font-size: 16px; font-weight: 700; }
 .monthly-month-summary { font-size: 12px; opacity: .78; }
 .monthly-movie-list { border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 10px; overflow: hidden; }
-.monthly-movie-row { display: flex; align-items: center; gap: 16px; min-height: 88px; padding: 8px 14px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .10); }
+.monthly-movie-row { display: grid; grid-template-columns: 28px 52px minmax(0, 1fr) 80px 138px; align-items: center; column-gap: 12px; min-height: 88px; padding: 8px 14px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .10); }
+.monthly-row-check { width: 28px; min-width: 28px; justify-self: start; }
+.monthly-row-check :deep(.v-selection-control) { min-width: 28px; width: 28px; }
 .monthly-movie-row:last-child { border-bottom: 0; }
 .monthly-movie-row:nth-child(even) { background: rgba(var(--v-theme-on-surface), .025); }
-.monthly-row-poster { flex: 0 0 52px; border-radius: 5px; overflow: hidden; }
+.monthly-row-poster { width: 52px; height: 72px; border-radius: 5px; overflow: hidden; justify-self: start; }
 .monthly-row-poster-empty { height: 72px; display: flex; align-items: center; justify-content: center; background: rgba(var(--v-theme-on-surface), .08); }
 .monthly-row-main { min-width: 0; flex: 1; }
 .monthly-row-title { display: block; color: inherit; font-weight: 650; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -1027,9 +1112,9 @@ onUnmounted(() => {
 .monthly-resource-options { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
 .monthly-resource-option { max-width: 100%; padding: 4px 7px; border: 1px solid rgba(var(--v-theme-on-surface), .18); border-radius: 6px; color: inherit; font-size: 11px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .monthly-resource-active { color: rgb(var(--v-theme-primary)); border-color: rgb(var(--v-theme-primary)); background: rgba(var(--v-theme-primary), .12); }
-.monthly-row-score { width: 85px; flex: 0 0 85px; font-weight: 600; }
+.monthly-row-score { width: 80px; justify-self: end; text-align: right; font-weight: 600; }
 .monthly-row-votes { display: block; font-size: 11px; font-weight: 400; opacity: .65; }
-.monthly-row-status { flex-shrink: 0; }
+.monthly-row-status { width: max-content; max-width: 138px; justify-self: start; white-space: nowrap; }
 @media (max-width: 850px) { .monthly-month-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .monthly-month-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .monthly-movie-row { gap: 8px; padding: 8px; } .monthly-row-score { width: 48px; flex-basis: 48px; } .monthly-row-votes { display: none; } }
+@media (max-width: 600px) { .monthly-month-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .monthly-movie-row { grid-template-columns: 28px 44px minmax(0, 1fr); gap: 8px; padding: 8px; } .monthly-row-poster { width: 44px; height: 62px; } .monthly-row-score { grid-column: 3; width: auto; } .monthly-row-status { grid-column: 3; } .monthly-row-votes { display: none; } }
 </style>
