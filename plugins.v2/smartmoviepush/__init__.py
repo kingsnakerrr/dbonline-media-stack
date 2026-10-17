@@ -29,25 +29,32 @@ from app.chain.download import DownloadChain
 from app.chain.search import SearchChain
 from app.chain.tmdb import TmdbChain
 from app.core.config import settings
-from app.core.context import Context, MediaInfo
+from app.core.context import Context, MediaInfo, TorrentInfo
 from app.core.event import Event, eventmanager
 from app.core.metainfo import MetaInfo
 from app.core.module import ModuleManager
 from app.db.downloadhistory_oper import DownloadHistoryOper
 from app.db.site_oper import SiteOper
 from app.db.transferhistory_oper import TransferHistoryOper
+from app.helper.sites import SitesHelper
 from app.log import logger
+from app.modules.indexer.spider.mtorrent import MTorrentSpider
 from app.modules.themoviedb.tmdbapi import TmdbApi
 from app.plugins import _PluginBase
 from app.schemas.types import EventType, MediaType, MessageChannel, SystemConfigKey
 from app.utils.string import StringUtils
+from app.utils.http import RequestUtils
+
+
+class PTSearchUnavailable(RuntimeError):
+    """站点请求失败或限流；不能当作电影确实没有资源缓存。"""
 
 
 class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.48"
+    plugin_version = "0.9.49"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -118,6 +125,9 @@ class SmartMoviePush(_PluginBase):
     _disk_scan_key = "disk_usage_scan"
     _disk_guard_lock = threading.Lock()
     _monthly_tasks_key = "monthly_movie_tasks"
+    _pt_request_lock = threading.RLock()
+    _pt_next_request_at = 0.0
+    _pt_cooldown_until = 0.0
     _monthly_tasks_lock = threading.RLock()
     _monthly_scan_lock = threading.Lock()
     _monthly_archive_lock = threading.RLock()
@@ -1948,7 +1958,8 @@ class SmartMoviePush(_PluginBase):
     def _monthly_resource_scope(self) -> str:
         """站点选择变动时不复用旧的资源搜索结果。"""
         ids = sorted(int(site) for site in self._site_ids)
-        return hashlib.sha256(json.dumps(ids).encode()).hexdigest()[:16]
+        # v2 不复用旧版本把馒头限流误判为“无资源”的缓存。
+        return hashlib.sha256(json.dumps(["pt-api-v2", ids]).encode()).hexdigest()[:16]
 
     @staticmethod
     def _monthly_resource_rank(context: Context) -> int:
@@ -2112,6 +2123,96 @@ class SmartMoviePush(_PluginBase):
             raise
         return {"success": True, "message": f"后台开始核对 {len(batch)} 部电影的站点资源；匹配结果逐步显示"}
 
+    def _request_mteam_torrents(self, site: dict, keyword: str) -> list:
+        """读取馒头 API，区分真实空结果与限流/接口错误。"""
+        spider = MTorrentSpider(site)
+        if not spider._apikey:
+            raise PTSearchUnavailable("馒头站点没有配置 API Key")
+        cls = type(self)
+        with cls._pt_request_lock:
+            now = time.monotonic()
+            if now < cls._pt_cooldown_until:
+                wait_minutes = math.ceil((cls._pt_cooldown_until - now) / 60)
+                raise PTSearchUnavailable(f"馒头接口仍在限流，请约 {wait_minutes} 分钟后重试")
+            delay = cls._pt_next_request_at - now
+            if delay > 0:
+                time.sleep(delay)
+            cls._pt_next_request_at = time.monotonic() + 12
+            try:
+                response = RequestUtils(
+                    headers={"Content-Type": "application/json",
+                             "User-Agent": str(spider._ua or "MoviePilot"),
+                             "x-api-key": spider._apikey},
+                    proxies=spider._proxy, referer=f"{spider._domain}browse",
+                    timeout=spider._timeout,
+                ).post_res(url=spider._searchurl,
+                           json=spider._MTorrentSpider__get_params(keyword, MediaType.MOVIE, 0))
+            except Exception as err:
+                raise PTSearchUnavailable(f"馒头接口连接异常：{type(err).__name__}，未缓存为无资源") from err
+            if response is None:
+                raise PTSearchUnavailable("馒头接口连接失败，未缓存为无资源")
+            if response.status_code != 200:
+                raise PTSearchUnavailable(f"馒头接口 HTTP {response.status_code}，未缓存为无资源")
+            try:
+                payload = response.json()
+            except ValueError as err:
+                raise PTSearchUnavailable("馒头接口未返回有效 JSON，未缓存为无资源") from err
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if not isinstance(data, dict):
+                message = str(payload.get("message") or "接口未返回数据") if isinstance(payload, dict) else "接口未返回数据"
+                if "頻繁" in message or "频繁" in message or str(payload.get("code")) == "4":
+                    cls._pt_cooldown_until = time.monotonic() + 300
+                    raise PTSearchUnavailable("馒头接口请求过于频繁，已暂停站点查询 5 分钟；不会标记为无资源")
+                raise PTSearchUnavailable(f"馒头接口错误：{message[:100]}；未缓存为无资源")
+            rows = data.get("data") or []
+            if not isinstance(rows, list):
+                raise PTSearchUnavailable("馒头接口资源格式异常，未缓存为无资源")
+            # 馒头有些种子的 status 为 null；MoviePilot 原解析器会在 .get 处崩溃。
+            rows = [{**row, "status": row.get("status") or {}}
+                    for row in rows if isinstance(row, dict)]
+            try:
+                parsed = spider._MTorrentSpider__parse_result(rows)
+            except Exception as err:
+                raise PTSearchUnavailable(f"馒头资源解析失败：{type(err).__name__}，未缓存为无资源") from err
+            return [TorrentInfo(site=site.get("id"), site_name=site.get("name"),
+                                site_cookie=site.get("cookie"), site_ua=site.get("ua"),
+                                site_proxy=site.get("proxy"), site_order=site.get("pri"),
+                                site_downloader=site.get("downloader"), **row)
+                    for row in parsed]
+
+    def _search_site_contexts(self, tmdb_id: int) -> list:
+        """沿用 MoviePilot 的过滤与精确匹配，馒头查询额外处理限流。"""
+        indexers = {site.get("id"): site for site in SitesHelper().get_indexers()}
+        unavailable = [sid for sid in self._site_ids if sid not in indexers]
+        if unavailable:
+            raise PTSearchUnavailable(f"所选站点 {unavailable} 未启用或不可用，未标记为无资源")
+        mteam = [indexers[sid] for sid in self._site_ids
+                 if sid in indexers and indexers[sid].get("parser") == "mTorrent"]
+        other_sites = [sid for sid in self._site_ids if sid not in {site["id"] for site in mteam}]
+        contexts = []
+        if mteam:
+            chain = SearchChain()
+            media = chain.recognize_media(tmdbid=int(tmdb_id), mtype=MediaType.MOVIE)
+            if not media:
+                raise PTSearchUnavailable(f"TMDB {tmdb_id} 媒体信息识别失败")
+            keywords = list(dict.fromkeys(str(value).strip() for value in
+                                          (media.original_title, media.en_title, media.title)
+                                          if value and str(value).strip()))
+            for site in mteam:
+                for keyword in keywords:
+                    torrents = self._request_mteam_torrents(site, keyword)
+                    if not torrents:
+                        continue
+                    matched = chain._SearchChain__parse_result(torrents=torrents, mediainfo=media)
+                    if matched:
+                        contexts.extend(matched)
+                        break
+        if other_sites:
+            contexts.extend(SearchChain().search_by_id(
+                tmdbid=int(tmdb_id), mtype=MediaType.MOVIE,
+                sites=other_sites, cache_local=False) or [])
+        return contexts
+
     def _scan_monthly_resources(self, year: int, month: int, candidates: list, force: bool,
                                 target_tmdb_ids: list = None) -> None:
         try:
@@ -2154,9 +2255,7 @@ class SmartMoviePush(_PluginBase):
                             if diagnostic:
                                 self._monthly_resource_job["message"] = f"{item.get('title') or tmdb_id} 已在媒体库或本插件下载记录中，不重复找资源"
                         else:
-                            contexts = SearchChain().search_by_id(
-                                tmdbid=int(tmdb_id), mtype=MediaType.MOVIE,
-                                sites=self._site_ids, cache_local=False) or []
+                            contexts = self._search_site_contexts(int(tmdb_id))
                             options = self._monthly_resource_options(contexts)
                             self._remember_monthly_resource_contexts(year, month, tmdb_id, contexts, options)
                             if diagnostic:
@@ -2167,6 +2266,12 @@ class SmartMoviePush(_PluginBase):
                         self._save_monthly_resource_cache(year, month, tmdb_id, options)
                     with self._monthly_resource_job_lock:
                         self._monthly_resource_job["found"] += bool(options)
+                except PTSearchUnavailable as err:
+                    self._monthly_resource_job["message"] = str(err)
+                    self._append_plugin_log("资源查询", f"TMDB {tmdb_id}：{err}", "error")
+                    with self._monthly_resource_job_lock:
+                        self._monthly_resource_job["errors"] += 1
+                    break
                 except Exception as err:
                     logger.warning(f"月份资源核对 {tmdb_id} 失败：{err}")
                     if diagnostic:
@@ -2243,9 +2348,7 @@ class SmartMoviePush(_PluginBase):
                     context = (self._cached_monthly_resource_context(year, month, movie_id, resource_id)
                                if resource_id else None)
                     if context is None:
-                        contexts = SearchChain().search_by_id(
-                            tmdbid=int(movie_id), mtype=MediaType.MOVIE,
-                            sites=self._site_ids, cache_local=False) or []
+                        contexts = self._search_site_contexts(int(movie_id))
                         options = self._monthly_resource_options(contexts)
                         self._save_monthly_resource_cache(year, month, movie_id, options)
                         self._remember_monthly_resource_contexts(year, month, movie_id, contexts, options)
@@ -2694,12 +2797,7 @@ class SmartMoviePush(_PluginBase):
         return bool(exists)
 
     def _search_best(self, media: MediaInfo) -> Optional[Context]:
-        results = SearchChain().search_by_id(
-            tmdbid=media.tmdb_id,
-            mtype=MediaType.MOVIE,
-            sites=self._site_ids,
-            cache_local=False,
-        ) or []
+        results = self._search_site_contexts(int(media.tmdb_id))
         return results[0] if results else None
 
     def _load_pending(self) -> dict:
@@ -3298,10 +3396,7 @@ class SmartMoviePush(_PluginBase):
                 if not any(row.get("key") == item.get("key") for row in remaining):
                     continue
                 try:
-                    results = SearchChain().search_by_id(
-                        tmdbid=int(item["tmdb_id"]), mtype=MediaType.MOVIE,
-                        sites=self._site_ids, cache_local=False,
-                    ) or []
+                    results = self._search_site_contexts(int(item["tmdb_id"]))
                     context = next(
                         (ctx for ctx in results if self._torrent_identity(ctx) == item.get("torrent_identity")),
                         results[0] if results else None,
@@ -4668,12 +4763,7 @@ class SmartMoviePush(_PluginBase):
             logger.info(f"已加入不再推送列表：{suppressed[tmdb_id]['title']} (TMDB {tmdb_id})")
             return
 
-        results = SearchChain().search_by_id(
-            tmdbid=int(item["tmdb_id"]),
-            mtype=MediaType.MOVIE,
-            sites=self._site_ids,
-            cache_local=False,
-        ) or []
+        results = self._search_site_contexts(int(item["tmdb_id"]))
         context = next(
             (ctx for ctx in results if self._torrent_identity(ctx) == item.get("torrent_identity")),
             results[0] if results else None,

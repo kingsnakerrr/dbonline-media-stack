@@ -84,6 +84,7 @@ namespace = {
     "settings": SimpleNamespace(TZ="Asia/Shanghai"),
     "logger": SimpleNamespace(warning=lambda *_args: None, info=lambda *_args: None,
                                error=lambda *_args: None),
+    "PTSearchUnavailable": type("PTSearchUnavailable", (RuntimeError,), {}),
 }
 exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(
     name="MonthlyUnderTest", bases=[], keywords=[], body=selected,
@@ -116,6 +117,9 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject.save_data = self.store.__setitem__
         self.logs = []
         self.subject._append_plugin_log = lambda *args: self.logs.append(args)
+        self.subject._search_site_contexts = lambda movie_id: namespace["SearchChain"]().search_by_id(
+            tmdbid=movie_id, mtype=namespace["MediaType"].MOVIE,
+            sites=getattr(self.subject, "_site_ids", [1]), cache_local=False) or []
 
     def test_queue_removes_movies_already_in_emby_or_active_in_mp(self):
         self.store["download_queue"] = [
