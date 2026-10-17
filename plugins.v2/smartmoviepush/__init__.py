@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.51"
+    plugin_version = "0.9.52"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1455,7 +1455,8 @@ class SmartMoviePush(_PluginBase):
         rows.sort(key=lambda item: (-int(item.get("vote_count") or 0),
                                     -float(item.get("score") or 0), str(item.get("tmdb_id"))))
         counts["all"] = len(rows)
-        counts["not_downloaded"] = sum(row["status"] in {"candidate", "no_resource", "pushed", "queued"} for row in rows)
+        counts["not_downloaded"] = sum(row["status"] in {"candidate", "pushed", "queued"} for row in rows)
+        counts["emby_all"] = counts.get("emby_ingested", 0) + counts.get("library", 0)
         search = str(payload.get("search") or "").strip().casefold()[:100]
         if search:
             rows = [item for item in rows if search in str(item.get("display_title") or item.get("title") or "").casefold()
@@ -1463,7 +1464,9 @@ class SmartMoviePush(_PluginBase):
                     or search in str(item.get("tmdb_id") or "")]
         status_filter = str(payload.get("status") or "all")
         if status_filter == "not_downloaded":
-            rows = [item for item in rows if item["status"] in {"candidate", "no_resource", "pushed", "queued"}]
+            rows = [item for item in rows if item["status"] in {"candidate", "pushed", "queued"}]
+        elif status_filter == "emby_all":
+            rows = [item for item in rows if item["status"] in {"emby_ingested", "library"}]
         elif status_filter != "all":
             rows = [item for item in rows if item["status"] == status_filter]
         total = len(rows)
@@ -1531,7 +1534,7 @@ class SmartMoviePush(_PluginBase):
             self._update_monthly_task(task_id, active=True)
             threading.Thread(target=self.run_once,
                              kwargs={"limit": int(task.get("batch_size") or 5), "month_task_id": task_id}, daemon=True).start()
-            return {"success": True, "message": "月份任务已启动；本轮沿用站点和并发设置，后续每 10 分钟续跑"}
+            return {"success": True, "message": f"年度自动任务已开启：立即尝试一轮、每轮最多 {int(task.get('batch_size') or 5)} 部，后续每 10 分钟续跑；与当前勾选无关"}
         if action == "monthly_pause":
             self._update_monthly_task(task_id, active=False)
             return {"success": True, "message": "月份任务已暂停新搜索；已经提交的下载不会取消"}

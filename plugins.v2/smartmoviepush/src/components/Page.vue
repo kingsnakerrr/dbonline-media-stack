@@ -55,15 +55,19 @@ const monthlyStatusOptions = [
   { title: '待入库', value: 'awaiting_library', color: 'info' },
   { title: '已整理', value: 'organized', color: 'warning' },
   { title: '已整理未入库', value: 'organized_not_ingested', color: 'error' },
-  { title: 'Emby 已入库', value: 'emby_ingested', color: 'success' },
-  { title: 'Emby 已入库（其他来源）', value: 'library', color: 'success' },
+  { title: 'Emby 已入库', value: 'emby_all', color: 'success' },
   { title: '已推送', value: 'pushed', color: 'primary' },
   { title: '不再推送', value: 'suppressed', color: 'error' },
 ]
 const monthlyStatusMeta = Object.fromEntries(monthlyStatusOptions.map(item => [item.value, item]))
 function monthlyStatusLabel(item) {
   if (item.status === 'queued') return item.queue_source === 'annual' ? '已在年度下载队列' : '已在随机下载队列'
+  if (item.status === 'emby_ingested') return 'Emby 已入库'
+  if (item.status === 'library') return 'Emby 已入库（其他来源）'
   return monthlyStatusMeta[item.status]?.title || item.status
+}
+function monthlyStatusColor(item) {
+  return ['emby_ingested', 'library'].includes(item.status) ? 'success' : monthlyStatusMeta[item.status]?.color || 'secondary'
 }
 const annualEntry = computed(() => {
   const year = Number(archiveYear.value)
@@ -892,11 +896,12 @@ onUnmounted(() => {
               <div class="d-flex flex-wrap ga-2">
                 <VBtn size="default" variant="tonal" @click="editMonthly(task)">编辑任务</VBtn>
                 <VBtn size="default" variant="tonal" :disabled="task.scan_state === 'running'" @click="runAction('monthly_rescan', { task_id: task.id })">重扫</VBtn>
-                <VBtn v-if="!task.active" size="default" color="success" variant="tonal" :disabled="task.scan_state !== 'complete' || !controlForm.enabled" @click="runAction('monthly_start', { task_id: task.id })">启动自动下载</VBtn>
+                <VBtn v-if="!task.active" size="default" color="success" variant="tonal" :disabled="task.scan_state !== 'complete' || !controlForm.enabled" @click="runAction('monthly_start', { task_id: task.id })">开启自动任务（每轮 {{ task.batch_size || 5 }} 部）</VBtn>
                 <VBtn v-else size="default" color="warning" variant="tonal" @click="runAction('monthly_pause', { task_id: task.id })">暂停自动下载</VBtn>
                 <VBtn size="default" color="error" variant="tonal" @click="runAction('monthly_delete', { task_id: task.id })">删除任务</VBtn>
               </div>
             </div>
+            <div class="text-caption text-medium-emphasis mt-2">自动任务与下方勾选无关：开启后立即尝试一轮，之后每 10 分钟从未入库且未在下载的候选中继续挑选；每轮最多 {{ task.batch_size || 5 }} 部。只下载勾选的电影，请用下方“下载选中”。</div>
           </div>
           <VBtn v-if="monthlyArchiveYear && !selectedMonthTasks.length && !monthlyEditMode" size="default" variant="tonal" class="mb-3" @click="monthlyEditMode = true">创建年度自动任务</VBtn>
           <VAlert v-if="!monthlyArchiveYear && !monthlyTaskId" type="info" variant="tonal" class="mb-3">此年度尚未扫描。设置最低评分和评价人数后点击“创建并扫描（不下载）”；扫描可能较长，完成后可手动选择下载或启动自动任务。</VAlert>
@@ -931,7 +936,7 @@ onUnmounted(() => {
                 <div class="monthly-row-subtitle">{{ item.release_date || '日期未知' }}</div>
               </div>
               <div class="monthly-row-score">⭐ {{ Number(item.score || 0).toFixed(1) }}<span class="monthly-row-votes">{{ item.vote_count || 0 }} 人评价</span></div>
-              <VChip size="small" :color="monthlyStatusMeta[item.status]?.color || 'secondary'" class="monthly-row-status">{{ monthlyStatusLabel(item) }}</VChip>
+              <VChip size="small" :color="monthlyStatusColor(item)" class="monthly-row-status">{{ monthlyStatusLabel(item) }}</VChip>
             </div>
           </div>
           <div class="d-flex align-center justify-end ga-3 mt-3">

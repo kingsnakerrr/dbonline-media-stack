@@ -493,6 +493,11 @@ class MonthlyTasksTest(unittest.TestCase):
         queued = next(item for item in result["data"]["items"] if item["tmdb_id"] == 1)
         self.assertEqual((queued["status"], queued["queue_source"]), ("queued", "random"))
         self.assertNotIn("resources", queued)
+        ingested = self.subject._api_secure_monthly({
+            "archive_key": key, "min_score": 7, "status": "emby_all", "access_token": "test",
+        })
+        self.assertEqual(ingested["data"]["counts"]["emby_all"], 1)
+        self.assertEqual([item["tmdb_id"] for item in ingested["data"]["items"]], [3])
 
     def test_manual_batch_rejects_forged_or_duplicate_resource_ids(self):
         task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}
