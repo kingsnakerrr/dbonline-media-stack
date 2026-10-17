@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.52"
+    plugin_version = "0.9.53"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -126,6 +126,7 @@ class SmartMoviePush(_PluginBase):
     _disk_guard_lock = threading.Lock()
     _monthly_tasks_key = "monthly_movie_tasks"
     _pt_request_lock = threading.RLock()
+    _pt_request_log_key = "mteam_search_attempts_24h"
     _pt_next_request_at = 0.0
     _pt_cooldown_until = 0.0
     _monthly_tasks_lock = threading.RLock()
@@ -2121,12 +2122,21 @@ class SmartMoviePush(_PluginBase):
             if now < cls._pt_cooldown_until:
                 wait_minutes = math.ceil((cls._pt_cooldown_until - now) / 60)
                 raise PTSearchUnavailable(f"馒头接口仍在限流，请约 {wait_minutes} 分钟后重试")
+            # 站点建议近 24 小时最多 1000 次；插件最多使用其中 400 次，
+            # 其余留给 MoviePilot 和用户的手动搜索。跨重启保存，避免重启重置额度。
+            wall_now = time.time()
+            attempts = [stamp for stamp in (self.get_data(self._pt_request_log_key) or [])
+                        if isinstance(stamp, (int, float)) and wall_now - 86400 < stamp <= wall_now]
+            if len(attempts) >= 400:
+                wait_minutes = math.ceil((attempts[0] + 86400 - wall_now) / 60)
+                raise PTSearchUnavailable(f"馒头搜索已达到插件近 24 小时安全额度，请约 {wait_minutes} 分钟后重试")
             delay = cls._pt_next_request_at - now
             if delay > 0:
                 time.sleep(delay)
-            # 馒头官方建议 /torrent/search 近 24 小时不超过约 1000 次；
-            # 本插件留出余量给 MoviePilot 其他搜索，平均最多约 576 次/天。
-            cls._pt_next_request_at = time.monotonic() + 150
+            # 短时间批量选择可更快处理；若站点仍返回限流，沿用一小时冷却。
+            cls._pt_next_request_at = time.monotonic() + 30
+            attempts.append(time.time())
+            self.save_data(self._pt_request_log_key, attempts)
             try:
                 response = RequestUtils(
                     headers={"Content-Type": "application/json",
@@ -2341,6 +2351,12 @@ class SmartMoviePush(_PluginBase):
                         with self._queue_lock:
                             self._remove_queued_movie(movie_id, "MoviePilot 已在下载")
                         self._monthly_batch_job["skipped"] += 1
+                        continue
+                    # 已在随机/年度共享队列中且没有空位时，无须重新搜一次 PT。
+                    if (len(active_torrents) >= self._max_active_downloads
+                            and any(str(entry.get("tmdb_id")) == movie_id
+                                    for entry in self._load_download_queue())):
+                        self._monthly_batch_job["queued"] += 1
                         continue
                     context = self._search_best(media)
                     if not context:

@@ -64,7 +64,11 @@ class PTSearchTest(unittest.TestCase):
         SearchUnderTest._pt_request_lock = threading.RLock()
         SearchUnderTest._pt_next_request_at = 0.0
         SearchUnderTest._pt_cooldown_until = 0.0
+        SearchUnderTest._pt_request_log_key = "mteam_search_attempts_24h"
         self.subject = SearchUnderTest()
+        self.data = {}
+        self.subject.get_data = lambda key: self.data.get(key)
+        self.subject.save_data = lambda key, value: self.data.__setitem__(key, value)
         self.site = {"id": 1, "name": "馒头"}
 
     def test_rate_limit_is_error_not_empty_result_and_starts_cooldown(self):
@@ -79,6 +83,17 @@ class PTSearchTest(unittest.TestCase):
         torrents = self.subject._request_mteam_torrents(self.site, "They Will Kill You")
         self.assertEqual(len(torrents), 1)
         self.assertEqual(torrents[0].site, 1)
+
+    def test_daily_budget_stops_search_before_site_request(self):
+        self.data[self.subject._pt_request_log_key] = [time.time() - 10] * 400
+        namespace["response"] = FakeResponse({"code": 0, "data": {"data": []}})
+        with self.assertRaisesRegex(PTSearchUnavailable, "安全额度"):
+            self.subject._request_mteam_torrents(self.site, "They Will Kill You")
+
+    def test_success_records_attempt(self):
+        namespace["response"] = FakeResponse({"code": 0, "data": {"data": []}})
+        self.subject._request_mteam_torrents(self.site, "They Will Kill You")
+        self.assertEqual(len(self.data[self.subject._pt_request_log_key]), 1)
 
 
 if __name__ == "__main__":
