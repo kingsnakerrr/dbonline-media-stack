@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.56"
+    plugin_version = "0.9.57"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -148,6 +148,7 @@ class SmartMoviePush(_PluginBase):
         self._annual_dispatch_enabled = bool(config.get("annual_dispatch_enabled", False))
         self._annual_dispatch_interval_minutes = max(1, min(int(config.get("annual_dispatch_interval_minutes") or 10), 240))
         self._annual_dispatch_count = max(1, min(int(config.get("annual_dispatch_count") or 5), 50))
+        self._annual_max_active_downloads = max(1, min(int(config.get("annual_max_active_downloads") or 5), 50))
         self._onlyonce = bool(config.get("onlyonce", False))
         self._push_interval_minutes = self._normalize_push_interval(
             config.get("push_interval_minutes") or self._interval_from_cron(config.get("cron"))
@@ -222,6 +223,7 @@ class SmartMoviePush(_PluginBase):
             "annual_dispatch_enabled": self._annual_dispatch_enabled,
             "annual_dispatch_interval_minutes": self._annual_dispatch_interval_minutes,
             "annual_dispatch_count": self._annual_dispatch_count,
+            "annual_max_active_downloads": self._annual_max_active_downloads,
             "onlyonce": False,
             "cron": self._cron,
             "push_interval_minutes": self._push_interval_minutes,
@@ -506,6 +508,7 @@ class SmartMoviePush(_PluginBase):
             "annual_dispatch_enabled": False,
             "annual_dispatch_interval_minutes": 10,
             "annual_dispatch_count": 5,
+            "annual_max_active_downloads": 5,
             "onlyonce": False,
             "cron": "0 * * * *",
             "limit": 20,
@@ -536,7 +539,7 @@ class SmartMoviePush(_PluginBase):
         suppressed = self._load_suppressed()
         download_queue = self._load_download_queue()
         download_history = self._load_download_history()
-        active_downloads = self._active_download_count()
+        _, active_downloads = self._active_download_counts()
 
         def stat_card(title: str, value: str, subtitle: str, color: str = "primary") -> dict:
             return {
@@ -595,7 +598,7 @@ class SmartMoviePush(_PluginBase):
                         {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "div", "text": f"每轮上限：{self._limit} 部"}]},
                         {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "div", "text": f"最低评分/投票：{self._min_score} / {self._min_votes}"}]},
                         {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "div", "text": f"M-Team 站点 ID：{self._site_id}"}]},
-                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "div", "text": f"同时下载上限：{self._max_active_downloads} 部"}]},
+                        {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "div", "text": f"随机/其他上限：{self._max_active_downloads} 部；年度上限：{self._annual_max_active_downloads} 部"}]},
                         {"component": "VCol", "props": {"cols": 12, "md": 4}, "content": [{"component": "div", "text": f"M-Team 查询上限：{self._max_searches} 次/轮"}]},
                     ]},
                 ]},
@@ -701,7 +704,7 @@ class SmartMoviePush(_PluginBase):
             return {"success": False, "message": "硬盘空间保护中：立即运行、推荐推送和新增下载均已暂停；旧下载继续"}
         if self._auto_download:
             blocked_message = ""
-            active = self._active_download_count()
+            _, active = self._active_download_counts()
             if active >= self._max_active_downloads:
                 blocked_message = (
                     f"正在下载任务已满：{active}/{self._max_active_downloads}。"
@@ -1167,7 +1170,7 @@ class SmartMoviePush(_PluginBase):
         queue = self._load_download_queue()
         history = self._load_download_history()
         active_count, active_items = self._active_download_snapshot()
-        occupied_slots = self._active_download_count()
+        annual_occupied, non_annual_occupied = self._active_download_counts()
         stats_history = self._load_stats_history()
         annual_history_count = sum(item.get("source") == "annual" for item in stats_history)
         return {
@@ -1178,6 +1181,7 @@ class SmartMoviePush(_PluginBase):
                 "annual_dispatch_enabled": self._annual_dispatch_enabled,
                 "annual_dispatch_interval_minutes": self._annual_dispatch_interval_minutes,
                 "annual_dispatch_count": self._annual_dispatch_count,
+                "annual_max_active_downloads": self._annual_max_active_downloads,
                 "annual_dispatch_last_at": self.get_data(self._annual_dispatch_last_key) or 0,
                 "cron": self._cron,
                 "push_interval_minutes": self._push_interval_minutes,
@@ -1188,7 +1192,9 @@ class SmartMoviePush(_PluginBase):
                 "non_annual_history_count": len(stats_history) - annual_history_count,
                 "suppressed_count": len(suppressed),
                 "active_downloads": active_count,
-                "occupied_download_slots": occupied_slots,
+                "occupied_download_slots": annual_occupied + non_annual_occupied,
+                "annual_occupied_download_slots": annual_occupied,
+                "non_annual_occupied_download_slots": non_annual_occupied,
                 "non_annual_active_downloads": sum(item.get("source") != "annual" for item in active_items),
                 "active_download_items": active_items,
                 "annual_history_count": annual_history_count,
@@ -1592,10 +1598,11 @@ class SmartMoviePush(_PluginBase):
         numeric_rules = {
             "limit": (1, 50, "每轮数量"),
             "test_limit": (1, 50, "立即运行数量"),
-            "max_active_downloads": (1, 100, "同时下载上限"),
+            "max_active_downloads": (1, 100, "随机/其他同时下载上限"),
             "max_searches": (20, 200, "每轮搜索候选数"),
             "annual_dispatch_interval_minutes": (1, 240, "年度推送间隔"),
             "annual_dispatch_count": (1, 50, "年度每轮推送数量"),
+            "annual_max_active_downloads": (1, 50, "年度同时下载上限"),
             "disk_guard_threshold_gb": (1, None, "停止新增阈值"),
             "disk_guard_recover_gb": (1, None, "允许恢复阈值"),
         }
@@ -1694,6 +1701,8 @@ class SmartMoviePush(_PluginBase):
             self._annual_dispatch_interval_minutes = parsed_numbers["annual_dispatch_interval_minutes"]
         if "annual_dispatch_count" in payload:
             self._annual_dispatch_count = parsed_numbers["annual_dispatch_count"]
+        if "annual_max_active_downloads" in payload:
+            self._annual_max_active_downloads = parsed_numbers["annual_max_active_downloads"]
         self.update_config(self._current_config())
         delivery_warning = self._telegram_delivery_warning() if any(
             key in payload for key in ("source", "admins_override", "chat_id_override")
@@ -1737,12 +1746,13 @@ class SmartMoviePush(_PluginBase):
                 else:
                     threading.Thread(target=self.process_download_queue,
                                      kwargs={"force_annual": True}, daemon=True).start()
-                    active = self._active_download_count()
+                    annual_active, _ = self._active_download_counts()
                     waiting = sum(item.get("source") == "annual" for item in self._load_download_queue())
                     result = {"success": True, "message":
                               f"已启动年度推送并立即尝试本轮，最多 {self._annual_dispatch_count} 部；"
                               + ("当前无年度候选，后续入队时自动按间隔推送" if not waiting else
-                                 "当前全局下载已满，空位出现后继续" if active >= self._max_active_downloads
+                                 f"年度下载已满 {annual_active}/{self._annual_max_active_downloads}，空位出现后继续"
+                                 if annual_active >= self._annual_max_active_downloads
                                  else "后台逐部搜索 PT 资源并提交")}
         elif action == "telegram_test":
             warning = self._telegram_delivery_warning()
@@ -2430,7 +2440,7 @@ class SmartMoviePush(_PluginBase):
                     self.save_data(self._download_queue_key, ordered[:2000])
                 self._monthly_batch_job["message"] = (
                     f"已登记 {self._monthly_batch_job['queued']} 部；{duplicates} 部已在随机/年度等候队列，"
-                    f"当前下载 {len(active_torrents)}/{self._max_active_downloads}；首页开启年度推送后再搜索资源")
+                    f"当前年度下载 {self._active_download_counts(active_torrents)[0]}/{self._annual_max_active_downloads}；首页开启年度推送后再搜索资源")
             self._append_plugin_log("月份下载", self._monthly_batch_job["message"])
         finally:
             self._monthly_batch_job["running"] = False
@@ -3055,6 +3065,33 @@ class SmartMoviePush(_PluginBase):
             logger.error(f"读取 MoviePilot 正在下载任务失败：{err}")
             return self._max_active_downloads
 
+    def _active_download_counts(self, torrents: Optional[List[Any]] = None,
+                                history: Optional[List[dict]] = None) -> Tuple[int, int]:
+        """按本插件提交记录拆分年度与随机/其他活动任务；未知来源保守计入随机/其他。"""
+        try:
+            if torrents is None:
+                torrents = DownloadChain().downloading() or []
+            if history is None:
+                history = self._load_stats_history()
+            annual_hashes = {str(item.get("download_id") or "").strip().lower()
+                             for item in history if item.get("source") == "annual" and item.get("download_id")}
+            annual_ids = {str(item.get("tmdb_id")) for item in history
+                          if item.get("source") == "annual" and item.get("tmdb_id")}
+            annual = 0
+            for row in torrents:
+                row_hash = str(self._download_value(
+                    row, "download_hash", "hash", "torrent_hash", "infohash", "info_hash"
+                ) or "").strip().lower()
+                if row_hash in annual_hashes or (
+                    not row_hash and str(self._download_value(row, "source", "plugin") or "") == self.__class__.__name__
+                    and bool(self._mp_active_movie_ids([row]) & annual_ids)
+                ):
+                    annual += 1
+            return annual, len(torrents) - annual
+        except Exception as err:
+            logger.error(f"无法区分年度与随机下载任务，暂停新增：{err}")
+            return self._annual_max_active_downloads, self._max_active_downloads
+
     @staticmethod
     def _mp_active_movie_ids(torrents: List[Any]) -> set:
         """仅用 MP 下载历史附带的 TMDB ID 去重，不按片名猜测。"""
@@ -3386,13 +3423,15 @@ class SmartMoviePush(_PluginBase):
             except Exception as err:
                 logger.warning(f"等候队列暂不能核对 MoviePilot 下载：{type(err).__name__}")
                 return
-            active = len(active_torrents)
             active_movie_ids = self._mp_active_movie_ids(active_torrents)
-            submitted_movie_ids = {str(row.get("tmdb_id")) for row in self._load_stats_history()
+            history = self._load_stats_history()
+            submitted_movie_ids = {str(row.get("tmdb_id")) for row in history
                                    if row.get("tmdb_id")}
-            slots = max(0, self._max_active_downloads - active)
+            annual_active, non_annual_active = self._active_download_counts(active_torrents, history)
+            annual_slots = max(0, self._annual_max_active_downloads - annual_active)
+            non_annual_slots = max(0, self._max_active_downloads - non_annual_active)
             # 有下载空位时强制更新 Emby 索引，避免其他来源刚入库的影片被重复提交。
-            library = self._library_snapshot_for_scan(force=slots > 0)
+            library = self._library_snapshot_for_scan(force=annual_slots > 0 or non_annual_slots > 0)
             emby_ids = set(library["tmdb_ids"]) if library else set()
             retained = [item for item in queue if str(item.get("tmdb_id") or "")
                         not in (emby_ids | active_movie_ids | submitted_movie_ids)]
@@ -3402,8 +3441,9 @@ class SmartMoviePush(_PluginBase):
                 queue = retained
             if not queue:
                 return
-            if slots <= 0:
-                logger.info(f"下载队列等待中：正在下载 {active}/{self._max_active_downloads}，等候 {len(queue)}")
+            if annual_slots <= 0 and non_annual_slots <= 0:
+                logger.info(f"下载队列等待中：随机/其他 {non_annual_active}/{self._max_active_downloads}，"
+                            f"年度 {annual_active}/{self._annual_max_active_downloads}，等候 {len(queue)}")
                 return
             if not library:
                 logger.warning("等候队列暂停补位：Emby 目录暂不可核对，避免重复下载")
@@ -3412,15 +3452,18 @@ class SmartMoviePush(_PluginBase):
             remaining = list(queue)
             submitted = 0
             annual_submitted = 0
+            non_annual_submitted = 0
             annual_attempts = 0
             last_annual = float(self.get_data(self._annual_dispatch_last_key) or 0)
             annual_due = (self._annual_dispatch_enabled and
                           (force_annual or time.time() - last_annual >= self._annual_dispatch_interval_minutes * 60))
             # 只处理本次进入函数时已有的项目，失败项留到下一分钟，防止同轮反复重试。
             for item in queue[:]:
-                if submitted >= slots:
-                    break
                 is_annual = item.get("source") == "annual"
+                if is_annual and annual_submitted >= annual_slots:
+                    continue
+                if not is_annual and non_annual_submitted >= non_annual_slots:
+                    continue
                 if is_annual and (not annual_due or annual_submitted >= self._annual_dispatch_count
                                   or annual_attempts >= self._annual_dispatch_count * 2):
                     continue
@@ -3455,6 +3498,8 @@ class SmartMoviePush(_PluginBase):
                     submitted += 1
                     if is_annual:
                         annual_submitted += 1
+                    else:
+                        non_annual_submitted += 1
                     logger.info(f"顺序下载队列已提交：{item.get('title')}")
                 except Exception as err:
                     # 提交时如发现 MP 刚开始下载，同片等候项已被清除，不得用旧快照写回来。
@@ -4296,14 +4341,14 @@ class SmartMoviePush(_PluginBase):
                      f"说明：{html.escape(str(state.get('detail') or '-'))}")]
         if period == "status":
             active, _ = self._active_download_snapshot()
-            occupied = self._active_download_count()
+            annual_occupied, other_occupied = self._active_download_counts()
             queue = len(self._load_download_queue())
             disk = "保护中" if self._disk_guard_blocks_new() else "正常"
             return [("智能电影插件 · 当前状态",
                      f"插件：{'已开启' if self._enabled else '已关闭'}\n"
                      f"定时推送：{'已开启' if self._auto_push else '已暂停'}\n"
                      f"下载模式：{'自动' if self._auto_download else '手动'}\n"
-                     f"本插件正在下载：{active} 部｜总槽位：{occupied}/{self._max_active_downloads}\n"
+                     f"本插件正在下载：{active} 部｜随机/其他：{other_occupied}/{self._max_active_downloads}｜年度：{annual_occupied}/{self._annual_max_active_downloads}\n"
                      f"等候下载：{queue}\n硬盘空间保护：{disk}")]
         selected = self._stats_range(period, now)
         if not selected:
@@ -4667,9 +4712,9 @@ class SmartMoviePush(_PluginBase):
                         logger.error(f"集中推送 {media.title_year} 失败：{err}", exc_info=True)
 
             if auto_mode:
-                # 锁住“读活动数→批量提交”全过程，防止手动点击和队列补位同时越过 20 部上限。
+                # 锁住“读随机/其他活动数→批量提交”全过程；年度任务有独立名额。
                 with self._queue_lock:
-                    active = self._active_download_count()
+                    _, active = self._active_download_counts()
                     slots = max(0, self._max_active_downloads - active)
                     send_batch(slots, allow_queue=not test_mode)
                 if test_mode and len(selected) > sent:
@@ -4820,7 +4865,7 @@ class SmartMoviePush(_PluginBase):
         download_channel = None if source == "__custom_telegram__" else channel
         download_userid = None if source == "__custom_telegram__" else userid
         with self._queue_lock:
-            active = self._active_download_count()
+            _, active = self._active_download_counts()
             if self._disk_guard_blocks_new() or active >= self._max_active_downloads:
                 self._enqueue_download(media, context, channel=download_channel,
                                        userid=download_userid)
