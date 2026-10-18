@@ -28,7 +28,7 @@ const historyPageSize = ref(100)
 const historySource = ref('all')
 const historyBusy = ref(false)
 const historyView = ref({ dates: [], items: [], total: 0, page: 1 })
-const monthlyForm = ref({ task_id: '', year: new Date().getFullYear(), month: 0, min_score: 7, min_votes: 50, batch_size: 5 })
+const monthlyForm = ref({ task_id: '', year: new Date().getFullYear(), month: 0, min_score: 7, min_votes: 50 })
 const monthlyView = ref({ task: {}, items: [], counts: {}, total: 0, page: 1 })
 const monthlyTaskId = ref('')
 const monthlyArchiveKey = ref('')
@@ -278,8 +278,7 @@ async function openMonthlyArchive(archive) {
   monthlyEditMode.value = !archive.latest && !archive.tasks?.length
   monthlyForm.value = { task_id: archive.tasks?.[0]?.id || '', year: Number(archive.year),
     month: Number(archive.month), min_score: Number(archive.tasks?.[0]?.min_score ?? 7),
-    min_votes: Number(archive.tasks?.[0]?.min_votes ?? 50),
-    batch_size: Number(archive.tasks?.[0]?.batch_size ?? 5) }
+    min_votes: Number(archive.tasks?.[0]?.min_votes ?? 50) }
   monthlyView.value = { task: { year: archive.year, month: archive.month }, items: [], counts: {}, total: 0, page: 1 }
   monthlyPage.value = 1
   monthlyMinScore.value = Number(archive.minimum ?? 7)
@@ -302,11 +301,11 @@ async function downloadMonthlySelected() {
 }
 function editMonthly(task) {
   monthlyForm.value = { task_id: task.id, year: task.year, month: task.month, min_score: task.min_score,
-    min_votes: task.min_votes ?? 50, batch_size: task.batch_size || 5 }
+    min_votes: task.min_votes ?? 50 }
   monthlyEditMode.value = true
 }
 function resetMonthlyForm() {
-  monthlyForm.value = { task_id: '', year: new Date().getFullYear(), month: 0, min_score: 7, min_votes: 50, batch_size: 5 }
+  monthlyForm.value = { task_id: '', year: new Date().getFullYear(), month: 0, min_score: 7, min_votes: 50 }
 }
 async function saveMonthly() {
   const form = { ...monthlyForm.value }
@@ -364,6 +363,7 @@ const telegramForm = ref({ source: '', admins_override: '', chat_id_override: ''
 const diskForm = ref({ disk_guard_enabled: true, disk_guard_path: '/home', disk_guard_threshold_gb: 300, disk_guard_recover_gb: 350 })
 const pushForm = ref({ limit: 20, test_limit: 2, max_active_downloads: 20, max_searches: 80, site_ids: [], min_score: 6 })
 const controlForm = ref({ enabled: true, auto_push: false, auto_download: false, push_interval_minutes: 60 })
+const annualDispatchForm = ref({ annual_dispatch_interval_minutes: 10, annual_dispatch_count: 5 })
 const intervalItems = [30, 60, 120, 180, 240, 300].map(value => ({ title: `${value} 分钟`, value }))
 const downloadModeItems = [
   { title: '自动下载', value: true },
@@ -401,6 +401,10 @@ function applyState(data, syncForms = true) {
     auto_push: Boolean(data.summary?.auto_push),
     auto_download: Boolean(data.summary?.auto_download),
     push_interval_minutes: data.summary?.push_interval_minutes || 60,
+  }
+  annualDispatchForm.value = {
+    annual_dispatch_interval_minutes: data.summary?.annual_dispatch_interval_minutes || 10,
+    annual_dispatch_count: data.summary?.annual_dispatch_count || 5,
   }
 }
 
@@ -515,6 +519,29 @@ async function savePushSettings() {
   } finally {
     loading.value = false
   }
+}
+
+async function saveAnnualDispatchSettings() {
+  loading.value = true
+  error.value = ''
+  message.value = ''
+  try {
+    const response = await props.api.post('plugin/SmartMoviePush/ui_config', { ...annualDispatchForm.value, access_token: accessToken.value })
+    const body = envelope(response)
+    if (body?.locked) { lockLocally(); return }
+    if (body?.success === false) { error.value = body?.message || '保存失败'; return }
+    message.value = '年度推送设置已保存'
+    applyState(body?.data)
+  } catch (err) {
+    error.value = err?.message || '保存失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function triggerAnnualDispatch(action) {
+  await saveAnnualDispatchSettings()
+  if (!error.value) await runAction(action)
 }
 
 const summary = computed(() => state.value.summary || {})
@@ -784,12 +811,25 @@ onUnmounted(() => {
         <div class="text-h6">按年份筛选电影</div>
         <VChip size="small" color="primary">{{ (state.monthly_tasks || []).length }}/5</VChip>
       </div>
-      <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；创建任务只保存电影名单，不会开始下载。扫描完成后可勾选电影手动下载，或点击“启动自动下载”按每轮数量定时下载；最多保留 5 个自动任务。</div>
+      <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；勾选影片只加入年度待下载候选。是否推送、定时间隔和每轮数量都在此处统一控制；最多保存 5 个扫描任务。</div>
       <VRow dense class="mb-3">
         <VCol cols="12" sm="4"><VCard variant="tonal" color="info" class="pa-3 h-100 list-card" @click="openActive('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度正在下载</div><div class="text-h6 font-weight-bold">{{ annualActiveItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
         <VCol cols="12" sm="4"><VCard variant="tonal" color="secondary" class="pa-3 h-100 list-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度待下载候选</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
         <VCol cols="12" sm="4"><VCard variant="tonal" color="primary" class="pa-3 h-100 list-card" @click="openHistory('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度下载记录</div><div class="text-h6 font-weight-bold">{{ summary.annual_history_count || 0 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
       </VRow>
+      <div class="monthly-task-row pa-3 mb-3">
+        <div class="d-flex flex-wrap align-center ga-3">
+          <VTextField v-model.number="annualDispatchForm.annual_dispatch_count" label="年度每轮推送（部）" type="number" min="1" max="50" density="comfortable" hide-details style="max-width: 205px" />
+          <VSelect v-model="annualDispatchForm.annual_dispatch_interval_minutes" :items="[5, 10, 30, 60, 120, 240].map(value => ({ title: `${value} 分钟`, value }))" label="定时推送间隔" density="comfortable" hide-details style="max-width: 205px" />
+          <VBtn variant="tonal" :loading="loading" @click="saveAnnualDispatchSettings">保存年度设置</VBtn>
+          <VBtn v-if="!summary.annual_dispatch_enabled" color="success" :disabled="!controlForm.enabled" :loading="loading" @click="triggerAnnualDispatch('annual_dispatch_start')">启动推送下载</VBtn>
+          <template v-else>
+            <VBtn color="warning" variant="tonal" :loading="loading" @click="runAction('annual_dispatch_pause')">暂停年度推送</VBtn>
+            <VBtn color="success" variant="tonal" :disabled="!annualQueueItems.length" :loading="loading" @click="triggerAnnualDispatch('annual_dispatch_now')">立即推送一轮</VBtn>
+          </template>
+        </div>
+        <div class="text-caption text-medium-emphasis mt-2">{{ summary.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停' }}；启动时立即尝试推送，之后每 {{ summary.annual_dispatch_interval_minutes || 10 }} 分钟尝试一轮，每轮最多 {{ summary.annual_dispatch_count || 5 }} 部。全局下载 {{ summary.occupied_download_slots || 0 }}/{{ summary.max_active_downloads || 10 }}；满额时保留候选等待空位。随机下载独立运行。</div>
+      </div>
       <div class="d-flex flex-wrap align-center ga-3 mt-4 mb-3">
         <VCombobox v-model="archiveYear" :items="archiveYearOptions" label="选择或输入年份" type="number" density="compact" hide-details class="monthly-year-select">
           <template #item="{ props: listProps, item }">
@@ -888,7 +928,6 @@ onUnmounted(() => {
             <div class="d-flex flex-wrap align-center ga-3">
               <VTextField v-model.number="monthlyForm.min_score" label="TMDB 最低评分" type="number" min="0" max="10" step="0.1" density="comfortable" hide-details style="max-width: 190px" />
               <VTextField v-if="Number(monthlyForm.month) === 0" v-model.number="monthlyForm.min_votes" label="高口碑最低评价人数" type="number" min="0" max="10000" density="comfortable" hide-details style="max-width: 200px" />
-              <VTextField v-model.number="monthlyForm.batch_size" label="自动任务每轮下载（部）" type="number" min="1" max="50" density="comfortable" hide-details style="max-width: 210px" />
               <VBtn color="primary" variant="tonal" size="default" :loading="loading" :disabled="!monthlyForm.task_id && (state.monthly_tasks || []).length >= 5" @click="saveMonthly">{{ monthlyForm.task_id ? '保存并重扫' : '创建并扫描（不下载）' }}</VBtn>
               <VBtn v-if="monthlyForm.task_id" variant="text" size="default" @click="monthlyEditMode = false">取消</VBtn>
             </div>
@@ -896,19 +935,17 @@ onUnmounted(() => {
           </div>
           <div v-for="task in selectedMonthTasks" :key="task.id" class="monthly-task-row pa-3 mb-3">
             <div class="d-flex flex-wrap align-center justify-space-between ga-2">
-              <div class="text-caption">任务 ≥{{ task.min_score }} 分 · 每轮 {{ task.batch_size || 5 }} 部 · {{ task.scan_progress || '等待扫描' }}<span v-if="task.scan_error" class="text-error"> · {{ task.scan_error }}</span></div>
+              <div class="text-caption">扫描任务 ≥{{ task.min_score }} 分 · {{ task.scan_progress || '等待扫描' }}<span v-if="task.scan_error" class="text-error"> · {{ task.scan_error }}</span></div>
               <div class="d-flex flex-wrap ga-2">
                 <VBtn size="default" variant="tonal" @click="editMonthly(task)">编辑任务</VBtn>
                 <VBtn size="default" variant="tonal" :disabled="task.scan_state === 'running'" @click="runAction('monthly_rescan', { task_id: task.id })">重扫</VBtn>
-                <VBtn v-if="!task.active" size="default" color="success" variant="tonal" :disabled="task.scan_state !== 'complete' || !controlForm.enabled" @click="runAction('monthly_start', { task_id: task.id })">开启自动任务（每轮 {{ task.batch_size || 5 }} 部）</VBtn>
-                <VBtn v-else size="default" color="warning" variant="tonal" @click="runAction('monthly_pause', { task_id: task.id })">暂停自动下载</VBtn>
                 <VBtn size="default" color="error" variant="tonal" @click="runAction('monthly_delete', { task_id: task.id })">删除任务</VBtn>
               </div>
             </div>
-            <div class="text-caption text-medium-emphasis mt-2">自动任务与下方勾选无关：开启后立即尝试一轮，之后每 10 分钟从未入库且未在下载的候选中继续挑选；每轮最多 {{ task.batch_size || 5 }} 部。只下载勾选的电影，请用下方“下载选中”。</div>
+            <div class="text-caption text-medium-emphasis mt-2">这里仅管理已保存的电影名单。勾选影片加入年度候选后，到首页控制推送。</div>
           </div>
-          <VBtn v-if="monthlyArchiveYear && !selectedMonthTasks.length && !monthlyEditMode" size="default" variant="tonal" class="mb-3" @click="monthlyEditMode = true">创建年度自动任务</VBtn>
-          <VAlert v-if="!monthlyArchiveYear && !monthlyTaskId" type="info" variant="tonal" class="mb-3">此年度尚未扫描。设置最低评分和评价人数后点击“创建并扫描（不下载）”；扫描可能较长，完成后可手动选择下载或启动自动任务。</VAlert>
+          <VBtn v-if="monthlyArchiveYear && !selectedMonthTasks.length && !monthlyEditMode" size="default" variant="tonal" class="mb-3" @click="monthlyEditMode = true">创建年度扫描任务</VBtn>
+          <VAlert v-if="!monthlyArchiveYear && !monthlyTaskId" type="info" variant="tonal" class="mb-3">此年度尚未扫描。设置最低评分和评价人数后点击“创建并扫描（不下载）”；完成后可勾选影片加入年度候选队列。</VAlert>
           <template v-if="monthlyArchiveYear || monthlyTaskId">
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <VTextField v-model.number="monthlyMinScore" label="最低评分" type="number" min="0" max="10" step="0.1" density="compact" hide-details style="max-width: 125px" />
@@ -921,12 +958,12 @@ onUnmounted(() => {
           <div v-if="monthlyArchiveYear" class="d-flex flex-wrap align-center justify-start ga-2 mb-3">
             <VBtn variant="tonal" :loading="monthlyBusy" @click="loadMonthly(true)">立即核对 Emby</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-3">电影名单只读取 TMDB。点击“下载选中”后先核对 Emby、MoviePilot 下载和随机等候队列；未重复的影片立即进入年度候选队列，并优先于随机候选补位。出现下载空位时再逐部搜索 PT，找到符合规则的资源才提交；全局同时下载上限仍然生效。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
+          <div class="text-caption text-medium-emphasis mb-3">电影名单只读取 TMDB。勾选后先核对 Emby、MoviePilot 下载和随机等候队列；未重复的影片只进入年度候选。首页启动推送后才按空位逐部搜索 PT 并提交，全局下载上限仍生效。{{ monthlyView.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。' }}</div>
           <div v-if="monthlyView.batch_progress?.total" class="text-caption mb-3">批量下载：已处理 {{ monthlyView.batch_progress.done || 0 }}/{{ monthlyView.batch_progress.total }} · 已提交 {{ monthlyView.batch_progress.submitted || 0 }} · 等候 {{ monthlyView.batch_progress.queued || 0 }} · 跳过 {{ monthlyView.batch_progress.skipped || 0 }} · 失败 {{ monthlyView.batch_progress.errors || 0 }}<span v-if="monthlyView.batch_progress.message" class="text-error"> · {{ monthlyView.batch_progress.message }}</span></div>
           <div class="d-flex flex-wrap align-center ga-2 mb-3">
             <VBtn size="small" variant="tonal" :disabled="!(monthlyView.items || []).some(monthlyCanDownload)" @click="selectMonthlyPage">全选当前页</VBtn>
             <VBtn size="small" variant="text" :disabled="!monthlySelected.length" @click="monthlySelected = []">清空选择</VBtn>
-            <VBtn size="small" color="success" :disabled="!monthlySelected.length || !monthlyArchiveYear || !controlForm.enabled" @click="downloadMonthlySelected">下载选中 {{ monthlySelected.length }} 部</VBtn>
+            <VBtn size="small" color="success" :disabled="!monthlySelected.length || !monthlyArchiveYear || !controlForm.enabled" @click="downloadMonthlySelected">加入年度候选 {{ monthlySelected.length }} 部</VBtn>
           </div>
           <div v-if="!monthlyView.items?.length" class="text-center text-medium-emphasis pa-8">暂无符合当前筛选条件的电影</div>
           <div v-else class="monthly-movie-list">
