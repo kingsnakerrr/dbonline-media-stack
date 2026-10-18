@@ -12,6 +12,7 @@ const accessReady = ref(false)
 const accessPassword = ref('')
 const accessToken = ref('')
 const accessTokenKey = 'smartmoviepush_access_token'
+const activePage = ref('random')
 const dialog = ref('')
 const dialogSource = ref('all')
 const dialogOpen = computed({
@@ -107,16 +108,6 @@ function yearScanBadge(year) {
   if (badge.status === 'error') return { text: badge.scans ? `扫描失败 · 已扫 ${badge.scans} 次` : '扫描失败', color: 'error' }
   return badge.scans ? { text: `已扫 ${badge.scans} 次`, color: 'success' } : { text: '未扫描', color: 'secondary' }
 }
-const archiveMonths = computed(() => Array.from({ length: 12 }, (_, index) => {
-  const month = index + 1
-  const archives = (state.value.monthly_archives || []).filter(item => Number(item.year) === Number(archiveYear.value) && Number(item.month) === month)
-  const tasks = (state.value.monthly_tasks || []).filter(item => Number(item.year) === Number(archiveYear.value) && Number(item.month) === month)
-  const latest = archives.reduce((current, item) => !current || String(item.scanned_at || '') > String(current.scanned_at || '') ? item : current, null)
-  return { year: Number(archiveYear.value), month, latest, tasks,
-    minimum: archives.length ? Math.min(...archives.map(item => Number(item.min_score))) : 7,
-    scans: archives.reduce((total, item) => total + Number(item.scan_count || 1), 0),
-    movies: Number(latest?.month_candidate_count || latest?.candidate_count || 0) }
-}))
 const selectedMonthTasks = computed(() => (state.value.monthly_tasks || []).filter(item =>
   Number(item.year) === Number(monthlyArchiveYear.value || monthlyView.value.task?.year)
   && Number(item.month) === Number(monthlyArchiveMonth.value || monthlyView.value.task?.month)))
@@ -164,14 +155,20 @@ const historyDateOptions = computed(() => [
 ])
 const suppressedSearch = ref('')
 const logSearch = ref('')
+const logSource = ref('random')
 const showDetailedLogs = ref(false)
 const logsRefreshing = ref(false)
 const logsRefreshedAt = ref('')
 const pageSizes = [20, 50, 100]
 const briefLogCategories = new Set(['提交下载', '提交失败', '推送成功', '推送失败', '整理完成', 'Emby 已入库', '每日统计'])
-const visibleLogs = computed(() => showDetailedLogs.value
-  ? (state.value.logs || [])
-  : (state.value.logs || []).filter(item => briefLogCategories.has(item.category)))
+const visibleLogs = computed(() => (state.value.logs || []).filter(item => {
+  const annual = item.category === '年度下载'
+  if (logSource.value === 'annual') return annual
+  if (annual) return false
+  return showDetailedLogs.value || briefLogCategories.has(item.category)
+}))
+const sourceLogCount = computed(() => (state.value.logs || []).filter(item =>
+  logSource.value === 'annual' ? item.category === '年度下载' : item.category !== '年度下载').length)
 
 async function toggleDetailedLogs() {
   showDetailedLogs.value = !showDetailedLogs.value
@@ -185,7 +182,9 @@ async function refreshLogs() {
     logsRefreshing.value = false
   }
 }
-async function openLogs() {
+async function openLogs(source = 'random') {
+  logSource.value = source
+  logSearch.value = ''
   dialog.value = 'logs'
   await refreshLogs()
 }
@@ -710,6 +709,15 @@ onUnmounted(() => {
     </VCard>
 
     <template v-else>
+    <div class="page-switcher mb-4">
+      <div class="page-switcher-tabs" role="tablist" aria-label="插件页面">
+        <VBtn :variant="activePage === 'random' ? 'flat' : 'text'" :color="activePage === 'random' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'random'" @click="activePage = 'random'">随机下载</VBtn>
+        <VBtn :variant="activePage === 'annual' ? 'flat' : 'text'" :color="activePage === 'annual' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'annual'" @click="activePage = 'annual'">按年下载</VBtn>
+        <VBtn :variant="activePage === 'telegram' ? 'flat' : 'text'" :color="activePage === 'telegram' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'telegram'" @click="activePage = 'telegram'">Telegram 设置</VBtn>
+      </div>
+      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.58' }}</VChip>
+    </div>
+    <div v-if="activePage === 'random'" role="tabpanel">
     <div class="status-grid mb-3">
       <div class="status-item">
         <VCard variant="tonal" :color="controlForm.enabled ? 'success' : 'secondary'" class="pa-4 h-100 status-card">
@@ -798,7 +806,7 @@ onUnmounted(() => {
         <VBtn color="primary" variant="tonal" :loading="loading" @click="savePushSettings">保存推送与下载设置</VBtn>
         <VBtn color="success" variant="tonal" :loading="loading" :disabled="!controlForm.enabled" @click="runAction('run_once')">立即运行</VBtn>
         <VBtn color="error" variant="tonal" :loading="loading" @click="runAction('clear_cache')">清空扫描缓存</VBtn>
-        <VBtn color="info" variant="tonal" @click="openLogs">查看日志</VBtn>
+        <VBtn color="info" variant="tonal" @click="openLogs('random')">查看随机日志</VBtn>
         <VBtn variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus()" />
       </div>
       <VAlert v-if="state.run_status?.run_id" class="mt-3" type="info" variant="tonal" density="compact">
@@ -806,17 +814,16 @@ onUnmounted(() => {
         <span v-if="state.run_status.target">（目标 {{ state.run_status.target }}，已查询 {{ state.run_status.searched || 0 }}，选中 {{ state.run_status.selected || 0 }}，已推送 {{ state.run_status.sent || 0 }}）</span>
       </VAlert>
     </VCard>
+    </div>
 
+    <div v-else-if="activePage === 'annual'" role="tabpanel">
     <VCard variant="outlined" class="pa-4 mb-4">
-      <div class="d-flex align-center justify-space-between mb-1">
-        <div class="text-h6">按年份筛选电影</div>
-        <VChip size="small" color="primary">{{ (state.monthly_tasks || []).length }}/5</VChip>
-      </div>
+      <div class="text-h6 mb-1">按年份筛选电影</div>
       <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；勾选影片只加入年度待下载候选。是否推送、定时间隔和每轮数量都在此处统一控制；最多保存 5 个扫描任务。</div>
-      <VRow dense class="mb-3">
-        <VCol cols="12" sm="4"><VCard variant="tonal" color="info" class="pa-3 h-100 list-card" @click="openActive('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度正在下载</div><div class="text-h6 font-weight-bold">{{ annualActiveItems.length }}</div><div class="text-caption mt-1">年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
-        <VCol cols="12" sm="4"><VCard variant="tonal" color="secondary" class="pa-3 h-100 list-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度待下载候选</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
-        <VCol cols="12" sm="4"><VCard variant="tonal" color="primary" class="pa-3 h-100 list-card" @click="openHistory('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度下载记录</div><div class="text-h6 font-weight-bold">{{ summary.annual_history_count || 0 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+      <VRow dense class="mb-3 annual-status-row">
+        <VCol cols="12" sm="4"><VCard variant="tonal" color="info" class="pa-4 h-100 list-card status-card" @click="openActive('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度正在下载</div><div class="text-h6 font-weight-bold">{{ annualActiveItems.length }}</div><div class="text-caption mt-1">年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+        <VCol cols="12" sm="4"><VCard variant="tonal" color="secondary" class="pa-4 h-100 list-card status-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度待下载候选</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+        <VCol cols="12" sm="4"><VCard variant="tonal" color="primary" class="pa-4 h-100 list-card status-card" @click="openHistory('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度下载记录</div><div class="text-h6 font-weight-bold">{{ summary.annual_history_count || 0 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
       </VRow>
       <div class="monthly-task-row pa-3 mb-3">
         <div class="d-flex flex-wrap align-center ga-3">
@@ -829,6 +836,7 @@ onUnmounted(() => {
             <VBtn color="warning" variant="tonal" :loading="loading" @click="runAction('annual_dispatch_pause')">暂停年度推送</VBtn>
             <VBtn color="success" variant="tonal" :disabled="!annualQueueItems.length" :loading="loading" @click="triggerAnnualDispatch('annual_dispatch_now')">立即推送一轮</VBtn>
           </template>
+          <VBtn color="info" variant="tonal" @click="openLogs('annual')">查看年度日志</VBtn>
         </div>
         <div class="text-caption text-medium-emphasis mt-2">{{ summary.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停' }}；启动时立即尝试，之后每 {{ summary.annual_dispatch_interval_minutes || 10 }} 分钟一轮，每轮最多 {{ summary.annual_dispatch_count || 5 }} 部。年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}，随机/其他占用 {{ summary.non_annual_occupied_download_slots || 0 }}/{{ summary.max_active_downloads || 10 }}；两边名额互不挤占，硬盘保护与同片去重仍生效。</div>
       </div>
@@ -842,20 +850,13 @@ onUnmounted(() => {
         </VCombobox>
         <VBtn color="primary" variant="tonal" size="large" :disabled="Number(archiveYear) < 1900 || Number(archiveYear) > new Date().getFullYear()" @click="openMonthlyArchive(annualEntry)">{{ annualEntry.latest || annualEntry.tasks.length ? '查看年度名单' : '扫描这一年' }}</VBtn>
       </div>
-      <div v-if="annualEntry.scanTask" class="text-caption text-info">{{ annualEntry.scanTask.scan_progress || '全年扫描中' }}</div>
-      <div v-if="annualEntry.failedTask" class="text-caption text-error">{{ annualEntry.failedTask.scan_error || '扫描中断，请查看日志后重试' }}</div>
-      <div v-if="annualEntry.latest" class="text-caption">{{ archiveYear }} 年已保存 {{ annualEntry.movies }} 部电影；重新打开会读取已有名单。</div>
-      <details v-if="archiveMonths.some(item => item.latest || item.tasks.length)" class="mt-4">
-        <summary class="text-caption">查看以前保存的按月任务与名单</summary>
-        <div class="monthly-month-grid mt-3">
-          <button v-for="item in archiveMonths.filter(value => value.latest || value.tasks.length)" :key="item.month" type="button" class="monthly-month-tile monthly-month-scanned" @click="openMonthlyArchive(item)">
-            <span class="monthly-month-name">{{ item.month }} 月</span>
-            <span class="monthly-month-summary">{{ item.latest ? `${item.movies} 部` : item.tasks[0].scan_progress || '扫描中' }}</span>
-          </button>
-        </div>
-      </details>
+      <VAlert v-if="annualEntry.scanTask" type="info" variant="tonal" density="compact" class="mt-3">{{ annualEntry.scanTask.scan_progress || '全年扫描中' }}</VAlert>
+      <VAlert v-if="annualEntry.failedTask" type="error" variant="tonal" density="compact" class="mt-3">{{ annualEntry.failedTask.scan_error || '扫描中断，请查看年度日志后重试' }}</VAlert>
+      <VAlert v-if="annualEntry.latest" type="info" variant="tonal" density="compact" class="mt-3">年度片单缓存：{{ archiveYear }} 年已保存 {{ annualEntry.movies }} 部电影，已扫描 {{ annualEntry.scans }} 次。这里是名单数量，不是已推送数量；重新打开可直接读取。</VAlert>
     </VCard>
+    </div>
 
+    <div v-else role="tabpanel">
     <VCard variant="outlined" class="pa-4 mb-4">
       <div class="text-h6 mb-1">Telegram 设置</div>
       <div class="text-caption text-medium-emphasis mb-3">三个输入框留空即跟随 MoviePilot 的 Telegram 通知设置；需要覆盖哪一项就直接输入哪一项。</div>
@@ -873,6 +874,7 @@ onUnmounted(() => {
       <VBtn color="primary" variant="tonal" :loading="loading" @click="saveTelegram">保存 Telegram 设置</VBtn>
       <VBtn color="info" variant="tonal" class="ml-2" :loading="loading" @click="runAction('telegram_test')">发送测试消息</VBtn>
     </VCard>
+    </div>
 
     <VDialog v-model="dialogOpen" max-width="75rem" scrollable>
       <VCard v-if="dialog === 'active'" :title="dialogSource === 'annual' ? '年度正在下载 · 实时状态' : dialogSource === 'non_annual' ? '随机/其他正在下载 · 实时状态' : '全部正在下载 · 实时状态'">
@@ -1006,16 +1008,16 @@ onUnmounted(() => {
           <VDataTable :headers="diskHeaders" :items="diskGuard.waiting || []" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
         </VCardText>
       </VCard>
-      <VCard v-else-if="dialog === 'logs'" title="插件运行日志">
+      <VCard v-else-if="dialog === 'logs'" :title="logSource === 'annual' ? '年度下载日志' : '随机下载与插件日志'">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
           <div class="d-flex ga-2 mb-3">
             <VTextField v-model="logSearch" label="搜索日志" prepend-inner-icon="mdi-magnify" clearable hide-details />
-            <VBtn :color="showDetailedLogs ? 'primary' : 'secondary'" variant="tonal" :loading="logsRefreshing" class="flex-shrink-0" @click="toggleDetailedLogs">{{ showDetailedLogs ? '详情日志：开' : '详情日志：关' }}</VBtn>
+            <VBtn v-if="logSource !== 'annual'" :color="showDetailedLogs ? 'primary' : 'secondary'" variant="tonal" :loading="logsRefreshing" class="flex-shrink-0" @click="toggleDetailedLogs">{{ showDetailedLogs ? '详情日志：开' : '详情日志：关' }}</VBtn>
             <VBtn variant="tonal" class="flex-shrink-0" :loading="logsRefreshing" @click="refreshLogs">刷新</VBtn>
-            <VBtn color="error" variant="tonal" @click="runAction('clear_logs')">清空日志</VBtn>
+            <VBtn color="error" variant="tonal" @click="runAction('clear_logs', { source: logSource })">清空当前日志</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-2">当前显示 {{ visibleLogs.length }}/{{ (state.logs || []).length }} 条。{{ showDetailedLogs ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步' }}。{{ logsRefreshedAt ? `最近刷新：${logsRefreshedAt}。` : '' }}升级前未记录的步骤无法补写。</div>
+          <div class="text-caption text-medium-emphasis mb-2">当前显示 {{ visibleLogs.length }}/{{ sourceLogCount }} 条。{{ logSource === 'annual' ? '显示年度推送、PT 查询、提交与失败记录' : showDetailedLogs ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步' }}。{{ logsRefreshedAt ? `最近刷新：${logsRefreshedAt}。` : '' }}升级前未记录的步骤无法补写。</div>
           <VDataTable :headers="logHeaders" :items="visibleLogs" :search="logSearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
         </VCardText>
       </VCard>
@@ -1025,6 +1027,10 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.page-switcher { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .14); padding: 4px 0 12px; }
+.page-switcher-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.page-version { flex-shrink: 0; }
+.annual-status-row { row-gap: 8px; }
 .status-grid {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
@@ -1080,15 +1086,6 @@ onUnmounted(() => {
 .monthly-task-row { border: 1px solid rgba(var(--v-theme-on-surface), .14); border-radius: 10px; }
 .monthly-year-select { width: 190px; max-width: 100%; flex: none; }
 .year-option-badge { min-width: 125px; text-align: right; font-size: 12px; white-space: nowrap; }
-.monthly-month-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
-.monthly-month-tile { min-height: 70px; display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 5px; padding: 9px 12px; border: 1px solid rgba(var(--v-theme-on-surface), .16); border-radius: 10px; color: inherit; text-align: left; }
-.monthly-month-tile:disabled { opacity: .5; }
-.monthly-month-tile:not(:disabled) { cursor: pointer; }
-.monthly-month-tile:not(:disabled):hover { border-color: rgba(var(--v-theme-primary), .65); }
-.monthly-month-scanned { background: rgba(var(--v-theme-primary), .10); border-color: rgba(var(--v-theme-primary), .4); cursor: pointer; }
-.monthly-month-scanned:hover { background: rgba(var(--v-theme-primary), .20); }
-.monthly-month-name { font-size: 16px; font-weight: 700; }
-.monthly-month-summary { font-size: 12px; opacity: .78; }
 .monthly-movie-list { border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 10px; overflow: hidden; }
 .monthly-movie-row { display: grid; grid-template-columns: 28px 52px minmax(0, 1fr) 86px 200px; align-items: center; column-gap: 12px; min-height: 88px; padding: 8px 14px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .10); }
 .monthly-row-check { width: 28px; min-width: 28px; justify-self: start; }
@@ -1107,6 +1104,5 @@ onUnmounted(() => {
 .monthly-row-score { width: 86px; justify-self: start; text-align: left; font-weight: 600; }
 .monthly-row-votes { display: block; font-size: 11px; font-weight: 400; opacity: .65; }
 .monthly-row-status { width: max-content; max-width: 200px; justify-self: start; white-space: nowrap; }
-@media (max-width: 850px) { .monthly-month-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@media (max-width: 600px) { .monthly-month-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .monthly-movie-row { grid-template-columns: 28px 44px minmax(0, 1fr); gap: 8px; padding: 8px; } .monthly-row-poster { width: 44px; height: 62px; } .monthly-row-score { grid-column: 3; width: auto; } .monthly-row-status { grid-column: 3; } .monthly-row-votes { display: none; } }
+@media (max-width: 600px) { .page-switcher { align-items: flex-start; } .page-switcher-tabs { gap: 4px; } .page-switcher-tabs :deep(.v-btn) { min-width: 0; padding: 0 8px; font-size: 12px; } .monthly-movie-row { grid-template-columns: 28px 44px minmax(0, 1fr); gap: 8px; padding: 8px; } .monthly-row-poster { width: 44px; height: 62px; } .monthly-row-score { grid-column: 3; width: auto; } .monthly-row-status { grid-column: 3; } .monthly-row-votes { display: none; } }
 </style>

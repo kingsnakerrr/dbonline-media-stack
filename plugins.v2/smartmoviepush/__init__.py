@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.57"
+    plugin_version = "0.9.58"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1175,6 +1175,7 @@ class SmartMoviePush(_PluginBase):
         annual_history_count = sum(item.get("source") == "annual" for item in stats_history)
         return {
             "summary": {
+                "plugin_version": self.plugin_version,
                 "enabled": self._enabled,
                 "auto_push": self._auto_push,
                 "auto_download": self._auto_download,
@@ -1734,8 +1735,10 @@ class SmartMoviePush(_PluginBase):
             if action == "annual_dispatch_pause":
                 self._annual_dispatch_enabled = False
                 self.update_config(self._current_config())
+                self._append_plugin_log("年度下载", "手动暂停年度推送；候选名单保留")
                 result = {"success": True, "message": "年度推送已暂停；候选仍保留在年度等候队列"}
             elif not self._enabled or self._disk_guard_blocks_new():
+                self._append_plugin_log("年度下载", "启动或立即推送被拦截：插件已关闭或硬盘保护中", "warning")
                 result = {"success": False, "message": "插件已关闭或硬盘保护中，无法推送新下载"}
             else:
                 if action == "annual_dispatch_start":
@@ -1748,6 +1751,7 @@ class SmartMoviePush(_PluginBase):
                                      kwargs={"force_annual": True}, daemon=True).start()
                     annual_active, _ = self._active_download_counts()
                     waiting = sum(item.get("source") == "annual" for item in self._load_download_queue())
+                    self._append_plugin_log("年度下载", f"{'启动' if action == 'annual_dispatch_start' else '手动触发'}年度推送：候选 {waiting} 部，年度占用 {annual_active}/{self._annual_max_active_downloads}，每轮最多 {self._annual_dispatch_count} 部")
                     result = {"success": True, "message":
                               f"已启动年度推送并立即尝试本轮，最多 {self._annual_dispatch_count} 部；"
                               + ("当前无年度候选，后续入队时自动按间隔推送" if not waiting else
@@ -1771,9 +1775,16 @@ class SmartMoviePush(_PluginBase):
         elif action == "clear_cache":
             result = self._api_clear_cache()
         elif action == "clear_logs":
-            count = len(self._load_plugin_logs())
-            self.save_data(self._plugin_logs_key, [])
-            result = {"success": True, "message": f"已清空 {count} 条插件日志"}
+            source = str(payload.get("source") or "all")
+            logs = self._load_plugin_logs()
+            if source == "annual":
+                retained = [item for item in logs if item.get("category") != "年度下载"]
+            elif source == "random":
+                retained = [item for item in logs if item.get("category") == "年度下载"]
+            else:
+                retained = []
+            self.save_data(self._plugin_logs_key, retained)
+            result = {"success": True, "message": f"已清空 {len(logs) - len(retained)} 条{'年度' if source == 'annual' else '随机/插件' if source == 'random' else '插件'}日志"}
         elif action == "backfill_history":
             result = self._api_backfill_download_history()
         elif action == "disk_guard_check":
@@ -3230,7 +3241,8 @@ class SmartMoviePush(_PluginBase):
             "submitted_at": datetime.now().isoformat(timespec="seconds"),
         })
         self._save_download_history(history)
-        self._append_plugin_log("提交下载", f"{media.title_year} 已提交到 MoviePilot，任务 {download_id}")
+        self._append_plugin_log("年度下载" if source == "annual" else "提交下载",
+                                f"{media.title_year} 已提交到 MoviePilot，任务 {download_id}")
 
     def reconcile_download_completions(self) -> int:
         """以下载器的完成记录为准；已移除种子的任务由成功整理记录兜底。"""
@@ -3472,6 +3484,8 @@ class SmartMoviePush(_PluginBase):
                 if is_annual:
                     annual_attempts += 1
                 try:
+                    if is_annual:
+                        self._append_plugin_log("年度下载", f"正在查询 {item.get('title')} 的 PT 资源（本轮 {annual_attempts}/{self._annual_dispatch_count * 2}）")
                     results = self._search_site_contexts(int(item["tmdb_id"]))
                     context = next(
                         (ctx for ctx in results if self._torrent_identity(ctx) == item.get("torrent_identity")),
@@ -3513,6 +3527,8 @@ class SmartMoviePush(_PluginBase):
                             row["last_attempt"] = datetime.now().isoformat(timespec="seconds")
                             break
                     logger.error(f"顺序下载队列提交失败：{item.get('title')}：{err}")
+                    if is_annual:
+                        self._append_plugin_log("年度下载", f"{item.get('title')} 提交失败：{err}", "error")
                     # FIFO：队首失败时不越过它，避免后加入的电影抢先。
                     break
             self.save_data(self._download_queue_key, remaining)
