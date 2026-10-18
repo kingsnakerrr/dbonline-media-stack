@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.62"
+    plugin_version = "0.9.63"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -64,6 +64,7 @@ class SmartMoviePush(_PluginBase):
     _enabled = True
     _auto_push = False
     _auto_download = False
+    _random_download_enabled = True
     _onlyonce = False
     _cron = "0 * * * *"
     _push_interval_minutes = 60
@@ -144,6 +145,7 @@ class SmartMoviePush(_PluginBase):
         self._enabled = bool(config.get("enabled", True))
         self._auto_push = bool(config.get("auto_push", False))
         self._auto_download = bool(config.get("auto_download", False))
+        self._random_download_enabled = bool(config.get("random_download_enabled", True))
         self._annual_dispatch_enabled = bool(config.get("annual_dispatch_enabled", False))
         self._annual_dispatch_count = max(1, min(int(config.get("annual_dispatch_count") or 5), 50))
         self._annual_max_active_downloads = max(1, min(int(config.get("annual_max_active_downloads") or 5), 50))
@@ -218,6 +220,7 @@ class SmartMoviePush(_PluginBase):
             "enabled": self._enabled,
             "auto_push": self._auto_push,
             "auto_download": self._auto_download,
+            "random_download_enabled": self._random_download_enabled,
             "annual_dispatch_enabled": self._annual_dispatch_enabled,
             "annual_dispatch_count": self._annual_dispatch_count,
             "annual_max_active_downloads": self._annual_max_active_downloads,
@@ -252,12 +255,15 @@ class SmartMoviePush(_PluginBase):
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
         return [{
-            "cmd": "/smartmovie",
-            "event": EventType.PluginAction,
-            "desc": "本插件下载统计与状态",
-            "category": "",
-            "data": {"action": "smartmovie_menu"},
-        }]
+            "cmd": command, "event": EventType.PluginAction,
+            "desc": description, "category": "",
+            "data": {"action": action},
+        } for command, description, action in (
+            ("/smartmovie", "电影下载统计与菜单", "smartmovie_menu"),
+            ("/smartcontrol", "控制随机与年度下载", "smartmovie_control"),
+            ("/smartstatus", "查看电影下载状态", "smartmovie_status"),
+            ("/smartdisk", "查看硬盘使用与剩余", "smartmovie_disk"),
+        )]
 
     @staticmethod
     def get_render_mode() -> Tuple[str, str]:
@@ -1175,6 +1181,7 @@ class SmartMoviePush(_PluginBase):
                 "enabled": self._enabled,
                 "auto_push": self._auto_push,
                 "auto_download": self._auto_download,
+                "random_download_enabled": self._random_download_enabled,
                 "annual_dispatch_enabled": self._annual_dispatch_enabled,
                 "annual_dispatch_count": self._annual_dispatch_count,
                 "annual_max_active_downloads": self._annual_max_active_downloads,
@@ -1645,6 +1652,8 @@ class SmartMoviePush(_PluginBase):
             self._auto_push = bool(payload.get("auto_push"))
         if "auto_download" in payload:
             self._auto_download = bool(payload.get("auto_download"))
+        if "random_download_enabled" in payload:
+            self._random_download_enabled = bool(payload.get("random_download_enabled"))
         if "push_interval_minutes" in payload:
             self._push_interval_minutes = self._normalize_push_interval(
                 payload.get("push_interval_minutes")
@@ -3483,7 +3492,8 @@ class SmartMoviePush(_PluginBase):
                                    if row.get("tmdb_id")}
             annual_active, non_annual_active = self._active_download_counts(active_torrents, history)
             annual_slots = max(0, self._annual_max_active_downloads - annual_active)
-            non_annual_slots = max(0, self._max_active_downloads - non_annual_active)
+            non_annual_slots = (max(0, self._max_active_downloads - non_annual_active)
+                                if self._random_download_enabled else 0)
             # 有下载空位时强制更新 Emby 索引，避免其他来源刚入库的影片被重复提交。
             library = self._library_snapshot_for_scan(force=annual_slots > 0 or non_annual_slots > 0)
             emby_ids = set(library["tmdb_ids"]) if library else set()
@@ -3548,6 +3558,8 @@ class SmartMoviePush(_PluginBase):
                             continue
                         raise RuntimeError("所选站点中已找不到可下载资源")
                     media = context.media_info
+                    if (is_annual and not self._annual_dispatch_enabled) or (not is_annual and not self._random_download_enabled):
+                        continue
                     ok, error = self._submit_download(
                         media, context, channel=None, userid=item.get("userid"),
                         username="智能电影推荐队列",
@@ -3682,7 +3694,7 @@ class SmartMoviePush(_PluginBase):
                 except Exception as err:
                     logger.error(f"处理插件专用 Telegram 按钮失败：{err}")
 
-            @bot.message_handler(commands=["start", "smartmovie", "help"])
+            @bot.message_handler(commands=["start", "smartmovie", "smartcontrol", "smartstatus", "smartdisk", "help"])
             def handle_plugin_command(message):
                 if self._custom_telegram_bot is not bot:
                     return
@@ -3694,6 +3706,12 @@ class SmartMoviePush(_PluginBase):
                 command = command.split("@", 1)[0].lower()
                 if command == "/help":
                     self._show_telegram_help(chat_id, userid, username)
+                elif command == "/smartcontrol":
+                    self._show_telegram_controls(chat_id, userid, username)
+                elif command == "/smartdisk":
+                    self._show_telegram_disk(chat_id, userid, username)
+                elif command == "/smartstatus":
+                    self._show_telegram_status(chat_id, userid, username)
                 else:
                     self._show_telegram_menu(chat_id, userid, username)
 
@@ -3703,6 +3721,9 @@ class SmartMoviePush(_PluginBase):
                 bot.set_my_commands([
                     telegram_types.BotCommand("start", "打开智能电影管理菜单"),
                     telegram_types.BotCommand("smartmovie", "查看下载统计和当前状态"),
+                    telegram_types.BotCommand("smartcontrol", "控制随机与年度任务"),
+                    telegram_types.BotCommand("smartstatus", "查看任务与队列状态"),
+                    telegram_types.BotCommand("smartdisk", "查看硬盘使用和剩余"),
                     telegram_types.BotCommand("help", "查看中文命令说明"),
                 ])
                 bot.set_chat_menu_button(menu_button=telegram_types.MenuButtonCommands())
@@ -4316,13 +4337,13 @@ class SmartMoviePush(_PluginBase):
         timer.daemon = True
         timer.start()
 
-    def _reply_telegram_action(self, title: str, text: str, chat_id: Any) -> None:
+    def _reply_telegram_action(self, title: str, text: str, chat_id: Any, seconds: int = 10) -> None:
         source, result = self._send_telegram_direct(title=title, text=text,
                                                     userid=str(chat_id or self._telegram_target() or ""))
         if not result:
             logger.error(f"Telegram 按钮反馈未送达：{title}")
         else:
-            self._delete_telegram_reply_later(source, result)
+            self._delete_telegram_reply_later(source, result, seconds=seconds)
 
     def _show_telegram_menu(self, chat_id: str, userid: Any, username: Any = None) -> None:
         if not self._is_telegram_admin(userid, username):
@@ -4334,6 +4355,7 @@ class SmartMoviePush(_PluginBase):
             [("本周", "week"), ("本月", "month")],
             [("上个月", "last_month"), ("今年", "year")],
             [("当前状态", "status"), ("最近运行", "last_run")],
+            [("任务控制", "controls"), ("硬盘空间", "disk")],
         ]
         buttons = [[{"text": label, "callback_data": prefix + key} for label, key in row]
                    for row in rows]
@@ -4356,21 +4378,117 @@ class SmartMoviePush(_PluginBase):
             "智能电影插件 · 命令说明",
             "/start — 打开管理菜单（首次点 Open 自动执行）\n"
             "/smartmovie — 打开统计与状态菜单\n"
+             "/smartcontrol — 开始或暂停随机、年度任务\n"
+             "/smartstatus — 查看队列与下载状态\n"
+             "/smartdisk — 查看硬盘已用、剩余和保护状态\n"
             "/help — 查看这份中文说明\n\n"
             "菜单中可点选今天、昨天、本周、本月、上个月、今年的统计，"
             "以及当前状态和最近运行。只接受已配置管理员的操作。",
             chat_id,
         )
 
+    def _telegram_disk_message(self) -> str:
+        path = str(self._disk_guard_path or "/home")
+        try:
+            usage = shutil.disk_usage(path)
+        except (OSError, ValueError) as err:
+            return f"无法读取 {html.escape(path)} 的硬盘空间：{html.escape(str(err))}"
+        gb = 1024 ** 3
+        percent = usage.used / usage.total * 100 if usage.total else 0
+        guard = "保护中" if self._disk_guard_blocks_new() else "正常"
+        return (f"检测路径：{html.escape(path)}\n"
+                f"总容量：{usage.total / gb:.1f} GB\n"
+                f"已使用：{usage.used / gb:.1f} GB（{percent:.1f}%）\n"
+                f"剩余：{usage.free / gb:.1f} GB\n"
+                f"空间保护：{'已启用，' + guard if self._disk_guard_enabled else '未启用'}\n"
+                f"停止新增阈值：{self._disk_guard_threshold_gb} GB｜恢复阈值：{self._disk_guard_recover_gb} GB\n"
+                "这里只暂停新增下载；已经在下载的任务不会被停止。")
+
+    def _show_telegram_disk(self, chat_id: str, userid: Any, username: Any = None) -> None:
+        if not self._is_telegram_admin(userid, username):
+            self._reply_telegram_action("无操作权限", "只有 Telegram 管理员可以查看硬盘状态。", chat_id)
+            return
+        self._reply_telegram_action("智能电影插件 · 硬盘空间", self._telegram_disk_message(), chat_id, seconds=120)
+
+    def _show_telegram_status(self, chat_id: str, userid: Any, username: Any = None) -> None:
+        if not self._is_telegram_admin(userid, username):
+            self._reply_telegram_action("无操作权限", "只有 Telegram 管理员可以查看任务状态。", chat_id)
+            return
+        for title, body in self._telegram_stats_messages("status"):
+            self._reply_telegram_action(title, body, chat_id, seconds=120)
+
+    def _show_telegram_controls(self, chat_id: str, userid: Any, username: Any = None) -> None:
+        if not self._is_telegram_admin(userid, username):
+            self._reply_telegram_action("无操作权限", "只有 Telegram 管理员可以控制下载。", chat_id)
+            return
+        prefix = f"[PLUGIN]{self.__class__.__name__}|control|"
+        rows = [
+            [("启动随机定时推送" if not self._auto_push else "暂停随机定时推送",
+              "push_start" if not self._auto_push else "push_stop")],
+            [("启动随机自动下载" if not self._random_download_enabled else "暂停随机自动下载",
+              "random_start" if not self._random_download_enabled else "random_stop")],
+            [("启动年度下载" if not self._annual_dispatch_enabled else "暂停年度下载",
+              "annual_start" if not self._annual_dispatch_enabled else "annual_stop")],
+            [("查看状态", "status"), ("查看硬盘", "disk")],
+        ]
+        buttons = [[{"text": label, "callback_data": prefix + key} for label, key in row]
+                   for row in rows]
+        source, result = self._send_telegram_direct(
+            title="智能电影插件 · 任务控制",
+            text=(f"随机定时推送：{'已开启' if self._auto_push else '已暂停'}\n"
+                  f"随机自动下载：{'已开启' if self._random_download_enabled else '已暂停'}"
+                  f"（下载模式：{'自动' if self._auto_download else '手动确认'}）\n"
+                  f"年度下载：{'已开启' if self._annual_dispatch_enabled else '已暂停'}\n"
+                  "暂停仅阻止新增自动任务，不停止已经开始的下载；随机手动确认仍可提交。"),
+            userid=chat_id, buttons=buttons,
+        )
+        if result:
+            self._delete_telegram_reply_later(source, result, seconds=120)
+        else:
+            logger.error("Telegram 任务控制菜单未送达")
+
+    def _telegram_control_action(self, key: str) -> str:
+        if key not in {"push_start", "push_stop", "random_start", "random_stop", "annual_start", "annual_stop"}:
+            return "未知操作，请重新打开 /smartcontrol。"
+        start = key.endswith("_start")
+        if start and (not self._enabled or self._disk_guard_blocks_new()):
+            return "插件已关闭或硬盘保护中，暂不能启动新增任务。"
+        if key.startswith("push_"):
+            self._auto_push = start
+            message = f"随机定时推送已{'启动' if start else '暂停'}。"
+        elif key.startswith("random_"):
+            self._random_download_enabled = start
+            if start:
+                self._auto_download = True
+            message = f"随机自动下载已{'启动' if start else '暂停'}。"
+            if start:
+                threading.Thread(target=self.process_download_queue, daemon=True).start()
+        else:
+            self._annual_dispatch_enabled = start
+            message = f"年度下载已{'启动，正在尝试补位' if start else '暂停'}。"
+            if start:
+                threading.Thread(target=self.process_download_queue, daemon=True).start()
+        self.update_config(self._current_config())
+        self._append_plugin_log("Telegram 控制", message)
+        return message
+
     @eventmanager.register(EventType.PluginAction)
     def telegram_command_action(self, event: Event) -> None:
         data = event.event_data or {}
-        if data.get("action") != "smartmovie_menu":
+        action = data.get("action")
+        if action not in {"smartmovie_menu", "smartmovie_control", "smartmovie_status", "smartmovie_disk"}:
             return
         userid = data.get("user") or data.get("userid")
         username = data.get("username")
         chat_id = str(data.get("chat_id") or data.get("chatid") or userid or "")
-        self._show_telegram_menu(chat_id, userid, username)
+        if action == "smartmovie_control":
+            self._show_telegram_controls(chat_id, userid, username)
+        elif action == "smartmovie_status":
+            self._show_telegram_status(chat_id, userid, username)
+        elif action == "smartmovie_disk":
+            self._show_telegram_disk(chat_id, userid, username)
+        else:
+            self._show_telegram_menu(chat_id, userid, username)
 
     @staticmethod
     def _stats_range(period: str, now: datetime) -> Optional[Tuple[datetime, datetime, str, bool]]:
@@ -4413,7 +4531,9 @@ class SmartMoviePush(_PluginBase):
             return [("智能电影插件 · 当前状态",
                      f"插件：{'已开启' if self._enabled else '已关闭'}\n"
                      f"定时推送：{'已开启' if self._auto_push else '已暂停'}\n"
-                     f"下载模式：{'自动' if self._auto_download else '手动'}\n"
+                     f"随机自动下载：{'已启动' if self._random_download_enabled else '已暂停'}"
+                     f"｜下载模式：{'自动' if self._auto_download else '手动确认'}\n"
+                     f"年度下载：{'已启动' if self._annual_dispatch_enabled else '已暂停'}\n"
                      f"本插件正在下载：{active} 部｜随机/其他：{other_occupied}/{self._max_active_downloads}｜年度：{annual_occupied}/{self._annual_max_active_downloads}\n"
                      f"等候下载：{queue}\n硬盘空间保护：{disk}")]
         selected = self._stats_range(period, now)
@@ -4530,6 +4650,8 @@ class SmartMoviePush(_PluginBase):
                              source: str = "random") -> Tuple[bool, bool]:
         if self._disk_guard_blocks_new():
             return False, False
+        if source == "random" and not self._random_download_enabled:
+            return False, False
         if force_queue:
             if not allow_queue:
                 logger.warning(f"立即运行没有可用下载位，跳过且不排队：{media.title_year}")
@@ -4561,7 +4683,7 @@ class SmartMoviePush(_PluginBase):
             return
         source = (f"月份任务 {month_task['year']}-{month_task['month']:02d}" if month_task
                   else "手动立即运行" if test_mode else "定时任务")
-        auto_mode = self._auto_download or bool(month_task)
+        auto_mode = (self._auto_download and self._random_download_enabled) or bool(month_task)
         if not self._enabled:
             self._append_plugin_log(source, "插件已关闭，未执行", "warning")
             logger.info("智能电影推送插件已关闭，本轮不执行")
@@ -4845,7 +4967,7 @@ class SmartMoviePush(_PluginBase):
         if "|" not in callback:
             return
         action, key = callback.split("|", 1)
-        if action not in {"download", "suppress", "disk_ack", "stats"}:
+        if action not in {"download", "suppress", "disk_ack", "stats", "control"}:
             return
         channel = data.get("channel")
         source = data.get("source")
@@ -4858,7 +4980,29 @@ class SmartMoviePush(_PluginBase):
             logger.warning(f"拒绝非管理员操作电影推荐：userid={userid}, username={username}, action={action}")
             self._reply_telegram_action("无操作权限", "只有 Telegram 管理员可以操作电影推荐。", chat_id)
             return
+        if action == "control":
+            if source and message_id:
+                self._delete_telegram_message(source, message_id, chat_id)
+            if key == "status":
+                self._show_telegram_status(str(chat_id or userid or ""), userid, username)
+            elif key == "disk":
+                self._show_telegram_disk(str(chat_id or userid or ""), userid, username)
+            else:
+                result = self._telegram_control_action(key)
+                self._reply_telegram_action("任务控制", result, chat_id)
+                self._show_telegram_controls(str(chat_id or userid or ""), userid, username)
+            return
         if action == "stats":
+            if key == "controls":
+                if source and message_id:
+                    self._delete_telegram_message(source, message_id, chat_id)
+                self._show_telegram_controls(str(chat_id or userid or ""), userid, username)
+                return
+            if key == "disk":
+                if source and message_id:
+                    self._delete_telegram_message(source, message_id, chat_id)
+                self._show_telegram_disk(str(chat_id or userid or ""), userid, username)
+                return
             messages = self._telegram_stats_messages(key)
             if not messages:
                 self._reply_telegram_action("统计失败", "未知统计范围，请重新输入 /smartmovie。", chat_id)

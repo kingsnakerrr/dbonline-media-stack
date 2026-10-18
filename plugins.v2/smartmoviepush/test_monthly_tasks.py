@@ -113,6 +113,7 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._download_queue_key = "download_queue"
         self.subject._enabled = True
         self.subject._annual_dispatch_enabled = False
+        self.subject._random_download_enabled = True
         self.subject._annual_dispatch_count = 5
         self.subject._max_active_downloads = 10
         self.subject._annual_max_active_downloads = 5
@@ -946,6 +947,30 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject.process_download_queue()
         self.assertEqual(submitted, [1, 2])
         self.assertEqual(self.store["download_queue"], [])
+
+    def test_paused_random_queue_does_not_block_annual_download(self):
+        self.subject._random_download_enabled = False
+        self.subject._annual_dispatch_enabled = True
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
+        self.subject._search_site_contexts = lambda movie_id: [
+            SimpleNamespace(media_info=SimpleNamespace(tmdb_id=movie_id))]
+        self.subject._torrent_identity = lambda _context: "resource"
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        self.store["download_queue"] = [
+            {"key": "annual", "tmdb_id": 1, "title": "年度电影", "source": "annual"},
+            {"key": "random", "tmdb_id": 2, "title": "随机电影", "source": "random"},
+        ]
+        submitted = []
+        def submit(movie, _context, **_kwargs):
+            submitted.append(movie.tmdb_id)
+            self.subject._remove_queued_movie(movie.tmdb_id)
+            return True, None
+        self.subject._submit_download = submit
+        self.subject.process_download_queue()
+        self.assertEqual(submitted, [1])
+        self.assertEqual([row["tmdb_id"] for row in self.store["download_queue"]], [2])
 
     def test_active_download_uses_saved_chinese_movie_title_and_state(self):
         self.subject._load_download_history = lambda: [

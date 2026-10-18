@@ -373,7 +373,7 @@ const state = ref({
 const telegramForm = ref({ source: '', admins_override: '', chat_id_override: '' })
 const diskForm = ref({ disk_guard_enabled: true, disk_guard_path: '/home', disk_guard_threshold_gb: 300, disk_guard_recover_gb: 350 })
 const pushForm = ref({ limit: 20, test_limit: 2, max_active_downloads: 20, max_searches: 80, site_ids: [], min_score: 6 })
-const controlForm = ref({ enabled: true, auto_push: false, auto_download: false, push_interval_minutes: 60 })
+const controlForm = ref({ enabled: true, auto_push: false, auto_download: false, random_download_enabled: true, push_interval_minutes: 60 })
 const annualDispatchForm = ref({ annual_dispatch_count: 5, annual_max_active_downloads: 5 })
 const intervalItems = [30, 60, 120, 180, 240, 300].map(value => ({ title: `${value} 分钟`, value }))
 const downloadModeItems = [
@@ -411,6 +411,7 @@ function applyState(data, syncForms = true) {
     enabled: data.summary?.enabled !== false,
     auto_push: Boolean(data.summary?.auto_push),
     auto_download: Boolean(data.summary?.auto_download),
+    random_download_enabled: data.summary?.random_download_enabled !== false,
     push_interval_minutes: data.summary?.push_interval_minutes || 60,
   }
   annualDispatchForm.value = {
@@ -726,7 +727,7 @@ onUnmounted(() => {
         <VBtn :variant="activePage === 'annual' ? 'flat' : 'text'" :color="activePage === 'annual' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'annual'" @click="switchPage('annual')">按年下载</VBtn>
         <VBtn :variant="activePage === 'telegram' ? 'flat' : 'text'" :color="activePage === 'telegram' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'telegram'" @click="switchPage('telegram')">Telegram 设置</VBtn>
       </div>
-      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.62' }}</VChip>
+      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.63' }}</VChip>
     </div>
     <div v-if="activePage === 'random'" class="page-panel" role="tabpanel">
     <div class="status-grid mb-3">
@@ -746,6 +747,7 @@ onUnmounted(() => {
       </div>
       <div class="status-item">
         <VCard variant="tonal" color="warning" class="pa-4 h-100 status-card">
+          <div class="d-flex align-center justify-space-between"><div class="text-caption">随机自动下载补位</div><VSwitch v-model="controlForm.random_download_enabled" color="warning" hide-details :disabled="!controlForm.enabled" @update:model-value="value => saveControlSettings({ random_download_enabled: value })" /></div>
           <div class="text-caption mb-2">下载模式</div>
           <VSelect v-model="controlForm.auto_download" :items="downloadModeItems" density="compact" hide-details :disabled="!controlForm.enabled" @update:model-value="value => saveControlSettings({ auto_download: value })" />
         </VCard>
