@@ -994,7 +994,7 @@ return (_ctx, _cache) => {
                 class: "page-version"
               }, {
                 default: _withCtx(() => [
-                  _createTextVNode("v" + _toDisplayString(summary.value.plugin_version || '0.9.60'), 1)
+                  _createTextVNode("v" + _toDisplayString(summary.value.plugin_version || '0.9.61'), 1)
                 ]),
                 _: 1
               })
@@ -2010,6 +2010,7 @@ return (_ctx, _cache) => {
                     : (dialog.value === 'history')
                       ? (_openBlock(), _createBlock(_component_VCard, {
                           key: 2,
+                          class: "history-dialog",
                           title: historySource.value === 'annual' ? '年度下载记录' : historySource.value === 'non_annual' ? '随机/其他下载记录' : '全部下载记录'
                         }, {
                           default: _withCtx(() => [
@@ -2702,6 +2703,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-a61dbcdd"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-b17a008b"]]);
 
 export { Page as default };

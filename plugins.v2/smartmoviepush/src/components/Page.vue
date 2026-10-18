@@ -727,7 +727,7 @@ onUnmounted(() => {
         <VBtn :variant="activePage === 'annual' ? 'flat' : 'text'" :color="activePage === 'annual' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'annual'" @click="switchPage('annual')">按年下载</VBtn>
         <VBtn :variant="activePage === 'telegram' ? 'flat' : 'text'" :color="activePage === 'telegram' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'telegram'" @click="switchPage('telegram')">Telegram 设置</VBtn>
       </div>
-      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.60' }}</VChip>
+      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.61' }}</VChip>
     </div>
     <div v-if="activePage === 'random'" class="page-panel" role="tabpanel">
     <div class="status-grid mb-3">
@@ -908,7 +908,7 @@ onUnmounted(() => {
           </VDataTable>
         </VCardText>
       </VCard>
-      <VCard v-else-if="dialog === 'history'" :title="historySource === 'annual' ? '年度下载记录' : historySource === 'non_annual' ? '随机/其他下载记录' : '全部下载记录'">
+      <VCard v-else-if="dialog === 'history'" class="history-dialog" :title="historySource === 'annual' ? '年度下载记录' : historySource === 'non_annual' ? '随机/其他下载记录' : '全部下载记录'">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
           <VTabs v-model="historyStatus" show-arrows class="mb-3">
@@ -1044,6 +1044,8 @@ onUnmounted(() => {
 .page-version { flex-shrink: 0; }
 .page-panel { min-height: max(900px, calc(100dvh - 130px)); padding-top: 8px; }
 .active-download-dialog { min-height: min(720px, 78dvh); }
+.history-dialog { width: min(75rem, calc(100vw - 48px)); height: min(84rem, calc(100dvh - 48px)); max-height: calc(100dvh - 48px); }
+.history-dialog :deep(.v-card-text) { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .annual-status-row { row-gap: 8px; }
 .status-grid {
   display: grid;
