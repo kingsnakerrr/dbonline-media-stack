@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
@@ -13,6 +13,18 @@ const accessPassword = ref('')
 const accessToken = ref('')
 const accessTokenKey = 'smartmoviepush_access_token'
 const activePage = ref('random')
+const pageRoot = ref(null)
+function switchPage(page) {
+  activePage.value = page
+  nextTick(() => {
+    let node = (pageRoot.value?.$el || pageRoot.value)?.parentElement
+    while (node && node !== document.body) {
+      const style = window.getComputedStyle(node)
+      if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 2) node.scrollTop = 0
+      node = node.parentElement
+    }
+  })
+}
 const dialog = ref('')
 const dialogSource = ref('all')
 const dialogOpen = computed({
@@ -692,7 +704,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <VContainer fluid class="pa-2">
+  <VContainer ref="pageRoot" fluid class="pa-2">
     <VAlert v-if="error" type="error" variant="tonal" class="mb-3" closable>{{ error }}</VAlert>
     <VAlert v-if="message" type="success" variant="tonal" class="mb-3" closable>{{ message }}</VAlert>
 
@@ -711,13 +723,13 @@ onUnmounted(() => {
     <template v-else>
     <div class="page-switcher mb-4">
       <div class="page-switcher-tabs" role="tablist" aria-label="插件页面">
-        <VBtn :variant="activePage === 'random' ? 'flat' : 'text'" :color="activePage === 'random' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'random'" @click="activePage = 'random'">随机下载</VBtn>
-        <VBtn :variant="activePage === 'annual' ? 'flat' : 'text'" :color="activePage === 'annual' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'annual'" @click="activePage = 'annual'">按年下载</VBtn>
-        <VBtn :variant="activePage === 'telegram' ? 'flat' : 'text'" :color="activePage === 'telegram' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'telegram'" @click="activePage = 'telegram'">Telegram 设置</VBtn>
+        <VBtn :variant="activePage === 'random' ? 'flat' : 'text'" :color="activePage === 'random' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'random'" @click="switchPage('random')">随机下载</VBtn>
+        <VBtn :variant="activePage === 'annual' ? 'flat' : 'text'" :color="activePage === 'annual' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'annual'" @click="switchPage('annual')">按年下载</VBtn>
+        <VBtn :variant="activePage === 'telegram' ? 'flat' : 'text'" :color="activePage === 'telegram' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'telegram'" @click="switchPage('telegram')">Telegram 设置</VBtn>
       </div>
-      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.58' }}</VChip>
+      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.59' }}</VChip>
     </div>
-    <div v-if="activePage === 'random'" role="tabpanel">
+    <div v-if="activePage === 'random'" class="page-panel" role="tabpanel">
     <div class="status-grid mb-3">
       <div class="status-item">
         <VCard variant="tonal" :color="controlForm.enabled ? 'success' : 'secondary'" class="pa-4 h-100 status-card">
@@ -816,7 +828,7 @@ onUnmounted(() => {
     </VCard>
     </div>
 
-    <div v-else-if="activePage === 'annual'" role="tabpanel">
+    <div v-else-if="activePage === 'annual'" class="page-panel" role="tabpanel">
     <VCard variant="outlined" class="pa-4 mb-4">
       <div class="text-h6 mb-1">按年份筛选电影</div>
       <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；勾选影片只加入年度待下载候选。是否推送、定时间隔和每轮数量都在此处统一控制；最多保存 5 个扫描任务。</div>
@@ -856,7 +868,7 @@ onUnmounted(() => {
     </VCard>
     </div>
 
-    <div v-else role="tabpanel">
+    <div v-else class="page-panel" role="tabpanel">
     <VCard variant="outlined" class="pa-4 mb-4">
       <div class="text-h6 mb-1">Telegram 设置</div>
       <div class="text-caption text-medium-emphasis mb-3">三个输入框留空即跟随 MoviePilot 的 Telegram 通知设置；需要覆盖哪一项就直接输入哪一项。</div>
@@ -877,11 +889,11 @@ onUnmounted(() => {
     </div>
 
     <VDialog v-model="dialogOpen" max-width="75rem" scrollable>
-      <VCard v-if="dialog === 'active'" :title="dialogSource === 'annual' ? '年度正在下载 · 实时状态' : dialogSource === 'non_annual' ? '随机/其他正在下载 · 实时状态' : '全部正在下载 · 实时状态'">
+      <VCard v-if="dialog === 'active'" class="active-download-dialog" :title="dialogSource === 'annual' ? '年度正在下载 · 实时状态' : dialogSource === 'non_annual' ? '随机/其他正在下载 · 实时状态' : '全部正在下载 · 实时状态'">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
           <VAlert v-if="!visibleActiveItems.length" type="info" variant="tonal" class="mb-3">当前没有此类正在下载的任务，或下载器暂未返回详情。</VAlert>
-          <VDataTable v-else :headers="activeHeaders" :items="visibleActiveItems" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover>
+          <VDataTable v-else :headers="activeHeaders" :items="visibleActiveItems" :items-per-page="20" :items-per-page-options="pageSizes" items-per-page-text="每页条数" density="compact" hover>
             <template #item.progress="{ item }"><div class="d-flex align-center ga-2"><VProgressLinear :model-value="item.progress" color="info" height="8" rounded /><span class="text-caption text-no-wrap">{{ item.progress }}%</span></div></template>
           </VDataTable>
           <div class="text-caption text-medium-emphasis mt-3">每 5 秒自动刷新。</div>
@@ -1027,9 +1039,11 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.page-switcher { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .14); padding: 4px 0 12px; }
+.page-switcher { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), .14); padding: 4px 0 12px; background: rgb(var(--v-theme-surface)); }
 .page-switcher-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
 .page-version { flex-shrink: 0; }
+.page-panel { min-height: max(900px, calc(100dvh - 130px)); padding-top: 8px; }
+.active-download-dialog { min-height: min(720px, 78dvh); }
 .annual-status-row { row-gap: 8px; }
 .status-grid {
   display: grid;
@@ -1104,5 +1118,5 @@ onUnmounted(() => {
 .monthly-row-score { width: 86px; justify-self: start; text-align: left; font-weight: 600; }
 .monthly-row-votes { display: block; font-size: 11px; font-weight: 400; opacity: .65; }
 .monthly-row-status { width: max-content; max-width: 200px; justify-self: start; white-space: nowrap; }
-@media (max-width: 600px) { .page-switcher { align-items: flex-start; } .page-switcher-tabs { gap: 4px; } .page-switcher-tabs :deep(.v-btn) { min-width: 0; padding: 0 8px; font-size: 12px; } .monthly-movie-row { grid-template-columns: 28px 44px minmax(0, 1fr); gap: 8px; padding: 8px; } .monthly-row-poster { width: 44px; height: 62px; } .monthly-row-score { grid-column: 3; width: auto; } .monthly-row-status { grid-column: 3; } .monthly-row-votes { display: none; } }
+@media (max-width: 600px) { .page-switcher { align-items: flex-start; } .page-switcher-tabs { gap: 4px; } .page-switcher-tabs :deep(.v-btn) { min-width: 0; padding: 0 8px; font-size: 12px; } .page-panel { min-height: calc(100dvh - 110px); } .monthly-movie-row { grid-template-columns: 28px 44px minmax(0, 1fr); gap: 8px; padding: 8px; } .monthly-row-poster { width: 44px; height: 62px; } .monthly-row-score { grid-column: 3; width: auto; } .monthly-row-status { grid-column: 3; } .monthly-row-votes { display: none; } }
 </style>

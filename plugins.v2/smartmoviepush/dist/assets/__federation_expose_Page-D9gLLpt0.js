@@ -20,6 +20,7 @@ const _hoisted_3 = {
 };
 const _hoisted_4 = {
   key: 0,
+  class: "page-panel",
   role: "tabpanel"
 };
 const _hoisted_5 = { class: "status-grid mb-3" };
@@ -57,6 +58,7 @@ const _hoisted_36 = { class: "d-flex flex-wrap ga-2" };
 const _hoisted_37 = { key: 0 };
 const _hoisted_38 = {
   key: 1,
+  class: "page-panel",
   role: "tabpanel"
 };
 const _hoisted_39 = { class: "d-flex justify-space-between align-center" };
@@ -72,6 +74,7 @@ const _hoisted_48 = { class: "text-caption text-medium-emphasis mt-2" };
 const _hoisted_49 = { class: "d-flex flex-wrap align-center ga-3 mt-4 mb-3" };
 const _hoisted_50 = {
   key: 2,
+  class: "page-panel",
   role: "tabpanel"
 };
 const _hoisted_51 = { class: "d-flex align-center ga-2" };
@@ -141,7 +144,7 @@ const _hoisted_84 = { class: "d-flex ga-2 mb-3" };
 const _hoisted_85 = { class: "d-flex ga-2 mb-3" };
 const _hoisted_86 = { class: "text-caption text-medium-emphasis mb-2" };
 
-const {computed,onMounted,onUnmounted,ref,watch} = await importShared('vue');
+const {computed,nextTick,onMounted,onUnmounted,ref,watch} = await importShared('vue');
 
 
 const accessTokenKey = 'smartmoviepush_access_token';
@@ -162,6 +165,18 @@ const accessReady = ref(false);
 const accessPassword = ref('');
 const accessToken = ref('');
 const activePage = ref('random');
+const pageRoot = ref(null);
+function switchPage(page) {
+  activePage.value = page;
+  nextTick(() => {
+    let node = (pageRoot.value?.$el || pageRoot.value)?.parentElement;
+    while (node && node !== document.body) {
+      const style = window.getComputedStyle(node);
+      if (/(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight + 2) node.scrollTop = 0;
+      node = node.parentElement;
+    }
+  });
+}
 const dialog = ref('');
 const dialogSource = ref('all');
 const dialogOpen = computed({
@@ -849,6 +864,8 @@ return (_ctx, _cache) => {
   const _component_VContainer = _resolveComponent("VContainer");
 
   return (_openBlock(), _createBlock(_component_VContainer, {
+    ref_key: "pageRoot",
+    ref: pageRoot,
     fluid: "",
     class: "pa-2"
   }, {
@@ -938,7 +955,7 @@ return (_ctx, _cache) => {
                   color: activePage.value === 'random' ? 'primary' : undefined,
                   role: "tab",
                   "aria-selected": activePage.value === 'random',
-                  onClick: _cache[1] || (_cache[1] = $event => (activePage.value = 'random'))
+                  onClick: _cache[1] || (_cache[1] = $event => (switchPage('random')))
                 }, {
                   default: _withCtx(() => [...(_cache[88] || (_cache[88] = [
                     _createTextVNode("随机下载", -1)
@@ -950,7 +967,7 @@ return (_ctx, _cache) => {
                   color: activePage.value === 'annual' ? 'primary' : undefined,
                   role: "tab",
                   "aria-selected": activePage.value === 'annual',
-                  onClick: _cache[2] || (_cache[2] = $event => (activePage.value = 'annual'))
+                  onClick: _cache[2] || (_cache[2] = $event => (switchPage('annual')))
                 }, {
                   default: _withCtx(() => [...(_cache[89] || (_cache[89] = [
                     _createTextVNode("按年下载", -1)
@@ -962,7 +979,7 @@ return (_ctx, _cache) => {
                   color: activePage.value === 'telegram' ? 'primary' : undefined,
                   role: "tab",
                   "aria-selected": activePage.value === 'telegram',
-                  onClick: _cache[3] || (_cache[3] = $event => (activePage.value = 'telegram'))
+                  onClick: _cache[3] || (_cache[3] = $event => (switchPage('telegram')))
                 }, {
                   default: _withCtx(() => [...(_cache[90] || (_cache[90] = [
                     _createTextVNode("Telegram 设置", -1)
@@ -977,7 +994,7 @@ return (_ctx, _cache) => {
                 class: "page-version"
               }, {
                 default: _withCtx(() => [
-                  _createTextVNode("v" + _toDisplayString(summary.value.plugin_version || '0.9.58'), 1)
+                  _createTextVNode("v" + _toDisplayString(summary.value.plugin_version || '0.9.59'), 1)
                 ]),
                 _: 1
               })
@@ -1877,6 +1894,7 @@ return (_ctx, _cache) => {
                 (dialog.value === 'active')
                   ? (_openBlock(), _createBlock(_component_VCard, {
                       key: 0,
+                      class: "active-download-dialog",
                       title: dialogSource.value === 'annual' ? '年度正在下载 · 实时状态' : dialogSource.value === 'non_annual' ? '随机/其他正在下载 · 实时状态' : '全部正在下载 · 实时状态'
                     }, {
                       default: _withCtx(() => [
@@ -1903,6 +1921,7 @@ return (_ctx, _cache) => {
                                   items: visibleActiveItems.value,
                                   "items-per-page": 20,
                                   "items-per-page-options": pageSizes,
+                                  "items-per-page-text": "每页条数",
                                   density: "compact",
                                   hover: ""
                                 }, {
@@ -2678,11 +2697,11 @@ return (_ctx, _cache) => {
           ], 64))
     ]),
     _: 1
-  }))
+  }, 512))
 }
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-ba2bfc17"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-2cf240d2"]]);
 
 export { Page as default };

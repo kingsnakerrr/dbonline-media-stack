@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.58"
+    plugin_version = "0.9.59"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -3147,6 +3147,24 @@ class SmartMoviePush(_PluginBase):
         except (TypeError, ValueError):
             return str(value)
 
+    @staticmethod
+    def _localized_download_state(value: Any, progress: float = 0) -> str:
+        state = str(value or "").strip().lower()
+        names = {
+            "downloading": "下载中", "forceddl": "强制下载中", "metadl": "获取种子信息",
+            "stalleddl": "等待下载", "queueddl": "排队下载", "checkingdl": "检查文件中",
+            "pauseddl": "已暂停", "stoppeddl": "已停止", "allocating": "分配空间中",
+            "moving": "移动文件中", "checkingresume": "检查恢复数据",
+            "uploading": "做种中", "forcedup": "强制做种中", "stalledup": "等待做种",
+            "queuedup": "排队做种", "pausedup": "已暂停做种", "stoppedup": "已停止做种",
+            "error": "下载错误", "missingfiles": "文件缺失", "unknown": "状态未知",
+        }
+        if state in names:
+            return names[state]
+        if re.search(r"[\u4e00-\u9fff]", str(value or "")):
+            return str(value)
+        return "已完成" if progress >= 100 else "状态未知"
+
     def _is_plugin_download_row(self, row: Any, history: List[dict]) -> bool:
         known_hashes = {
             str(item.get("download_id") or "").strip().lower()
@@ -3160,18 +3178,53 @@ class SmartMoviePush(_PluginBase):
         # 不使用片名/TMDB 模糊匹配，避免把用户手动下载的同名影片算成本插件任务。
         return str(self._download_value(row, "source", "plugin") or "") == self.__class__.__name__
 
+    def _archived_chinese_movie_title(self, tmdb_id: Any, fallback_year: Any = None) -> str:
+        """旧下载记录没有中文名时，从已保存的年度片单恢复译名，不访问 TMDB。"""
+        if not tmdb_id:
+            return ""
+        path = self.get_data_path() / "monthly_scans.sqlite"
+        if not path.is_file():
+            return ""
+        try:
+            with closing(sqlite3.connect(str(path), timeout=1)) as db:
+                row = db.execute("SELECT payload FROM monthly_scan_movies WHERE tmdb_id=? LIMIT 1",
+                                 (str(tmdb_id),)).fetchone()
+            movie = json.loads(row[0]) if row else {}
+            title = str(movie.get("display_title") or movie.get("title") or "").strip()
+            if not re.search(r"[\u4e00-\u9fff]", title):
+                return ""
+            year = str(fallback_year or movie.get("year") or str(movie.get("release_date") or "")[:4]).strip()
+            return f"{title} ({year})" if year and not title.endswith(f"({year})") else title
+        except (OSError, sqlite3.Error, ValueError, TypeError) as err:
+            logger.debug(f"年度片单中文名称读取失败：{type(err).__name__}")
+            return ""
+
     def _active_download_snapshot(self) -> Tuple[int, List[dict]]:
         """仅返回由本插件提交、当前仍在下载的任务实时摘要。"""
         try:
             downloads = DownloadChain().downloading() or []
             history = self._load_download_history()
-            origins = {str(item.get("download_id") or "").strip().lower(): item.get("source") or "legacy"
+            records = {str(item.get("download_id") or "").strip().lower(): item
                        for item in history if item.get("download_id")}
             items = []
             for row in downloads:
                 if not self._is_plugin_download_row(row, history):
                     continue
-                title = self._download_value(row, "title", "name", "torrent_name") or "未命名任务"
+                row_hash = str(self._download_value(
+                    row, "download_hash", "hash", "torrent_hash", "infohash", "info_hash"
+                ) or "").strip().lower()
+                record = records.get(row_hash) or {}
+                raw_title = str(self._download_value(row, "title", "name", "torrent_name") or "").strip()
+                media = self._download_value(row, "media", "media_info")
+                media_title = str(self._download_value(media, "title", "title_year") or "").strip() if media else ""
+                saved_title = str(record.get("title") or "").strip()
+                title = next((candidate for candidate in (saved_title, media_title, raw_title)
+                              if re.search(r"[\u4e00-\u9fff]", candidate)),
+                             saved_title or media_title or raw_title or "未命名任务")
+                if not re.search(r"[\u4e00-\u9fff]", title):
+                    title = self._archived_chinese_movie_title(
+                        record.get("tmdb_id") or self._download_value(media, "tmdbid", "tmdb_id"),
+                        record.get("year")) or title
                 progress = self._download_value(row, "progress", "percent", "completion") or 0
                 try:
                     progress = round(float(progress), 1)
@@ -3184,12 +3237,11 @@ class SmartMoviePush(_PluginBase):
                 )
                 items.append({
                     "title": str(title),
-                    "source": origins.get(str(self._download_value(
-                        row, "download_hash", "hash", "torrent_hash", "infohash", "info_hash"
-                    ) or "").strip().lower(), "legacy"),
+                    "source": record.get("source") or "legacy",
                     "progress": min(max(progress, 0), 100),
                     "speed": self._format_speed(speed),
-                    "state": str(self._download_value(row, "state", "status") or "下载中"),
+                    "state": self._localized_download_state(
+                        self._download_value(row, "state", "status"), progress),
                     "eta": str(self._download_value(row, "eta", "remaining_time") or "-"),
                 })
             return len(items), items
@@ -3228,12 +3280,12 @@ class SmartMoviePush(_PluginBase):
         return True
 
     def _record_download(self, media: MediaInfo, download_id: Any,
-                         source: str = "random") -> None:
+                         source: str = "random", display_title: str = "") -> None:
         history = self._load_download_history()
         history.append({
             "record_uid": secrets.token_hex(16),
             "tmdb_id": media.tmdb_id,
-            "title": media.title_year,
+            "title": display_title or media.title_year,
             "media_title": media.title,
             "year": media.year,
             "download_id": str(download_id or ""),
@@ -3390,7 +3442,7 @@ class SmartMoviePush(_PluginBase):
     def _submit_download(self, media: MediaInfo, context: Context,
                          channel: Any = None, userid: Any = None,
                          username: str = "智能下载影视资源_惹咪之北",
-                         origin: str = "random") -> Tuple[bool, Optional[str]]:
+                         origin: str = "random", display_title: str = "") -> Tuple[bool, Optional[str]]:
         if self._disk_guard_blocks_new():
             return False, "硬盘保护中，候选已保留等候，不向 qB 添加新种子"
         try:
@@ -3411,7 +3463,7 @@ class SmartMoviePush(_PluginBase):
         )
         if not download_id:
             return False, error or "未知错误"
-        self._record_download(media, download_id, source=origin)
+        self._record_download(media, download_id, source=origin, display_title=display_title)
         self._remove_queued_movie(media.tmdb_id)
         return True, None
 
@@ -3504,6 +3556,7 @@ class SmartMoviePush(_PluginBase):
                         media, context, channel=None, userid=item.get("userid"),
                         username="智能电影推荐队列",
                         origin=item.get("source") or "random",
+                        display_title=str(item.get("title") or ""),
                     )
                     if not ok:
                         raise RuntimeError(error or "提交失败")

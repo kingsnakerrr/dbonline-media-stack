@@ -31,7 +31,9 @@ methods = {"_load_monthly_tasks", "_monthly_task", "_update_monthly_task",
            "_scan_monthly_resources", "_load_monthly_resource_cache", "_save_monthly_resource_cache",
            "_load_download_queue", "_remove_queued_movie", "_mp_active_movie_ids", "_download_value",
            "_submit_download", "_api_clear_queue", "_search_best",
-           "process_download_queue", "_active_download_counts"}
+           "process_download_queue", "_active_download_counts", "_active_download_snapshot",
+           "_is_plugin_download_row", "_format_speed", "_localized_download_state",
+           "_archived_chinese_movie_title"}
 selected = [node for node in plugin.body if isinstance(node, ast.FunctionDef) and node.name in methods]
 
 
@@ -866,6 +868,40 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject.process_download_queue(force_annual=True)
         self.assertEqual(submitted, [1, 2])
         self.assertEqual(self.store["download_queue"], [])
+
+    def test_active_download_uses_saved_chinese_movie_title_and_state(self):
+        self.subject._load_download_history = lambda: [
+            {"download_id": "hash-1", "title": "二号陪审员 (2024)", "source": "annual"}]
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [
+            {"download_hash": "hash-1", "name": "Juror 2 2024 2160p WEB-DL", "state": "downloading",
+             "progress": 0.904, "dlspeed": 1024 * 1024},
+        ])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        count, items = self.subject._active_download_snapshot()
+        self.assertEqual(count, 1)
+        self.assertEqual(items[0]["title"], "二号陪审员 (2024)")
+        self.assertEqual(items[0]["state"], "下载中")
+        self.assertEqual(items[0]["source"], "annual")
+
+    def test_active_download_recovers_chinese_title_from_year_archive(self):
+        archive = Path(self.tempdir.name) / "monthly_scans.sqlite"
+        with closing(sqlite3.connect(archive)) as db:
+            db.execute("CREATE TABLE monthly_scan_movies (tmdb_id TEXT, payload TEXT)")
+            db.execute("INSERT INTO monthly_scan_movies VALUES (?, ?)",
+                       ("123", json.dumps({"display_title": "二号陪审员", "year": 2024})))
+            db.commit()
+        self.subject._load_download_history = lambda: [
+            {"download_id": "hash-1", "tmdb_id": 123, "title": "Juror #2 (2024)", "source": "annual"}]
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [
+            {"download_hash": "hash-1", "name": "Juror 2 2024 2160p WEB-DL", "state": "stalledDL"},
+        ])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        count, items = self.subject._active_download_snapshot()
+        self.assertEqual(count, 1)
+        self.assertEqual(items[0]["title"], "二号陪审员 (2024)")
+        self.assertEqual(items[0]["state"], "等待下载")
 
     def test_five_task_limit_does_not_overwrite_existing_tasks(self):
         self.store["monthly_movie_tasks"] = [{"id": str(i)} for i in range(5)]
