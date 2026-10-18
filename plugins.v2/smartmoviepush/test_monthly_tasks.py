@@ -113,9 +113,7 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._download_queue_key = "download_queue"
         self.subject._enabled = True
         self.subject._annual_dispatch_enabled = False
-        self.subject._annual_dispatch_interval_minutes = 10
         self.subject._annual_dispatch_count = 5
-        self.subject._annual_dispatch_last_key = "annual_dispatch_last_at"
         self.subject._max_active_downloads = 10
         self.subject._annual_max_active_downloads = 5
         self.subject._disk_guard_blocks_new = lambda: False
@@ -737,15 +735,15 @@ class MonthlyTasksTest(unittest.TestCase):
             self.subject._remove_queued_movie(movie.tmdb_id)
             return True, None
         self.subject._submit_download = submit
-        self.subject.process_download_queue(force_annual=True)
+        self.subject.process_download_queue()
         self.assertEqual(attempts, [1, 2])
         self.assertEqual([row["key"] for row in self.store["download_queue"]], ["failed"])
         self.assertEqual(self.store["download_queue"][0]["attempts"], 1)
-        self.subject.process_download_queue(force_annual=True)
+        self.subject.process_download_queue()
         self.assertEqual(attempts, [1, 2], "手动重试也应尊重单片冷却期")
         self.store["download_queue"][0]["last_attempt"] = (
             datetime.now() - timedelta(minutes=16)).isoformat(timespec="seconds")
-        self.subject.process_download_queue(force_annual=True)
+        self.subject.process_download_queue()
         self.assertEqual(attempts, [1, 2, 1])
 
     def test_failed_random_candidate_still_preserves_queue_order(self):
@@ -766,6 +764,33 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject.process_download_queue()
         self.assertEqual(attempts, [1])
         self.assertEqual(len(self.store["download_queue"]), 2)
+
+    def test_failed_random_candidate_does_not_block_annual_refill(self):
+        self.subject._annual_dispatch_enabled = True
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
+        self.subject._search_site_contexts = lambda movie_id: [
+            SimpleNamespace(media_info=SimpleNamespace(tmdb_id=movie_id))]
+        self.subject._torrent_identity = lambda _context: "resource"
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        self.store["download_queue"] = [
+            {"key": "random-failed", "tmdb_id": 1, "title": "随机故障", "source": "random"},
+            {"key": "annual", "tmdb_id": 2, "title": "年度影片", "source": "annual"},
+            {"key": "random-later", "tmdb_id": 3, "title": "随机后续", "source": "random"},
+        ]
+        attempts = []
+        def submit(movie, _context, **_kwargs):
+            attempts.append(movie.tmdb_id)
+            if movie.tmdb_id == 1:
+                return False, "下载种子内容为空"
+            self.subject._remove_queued_movie(movie.tmdb_id)
+            return True, None
+        self.subject._submit_download = submit
+        self.subject.process_download_queue()
+        self.assertEqual(attempts, [1, 2])
+        self.assertEqual([row["key"] for row in self.store["download_queue"]],
+                         ["random-failed", "random-later"])
 
     def test_twenty_annual_candidates_fill_five_available_slots(self):
         self.subject._annual_dispatch_enabled = True
@@ -812,10 +837,10 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertEqual(submitted, [2])
         self.assertEqual(len(self.store["download_queue"]), 1)
         self.subject._annual_dispatch_enabled = True
-        self.subject.process_download_queue(force_annual=True)
+        self.subject.process_download_queue()
         self.assertEqual(submitted, [2, 1])
 
-    def test_annual_interval_and_batch_limit(self):
+    def test_annual_refills_each_minute_with_per_check_limit(self):
         self.subject._annual_dispatch_enabled = True
         self.subject._annual_dispatch_count = 2
         self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
@@ -834,13 +859,12 @@ class MonthlyTasksTest(unittest.TestCase):
             self.subject._remove_queued_movie(movie.tmdb_id)
             return True, None
         self.subject._submit_download = submit
-        self.subject.process_download_queue(force_annual=True)
-        self.assertEqual(submitted, [1, 2])
         self.subject.process_download_queue()
         self.assertEqual(submitted, [1, 2])
-        self.store["annual_dispatch_last_at"] = time.time() - 601
         self.subject.process_download_queue()
         self.assertEqual(submitted, [1, 2, 3, 4])
+        self.subject.process_download_queue()
+        self.assertEqual(submitted, [1, 2, 3, 4, 5])
 
     def test_random_slots_full_do_not_block_annual_download(self):
         self.subject._annual_dispatch_enabled = True
@@ -860,7 +884,7 @@ class MonthlyTasksTest(unittest.TestCase):
             self.subject._remove_queued_movie(movie.tmdb_id)
             return True, None
         self.subject._submit_download = submit
-        self.subject.process_download_queue(force_annual=True)
+        self.subject.process_download_queue()
         self.assertEqual(submitted, [1])
         self.assertEqual(self.store["download_queue"], [])
 
@@ -888,7 +912,7 @@ class MonthlyTasksTest(unittest.TestCase):
             self.subject._remove_queued_movie(movie.tmdb_id)
             return True, None
         self.subject._submit_download = submit
-        self.subject.process_download_queue(force_annual=True)
+        self.subject.process_download_queue()
         self.assertEqual(submitted, [2])
         self.assertEqual([row["tmdb_id"] for row in self.store["download_queue"]], [1])
 
@@ -919,7 +943,7 @@ class MonthlyTasksTest(unittest.TestCase):
             self.subject._remove_queued_movie(movie.tmdb_id)
             return True, None
         self.subject._submit_download = submit
-        self.subject.process_download_queue(force_annual=True)
+        self.subject.process_download_queue()
         self.assertEqual(submitted, [1, 2])
         self.assertEqual(self.store["download_queue"], [])
 

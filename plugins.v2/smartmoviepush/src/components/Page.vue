@@ -374,7 +374,7 @@ const telegramForm = ref({ source: '', admins_override: '', chat_id_override: ''
 const diskForm = ref({ disk_guard_enabled: true, disk_guard_path: '/home', disk_guard_threshold_gb: 300, disk_guard_recover_gb: 350 })
 const pushForm = ref({ limit: 20, test_limit: 2, max_active_downloads: 20, max_searches: 80, site_ids: [], min_score: 6 })
 const controlForm = ref({ enabled: true, auto_push: false, auto_download: false, push_interval_minutes: 60 })
-const annualDispatchForm = ref({ annual_dispatch_interval_minutes: 10, annual_dispatch_count: 5, annual_max_active_downloads: 5 })
+const annualDispatchForm = ref({ annual_dispatch_count: 5, annual_max_active_downloads: 5 })
 const intervalItems = [30, 60, 120, 180, 240, 300].map(value => ({ title: `${value} 分钟`, value }))
 const downloadModeItems = [
   { title: '自动下载', value: true },
@@ -414,7 +414,6 @@ function applyState(data, syncForms = true) {
     push_interval_minutes: data.summary?.push_interval_minutes || 60,
   }
   annualDispatchForm.value = {
-    annual_dispatch_interval_minutes: data.summary?.annual_dispatch_interval_minutes || 10,
     annual_dispatch_count: data.summary?.annual_dispatch_count || 5,
     annual_max_active_downloads: data.summary?.annual_max_active_downloads || 5,
   }
@@ -727,7 +726,7 @@ onUnmounted(() => {
         <VBtn :variant="activePage === 'annual' ? 'flat' : 'text'" :color="activePage === 'annual' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'annual'" @click="switchPage('annual')">按年下载</VBtn>
         <VBtn :variant="activePage === 'telegram' ? 'flat' : 'text'" :color="activePage === 'telegram' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'telegram'" @click="switchPage('telegram')">Telegram 设置</VBtn>
       </div>
-      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.61' }}</VChip>
+      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.62' }}</VChip>
     </div>
     <div v-if="activePage === 'random'" class="page-panel" role="tabpanel">
     <div class="status-grid mb-3">
@@ -831,7 +830,7 @@ onUnmounted(() => {
     <div v-else-if="activePage === 'annual'" class="page-panel" role="tabpanel">
     <VCard variant="outlined" class="pa-4 mb-4">
       <div class="text-h6 mb-1">按年份筛选电影</div>
-      <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；勾选影片只加入年度待下载候选。是否推送、定时间隔和每轮数量都在此处统一控制；最多保存 5 个扫描任务。</div>
+      <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；勾选影片只加入年度待下载候选。开启推送后每分钟检查年度空位并自动补位，年度与随机下载名额独立；最多保存 5 个扫描任务。</div>
       <VRow dense class="mb-3 annual-status-row">
         <VCol cols="12" sm="4"><VCard variant="tonal" color="info" class="pa-4 h-100 list-card status-card" @click="openActive('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度正在下载</div><div class="text-h6 font-weight-bold">{{ annualActiveItems.length }}</div><div class="text-caption mt-1">年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
         <VCol cols="12" sm="4"><VCard variant="tonal" color="secondary" class="pa-4 h-100 list-card status-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度待下载候选</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
@@ -839,18 +838,17 @@ onUnmounted(() => {
       </VRow>
       <div class="monthly-task-row pa-3 mb-3">
         <div class="d-flex flex-wrap align-center ga-3">
-          <VTextField v-model.number="annualDispatchForm.annual_dispatch_count" label="年度每轮推送（部）" type="number" min="1" max="50" density="comfortable" hide-details style="max-width: 205px" />
+          <VTextField v-model.number="annualDispatchForm.annual_dispatch_count" label="年度每分钟最多新增（部）" type="number" min="1" max="50" density="comfortable" hide-details style="max-width: 230px" />
           <VTextField v-model.number="annualDispatchForm.annual_max_active_downloads" label="年度同时下载上限（部）" type="number" min="1" max="50" density="comfortable" hide-details style="max-width: 220px" />
-          <VSelect v-model="annualDispatchForm.annual_dispatch_interval_minutes" :items="[5, 10, 30, 60, 120, 240].map(value => ({ title: `${value} 分钟`, value }))" label="定时推送间隔" density="comfortable" hide-details style="max-width: 205px" />
           <VBtn variant="tonal" :loading="loading" @click="saveAnnualDispatchSettings">保存年度设置</VBtn>
           <VBtn v-if="!summary.annual_dispatch_enabled" color="success" :disabled="!controlForm.enabled" :loading="loading" @click="triggerAnnualDispatch('annual_dispatch_start')">启动推送下载</VBtn>
           <template v-else>
             <VBtn color="warning" variant="tonal" :loading="loading" @click="runAction('annual_dispatch_pause')">暂停年度推送</VBtn>
-            <VBtn color="success" variant="tonal" :disabled="!annualQueueItems.length" :loading="loading" @click="triggerAnnualDispatch('annual_dispatch_now')">立即推送一轮</VBtn>
+            <VBtn color="success" variant="tonal" :disabled="!annualQueueItems.length" :loading="loading" @click="triggerAnnualDispatch('annual_dispatch_now')">立即补位</VBtn>
           </template>
           <VBtn color="info" variant="tonal" @click="openLogs('annual')">查看年度日志</VBtn>
         </div>
-        <div class="text-caption text-medium-emphasis mt-2">{{ summary.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停' }}；启动时立即尝试，之后每 {{ summary.annual_dispatch_interval_minutes || 10 }} 分钟一轮，每轮最多 {{ summary.annual_dispatch_count || 5 }} 部。年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}，随机/其他占用 {{ summary.non_annual_occupied_download_slots || 0 }}/{{ summary.max_active_downloads || 10 }}；两边名额互不挤占，硬盘保护与同片去重仍生效。</div>
+        <div class="text-caption text-medium-emphasis mt-2">{{ summary.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停' }}；每分钟检查空位，单次最多新增 {{ summary.annual_dispatch_count || 5 }} 部。年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}，随机/其他占用 {{ summary.non_annual_occupied_download_slots || 0 }}/{{ summary.max_active_downloads || 10 }}；两边名额互不挤占，硬盘保护与同片去重仍生效。</div>
       </div>
       <div class="d-flex flex-wrap align-center ga-3 mt-4 mb-3">
         <VCombobox v-model="archiveYear" :items="archiveYearOptions" label="选择或输入年份" type="number" density="compact" hide-details class="monthly-year-select">
