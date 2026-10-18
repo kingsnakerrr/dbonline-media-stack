@@ -29,7 +29,7 @@ methods = {"_load_monthly_tasks", "_monthly_task", "_update_monthly_task",
            "_remember_monthly_resource_contexts", "_cached_monthly_resource_context",
            "_start_monthly_resource_scan",
            "_scan_monthly_resources", "_load_monthly_resource_cache", "_save_monthly_resource_cache",
-           "_load_download_queue", "_remove_queued_movie", "_mp_active_movie_ids",
+           "_load_download_queue", "_remove_queued_movie", "_mp_active_movie_ids", "_download_value",
            "_submit_download", "_api_clear_queue", "_search_best",
            "process_download_queue"}
 selected = [node for node in plugin.body if isinstance(node, ast.FunctionDef) and node.name in methods]
@@ -164,6 +164,15 @@ class MonthlyTasksTest(unittest.TestCase):
         result = self.subject._api_clear_queue("annual")
         self.assertTrue(result["success"])
         self.assertEqual([item["key"] for item in self.store["download_queue"]], ["random"])
+
+    def test_clearing_non_annual_waiting_keeps_annual_candidates(self):
+        self.store["download_queue"] = [
+            {"key": "year", "tmdb_id": 1, "source": "annual"},
+            {"key": "random", "tmdb_id": 2, "source": "random"},
+        ]
+        result = self.subject._api_clear_queue("non_annual")
+        self.assertTrue(result["success"])
+        self.assertEqual([item["key"] for item in self.store["download_queue"]], ["year"])
 
     def test_resource_scan_limits_one_click_to_sixty_top_voted_candidates(self):
         candidates = [{"tmdb_id": index, "score": 7.5, "vote_count": index}
@@ -510,6 +519,30 @@ class MonthlyTasksTest(unittest.TestCase):
         })
         self.assertEqual(ingested["data"]["counts"]["emby_all"], 1)
         self.assertEqual([item["tmdb_id"] for item in ingested["data"]["items"]], [3])
+
+    def test_annual_list_marks_random_active_download_and_disallows_new_candidate(self):
+        task = {"year": 2026, "month": 0, "min_score": 7, "scanned_at": "2026-12-31"}
+        key = self.subject._save_monthly_archive(task, [
+            {"tmdb_id": 1, "release_date": "2026-01-02", "score": 8, "title": "随机正在下载"},
+        ])
+        self.subject._valid_access_token = lambda _token: True
+        self.subject._load_stats_history = lambda: [{"tmdb_id": 1, "source": "random",
+                                                      "download_id": "abc", "submitted_at": "2026-01-02"}]
+        self.subject._history_view_status = lambda *_args: "unfinished"
+        self.subject._load_download_queue = lambda: []
+        self.subject._load_recent_pushes = lambda: {}
+        self.subject._load_suppressed = lambda: {}
+        self.subject._load_scan_cache = lambda **_kwargs: {}
+        self.subject._library_snapshot_for_scan = lambda **_kwargs: {"tmdb_ids": set()}
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [
+            {"download_hash": "abc", "media": {"tmdbid": 1}}])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        result = self.subject._api_secure_monthly({
+            "archive_key": key, "min_score": 7, "access_token": "test",
+        })
+        row = result["data"]["items"][0]
+        self.assertEqual((row["status"], row["download_source"]), ("downloading", "random"))
 
     def test_manual_batch_rejects_forged_or_duplicate_resource_ids(self):
         task = {"year": 2026, "month": 1, "min_score": 7, "scanned_at": "2026-01-31"}

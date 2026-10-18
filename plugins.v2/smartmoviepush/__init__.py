@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.54"
+    plugin_version = "0.9.55"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -751,11 +751,14 @@ class SmartMoviePush(_PluginBase):
         return {"success": bool(removed), "message": "已删除等候任务" if removed else "任务已不存在"}
 
     def _api_clear_queue(self, source: str = "all") -> dict:
-        if source not in {"all", "annual"}:
+        if source not in {"all", "annual", "non_annual"}:
             return {"success": False, "message": "未知的等候队列来源"}
         with self._queue_lock:
             queue = self._load_download_queue()
-            retained = [item for item in queue if source == "annual" and item.get("source") != "annual"]
+            retained = ([item for item in queue if item.get("source") != "annual"]
+                        if source == "annual" else
+                        [item for item in queue if item.get("source") == "annual"]
+                        if source == "non_annual" else [])
             count = len(queue) - len(retained)
             self.save_data(self._download_queue_key, retained)
         return {"success": True, "message": f"已清空 {count} 部等候下载电影"}
@@ -1160,7 +1163,9 @@ class SmartMoviePush(_PluginBase):
         queue = self._load_download_queue()
         history = self._load_download_history()
         active_count, active_items = self._active_download_snapshot()
-        annual_history_count = sum(item.get("source") == "annual" for item in self._load_stats_history())
+        occupied_slots = self._active_download_count()
+        stats_history = self._load_stats_history()
+        annual_history_count = sum(item.get("source") == "annual" for item in stats_history)
         return {
             "summary": {
                 "enabled": self._enabled,
@@ -1170,9 +1175,13 @@ class SmartMoviePush(_PluginBase):
                 "push_interval_minutes": self._push_interval_minutes,
                 "cache_count": len(cache) if isinstance(cache, dict) else 0,
                 "queue_count": len(queue),
+                "non_annual_queue_count": sum(item.get("source") != "annual" for item in queue),
                 "history_count": self._history_total_count(history),
+                "non_annual_history_count": len(stats_history) - annual_history_count,
                 "suppressed_count": len(suppressed),
                 "active_downloads": active_count,
+                "occupied_download_slots": occupied_slots,
+                "non_annual_active_downloads": sum(item.get("source") != "annual" for item in active_items),
                 "active_download_items": active_items,
                 "annual_history_count": annual_history_count,
                 "max_active_downloads": self._max_active_downloads,
@@ -1322,10 +1331,10 @@ class SmartMoviePush(_PluginBase):
         timezone = pytz.timezone(settings.TZ)
         now = datetime.now(tz=timezone)
         source = str(payload.get("source") or "all")
-        if source not in {"all", "annual"}:
+        if source not in {"all", "annual", "non_annual"}:
             return {"success": False, "message": "未知的下载记录来源"}
         history = [item for item in self._load_stats_history()
-                   if source == "all" or item.get("source") == source]
+                   if source == "all" or (item.get("source") == "annual") == (source == "annual")]
         dated = []
         for item in history:
             submitted_at = self._parse_history_time(item.get("submitted_at"), timezone)
@@ -1401,6 +1410,21 @@ class SmartMoviePush(_PluginBase):
             movie_id = str(item.get("tmdb_id") or "")
             if movie_id and (movie_id not in history or str(item.get("submitted_at") or "") > str(history[movie_id].get("submitted_at") or "")):
                 history[movie_id] = item
+        try:
+            active_rows = DownloadChain().downloading() or []
+            active_ids = self._mp_active_movie_ids(active_rows)
+            active_hashes = {str(self._download_value(
+                row, "download_hash", "hash", "torrent_hash", "infohash", "info_hash") or "").strip().lower()
+                for row in active_rows}
+            active_hashes.discard("")
+        except Exception as err:
+            logger.warning(f"年度名单暂不能核对正在下载任务：{type(err).__name__}")
+            active_ids, active_hashes = set(), set()
+        active_sources = {}
+        for movie_id, record in history.items():
+            if record.get("download_id") and str(record["download_id"]).strip().lower() in active_hashes:
+                active_ids.add(movie_id)
+                active_sources[movie_id] = str(record.get("source") or "legacy")
         queue_by_id = {str(item.get("tmdb_id")): item for item in self._load_download_queue()}
         queue_ids = set(queue_by_id)
         pushed_ids = set(self._load_recent_pushes())
@@ -1448,9 +1472,12 @@ class SmartMoviePush(_PluginBase):
                 status = "suppressed"
             else:
                 status = "library" if (cache.get(movie_id) or {}).get("status") == "library" else "candidate"
+            if not in_emby and movie_id in active_ids:
+                status = "downloading"
             counts[status] = counts.get(status, 0) + 1
             rows.append({key: value for key, value in item.items() if key != "info"} |
                         {"status": status,
+                         "download_source": active_sources.get(movie_id, "external") if status == "downloading" else "",
                          "queue_source": (queue_by_id.get(movie_id) or {}).get("source") or "random"
                          if status == "queued" else ""})
         rows.sort(key=lambda item: (-int(item.get("vote_count") or 0),

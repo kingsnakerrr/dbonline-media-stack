@@ -51,6 +51,7 @@ const monthlyStatusOptions = [
   { title: '只看未下载', value: 'not_downloaded', color: 'info' },
   { title: '候选', value: 'candidate', color: 'info' },
   { title: '等候下载', value: 'queued', color: 'warning' },
+  { title: '正在下载', value: 'downloading', color: 'info' },
   { title: '未下载完成', value: 'unfinished', color: 'secondary' },
   { title: '待入库', value: 'awaiting_library', color: 'info' },
   { title: '已整理', value: 'organized', color: 'warning' },
@@ -62,6 +63,7 @@ const monthlyStatusOptions = [
 const monthlyStatusMeta = Object.fromEntries(monthlyStatusOptions.map(item => [item.value, item]))
 function monthlyStatusLabel(item) {
   if (item.status === 'queued') return item.queue_source === 'annual' ? '已在年度下载队列' : '已在随机下载队列'
+  if (item.status === 'downloading') return item.download_source === 'annual' ? '年度正在下载' : item.download_source === 'random' ? '随机正在下载' : '其他方式正在下载'
   if (item.status === 'emby_ingested') return 'Emby 已入库'
   if (item.status === 'library') return 'Emby 已入库（其他来源）'
   return monthlyStatusMeta[item.status]?.title || item.status
@@ -118,7 +120,7 @@ const archiveMonths = computed(() => Array.from({ length: 12 }, (_, index) => {
 const selectedMonthTasks = computed(() => (state.value.monthly_tasks || []).filter(item =>
   Number(item.year) === Number(monthlyArchiveYear.value || monthlyView.value.task?.year)
   && Number(item.month) === Number(monthlyArchiveMonth.value || monthlyView.value.task?.month)))
-const monthlyCanDownload = item => ['candidate', 'pushed', 'queued'].includes(item.status)
+const monthlyCanDownload = item => ['candidate', 'pushed'].includes(item.status)
 function selectMonthlyPage() {
   const values = new Set(monthlySelected.value)
   for (const item of monthlyView.value.items || []) {
@@ -517,9 +519,11 @@ async function savePushSettings() {
 
 const summary = computed(() => state.value.summary || {})
 const annualActiveItems = computed(() => (summary.value.active_download_items || []).filter(item => item.source === 'annual'))
+const nonAnnualActiveItems = computed(() => (summary.value.active_download_items || []).filter(item => item.source !== 'annual'))
 const annualQueueItems = computed(() => (state.value.queue || []).filter(item => item.source === 'annual'))
-const visibleActiveItems = computed(() => dialogSource.value === 'annual' ? annualActiveItems.value : (summary.value.active_download_items || []))
-const visibleQueueItems = computed(() => dialogSource.value === 'annual' ? annualQueueItems.value : (state.value.queue || []))
+const nonAnnualQueueItems = computed(() => (state.value.queue || []).filter(item => item.source !== 'annual'))
+const visibleActiveItems = computed(() => dialogSource.value === 'annual' ? annualActiveItems.value : dialogSource.value === 'non_annual' ? nonAnnualActiveItems.value : (summary.value.active_download_items || []))
+const visibleQueueItems = computed(() => dialogSource.value === 'annual' ? annualQueueItems.value : dialogSource.value === 'non_annual' ? nonAnnualQueueItems.value : (state.value.queue || []))
 const diskGuard = computed(() => state.value.disk_guard || {})
 const queueHeaders = [
   { title: '影片', key: 'title' },
@@ -700,18 +704,18 @@ onUnmounted(() => {
         </VCard>
       </div>
       <div class="status-item">
-        <VCard variant="tonal" color="info" class="pa-4 h-100 list-card status-card" @click="openActive()">
-          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">正在下载（点击看实时详情）</div><div class="text-h6 font-weight-bold">{{ summary.active_downloads || 0 }}/{{ summary.max_active_downloads || 20 }}</div></div><VIcon icon="mdi-chevron-right" /></div>
+        <VCard variant="tonal" color="info" class="pa-4 h-100 list-card status-card" @click="openActive('non_annual')">
+          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">随机/其他正在下载</div><div class="text-h6 font-weight-bold">{{ summary.non_annual_active_downloads || 0 }}</div><div class="text-caption mt-1">全局占用 {{ summary.occupied_download_slots || 0 }}/{{ summary.max_active_downloads || 20 }}</div></div><VIcon icon="mdi-chevron-right" /></div>
         </VCard>
       </div>
       <div class="status-item">
-        <VCard variant="tonal" color="secondary" class="pa-4 h-100 list-card status-card" @click="openQueue()">
-          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">等候下载</div><div class="text-h6 font-weight-bold">{{ state.queue.length }}</div><div class="text-caption mt-1">搜索、取消任务或批量清空</div></div><VIcon icon="mdi-chevron-right" /></div>
+        <VCard variant="tonal" color="secondary" class="pa-4 h-100 list-card status-card" @click="openQueue('non_annual')">
+          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">随机/其他等候下载</div><div class="text-h6 font-weight-bold">{{ nonAnnualQueueItems.length }}</div><div class="text-caption mt-1">搜索、取消任务或批量清空</div></div><VIcon icon="mdi-chevron-right" /></div>
         </VCard>
       </div>
       <div class="status-item">
-        <VCard variant="tonal" color="primary" class="pa-4 h-100 list-card status-card" @click="openHistory">
-          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">下载记录</div><div class="text-h6 font-weight-bold">{{ summary.history_count || 0 }}</div><div class="text-caption mt-1">全部记录 · 按时间段筛选</div></div><VIcon icon="mdi-chevron-right" /></div>
+        <VCard variant="tonal" color="primary" class="pa-4 h-100 list-card status-card" @click="openHistory('non_annual')">
+          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">随机/其他下载记录</div><div class="text-h6 font-weight-bold">{{ summary.non_annual_history_count || 0 }}</div><div class="text-caption mt-1">按时间段筛选</div></div><VIcon icon="mdi-chevron-right" /></div>
         </VCard>
       </div>
       <div class="status-item">
@@ -829,7 +833,7 @@ onUnmounted(() => {
     </VCard>
 
     <VDialog v-model="dialogOpen" max-width="75rem" scrollable>
-      <VCard v-if="dialog === 'active'" :title="dialogSource === 'annual' ? '年度正在下载 · 实时状态' : '全部正在下载 · 实时状态'">
+      <VCard v-if="dialog === 'active'" :title="dialogSource === 'annual' ? '年度正在下载 · 实时状态' : dialogSource === 'non_annual' ? '随机/其他正在下载 · 实时状态' : '全部正在下载 · 实时状态'">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
           <VAlert v-if="!visibleActiveItems.length" type="info" variant="tonal" class="mb-3">当前没有此类正在下载的任务，或下载器暂未返回详情。</VAlert>
@@ -839,16 +843,16 @@ onUnmounted(() => {
           <div class="text-caption text-medium-emphasis mt-3">每 5 秒自动刷新。</div>
         </VCardText>
       </VCard>
-      <VCard v-else-if="dialog === 'queue'" :title="dialogSource === 'annual' ? '年度等候下载' : '全部等候下载'">
+      <VCard v-else-if="dialog === 'queue'" :title="dialogSource === 'annual' ? '年度待下载候选' : dialogSource === 'non_annual' ? '随机/其他等候下载' : '全部等候下载'">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
-          <div class="d-flex ga-2 mb-3"><VTextField v-model="queueSearch" label="搜索影片" prepend-inner-icon="mdi-magnify" clearable hide-details /><VBtn color="error" variant="tonal" @click="runAction('clear_queue', { source: dialogSource })">{{ dialogSource === 'annual' ? '清空年度等候' : '批量清空' }}</VBtn></div>
+          <div class="d-flex ga-2 mb-3"><VTextField v-model="queueSearch" label="搜索影片" prepend-inner-icon="mdi-magnify" clearable hide-details /><VBtn color="error" variant="tonal" @click="runAction('clear_queue', { source: dialogSource })">{{ dialogSource === 'annual' ? '清空年度候选' : dialogSource === 'non_annual' ? '清空随机/其他等候' : '批量清空' }}</VBtn></div>
           <VDataTable :headers="queueHeaders" :items="visibleQueueItems" :search="queueSearch" :items-per-page="20" :items-per-page-options="pageSizes" item-value="key" density="compact" hover>
             <template #item.actions="{ item }"><VBtn size="small" color="error" variant="tonal" @click="runAction('remove_queue', { key: item.key })">取消下载</VBtn></template>
           </VDataTable>
         </VCardText>
       </VCard>
-      <VCard v-else-if="dialog === 'history'" :title="historySource === 'annual' ? '年度下载记录' : '全部下载记录'">
+      <VCard v-else-if="dialog === 'history'" :title="historySource === 'annual' ? '年度下载记录' : historySource === 'non_annual' ? '随机/其他下载记录' : '全部下载记录'">
         <VDialogCloseBtn @click="dialog = ''" />
         <VCardText>
           <VTabs v-model="historyStatus" show-arrows class="mb-3">
