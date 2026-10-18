@@ -994,7 +994,7 @@ return (_ctx, _cache) => {
                 class: "page-version"
               }, {
                 default: _withCtx(() => [
-                  _createTextVNode("v" + _toDisplayString(summary.value.plugin_version || '0.9.59'), 1)
+                  _createTextVNode("v" + _toDisplayString(summary.value.plugin_version || '0.9.60'), 1)
                 ]),
                 _: 1
               })
@@ -2702,6 +2702,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-2cf240d2"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-a61dbcdd"]]);
 
 export { Page as default };

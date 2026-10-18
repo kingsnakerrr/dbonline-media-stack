@@ -727,7 +727,7 @@ onUnmounted(() => {
         <VBtn :variant="activePage === 'annual' ? 'flat' : 'text'" :color="activePage === 'annual' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'annual'" @click="switchPage('annual')">按年下载</VBtn>
         <VBtn :variant="activePage === 'telegram' ? 'flat' : 'text'" :color="activePage === 'telegram' ? 'primary' : undefined" role="tab" :aria-selected="activePage === 'telegram'" @click="switchPage('telegram')">Telegram 设置</VBtn>
       </div>
-      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.59' }}</VChip>
+      <VChip size="small" variant="tonal" color="primary" class="page-version">v{{ summary.plugin_version || '0.9.60' }}</VChip>
     </div>
     <div v-if="activePage === 'random'" class="page-panel" role="tabpanel">
     <div class="status-grid mb-3">

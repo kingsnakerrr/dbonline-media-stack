@@ -54,7 +54,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.59"
+    plugin_version = "0.9.60"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -3531,6 +3531,14 @@ class SmartMoviePush(_PluginBase):
                 if is_annual and (not annual_due or annual_submitted >= self._annual_dispatch_count
                                   or annual_attempts >= self._annual_dispatch_count * 2):
                     continue
+                if is_annual and item.get("last_attempt"):
+                    try:
+                        last_attempt = datetime.fromisoformat(str(item["last_attempt"]))
+                        retry_minutes = min(15 * 2 ** min(max(int(item.get("attempts") or 1) - 1, 0), 4), 240)
+                        if datetime.now(tz=last_attempt.tzinfo) - last_attempt < timedelta(minutes=retry_minutes):
+                            continue
+                    except (TypeError, ValueError, OverflowError):
+                        pass
                 if not any(row.get("key") == item.get("key") for row in remaining):
                     continue
                 if is_annual:
@@ -3579,11 +3587,15 @@ class SmartMoviePush(_PluginBase):
                             row["last_error"] = str(err)[:300]
                             row["last_attempt"] = datetime.now().isoformat(timespec="seconds")
                             break
+                    # 后续候选若成功，会重新读取队列并保存；先落盘以免覆盖本片的重试状态。
+                    self.save_data(self._download_queue_key, remaining)
                     logger.error(f"顺序下载队列提交失败：{item.get('title')}：{err}")
                     if is_annual:
                         self._append_plugin_log("年度下载", f"{item.get('title')} 提交失败：{err}", "error")
-                    # FIFO：队首失败时不越过它，避免后加入的电影抢先。
-                    break
+                    # 年度候选彼此独立：单片种子失败不应卡住整批。
+                    # 随机/手动队列仍保持原有的顺序重试语义。
+                    if not is_annual:
+                        break
             self.save_data(self._download_queue_key, remaining)
             if annual_attempts:
                 self.save_data(self._annual_dispatch_last_key, time.time())
