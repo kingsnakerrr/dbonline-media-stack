@@ -32,6 +32,8 @@ const dialogOpen = computed({
   set: value => { if (!value) dialog.value = '' },
 })
 const queueSearch = ref('')
+const noResourceSearch = ref('')
+const noResourceSelected = ref([])
 const historySearch = ref('')
 const historyPeriod = ref('all')
 const historyDate = ref('')
@@ -64,6 +66,7 @@ const monthlyStatusOptions = [
   { title: '只看未下载', value: 'not_downloaded', color: 'info' },
   { title: '候选', value: 'candidate', color: 'info' },
   { title: '等候下载', value: 'queued', color: 'warning' },
+  { title: '无资源', value: 'no_resource', color: 'warning' },
   { title: '正在下载', value: 'downloading', color: 'info' },
   { title: '未下载完成', value: 'unfinished', color: 'secondary' },
   { title: '待入库', value: 'awaiting_library', color: 'info' },
@@ -76,6 +79,7 @@ const monthlyStatusOptions = [
 const monthlyStatusMeta = Object.fromEntries(monthlyStatusOptions.map(item => [item.value, item]))
 function monthlyStatusLabel(item) {
   if (item.status === 'queued') return item.queue_source === 'annual' ? '已在年度下载队列' : '已在随机下载队列'
+  if (item.status === 'no_resource') return '连续 3 次未找到资源'
   if (item.status === 'downloading') return item.download_source === 'annual' ? '年度正在下载' : item.download_source === 'random' ? '随机正在下载' : '其他方式正在下载'
   if (item.status === 'emby_ingested') return 'Emby 已入库'
   if (item.status === 'library') return 'Emby 已入库（其他来源）'
@@ -244,6 +248,13 @@ function openQueue(source = 'all') {
   dialog.value = 'queue'
   loadStatus(true)
 }
+function openNoResource(source = 'all') {
+  dialogSource.value = source
+  noResourceSearch.value = ''
+  noResourceSelected.value = []
+  dialog.value = 'no_resource'
+  loadStatus(true)
+}
 async function loadMonthly(refreshLibrary = false) {
   if (!accessToken.value || (!monthlyTaskId.value && !monthlyArchiveKey.value && !monthlyArchiveYear.value)) return
   monthlyBusy.value = true
@@ -365,7 +376,7 @@ async function changeHistoryPage(delta) {
   await loadHistory()
 }
 const state = ref({
-  summary: {}, queue: [], history: [], suppressed: [], logs: [],
+  summary: {}, queue: [], no_resource: [], resource_recheck: {}, history: [], suppressed: [], logs: [],
   monthly_tasks: [], monthly_archives: [],
   telegram: { source: '', admins_override: '', chat_id_override: '', sources: [] },
   disk_guard: { enabled: true, active: false, free_gb: 0, threshold_gb: 300, recover_gb: 350, waiting: [] },
@@ -563,12 +574,22 @@ const annualQueueItems = computed(() => (state.value.queue || []).filter(item =>
 const nonAnnualQueueItems = computed(() => (state.value.queue || []).filter(item => item.source !== 'annual'))
 const visibleActiveItems = computed(() => dialogSource.value === 'annual' ? annualActiveItems.value : dialogSource.value === 'non_annual' ? nonAnnualActiveItems.value : (summary.value.active_download_items || []))
 const visibleQueueItems = computed(() => dialogSource.value === 'annual' ? annualQueueItems.value : dialogSource.value === 'non_annual' ? nonAnnualQueueItems.value : (state.value.queue || []))
+const annualNoResourceItems = computed(() => (state.value.no_resource || []).filter(item => item.source === 'annual'))
+const nonAnnualNoResourceItems = computed(() => (state.value.no_resource || []).filter(item => item.source !== 'annual'))
+const visibleNoResourceItems = computed(() => dialogSource.value === 'annual' ? annualNoResourceItems.value : dialogSource.value === 'non_annual' ? nonAnnualNoResourceItems.value : (state.value.no_resource || []))
 const diskGuard = computed(() => state.value.disk_guard || {})
 const queueHeaders = [
   { title: '影片', key: 'title' },
   { title: '加入时间', key: 'created_at', width: 180 },
   { title: '重试', key: 'attempts', width: 80 },
   { title: '操作', key: 'actions', sortable: false, width: 120 },
+]
+const noResourceHeaders = [
+  { title: '影片', key: 'title' },
+  { title: '来源', key: 'source', width: 90 },
+  { title: '无资源次数', key: 'resource_misses', width: 110 },
+  { title: '最近检查', key: 'last_resource_check', width: 180 },
+  { title: '操作', key: 'actions', sortable: false, width: 110 },
 ]
 const historyHeaders = [
   { title: '影片', key: 'title' },
@@ -763,6 +784,11 @@ onUnmounted(() => {
         </VCard>
       </div>
       <div class="status-item">
+        <VCard variant="tonal" color="warning" class="pa-4 h-100 list-card status-card" @click="openNoResource('non_annual')">
+          <div class="d-flex align-center justify-space-between"><div><div class="text-caption">随机无资源</div><div class="text-h6 font-weight-bold">{{ nonAnnualNoResourceItems.length }}</div><div class="text-caption mt-1">单个或批量重查，找到后重新排队</div></div><VIcon icon="mdi-chevron-right" /></div>
+        </VCard>
+      </div>
+      <div class="status-item">
         <VCard variant="tonal" color="primary" class="pa-4 h-100 list-card status-card" @click="openHistory('non_annual')">
           <div class="d-flex align-center justify-space-between"><div><div class="text-caption">随机/其他下载记录</div><div class="text-h6 font-weight-bold">{{ summary.non_annual_history_count || 0 }}</div><div class="text-caption mt-1">按时间段筛选</div></div><VIcon icon="mdi-chevron-right" /></div>
         </VCard>
@@ -834,9 +860,10 @@ onUnmounted(() => {
       <div class="text-h6 mb-1">按年份筛选电影</div>
       <div class="text-caption text-medium-emphasis mb-3">选定年份后扫描全年；勾选影片只加入年度待下载候选。开启推送后每分钟检查年度空位并自动补位，年度与随机下载名额独立；最多保存 5 个扫描任务。</div>
       <VRow dense class="mb-3 annual-status-row">
-        <VCol cols="12" sm="4"><VCard variant="tonal" color="info" class="pa-4 h-100 list-card status-card" @click="openActive('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度正在下载</div><div class="text-h6 font-weight-bold">{{ annualActiveItems.length }}</div><div class="text-caption mt-1">年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
-        <VCol cols="12" sm="4"><VCard variant="tonal" color="secondary" class="pa-4 h-100 list-card status-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度待下载候选</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
-        <VCol cols="12" sm="4"><VCard variant="tonal" color="primary" class="pa-4 h-100 list-card status-card" @click="openHistory('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度下载记录</div><div class="text-h6 font-weight-bold">{{ summary.annual_history_count || 0 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+        <VCol cols="12" sm="3"><VCard variant="tonal" color="info" class="pa-4 h-100 list-card status-card" @click="openActive('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度正在下载</div><div class="text-h6 font-weight-bold">{{ annualActiveItems.length }}</div><div class="text-caption mt-1">年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+        <VCol cols="12" sm="3"><VCard variant="tonal" color="secondary" class="pa-4 h-100 list-card status-card" @click="openQueue('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度待下载候选</div><div class="text-h6 font-weight-bold">{{ annualQueueItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+        <VCol cols="12" sm="3"><VCard variant="tonal" color="warning" class="pa-4 h-100 list-card status-card" @click="openNoResource('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度无资源</div><div class="text-h6 font-weight-bold">{{ annualNoResourceItems.length }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
+        <VCol cols="12" sm="3"><VCard variant="tonal" color="primary" class="pa-4 h-100 list-card status-card" @click="openHistory('annual')"><div class="d-flex justify-space-between align-center"><div><div class="text-caption">年度下载记录</div><div class="text-h6 font-weight-bold">{{ summary.annual_history_count || 0 }}</div></div><VIcon icon="mdi-chevron-right" /></div></VCard></VCol>
       </VRow>
       <div class="monthly-task-row pa-3 mb-3">
         <div class="d-flex flex-wrap align-center ga-3">
@@ -905,6 +932,23 @@ onUnmounted(() => {
           <div class="d-flex ga-2 mb-3"><VTextField v-model="queueSearch" label="搜索影片" prepend-inner-icon="mdi-magnify" clearable hide-details /><VBtn color="error" variant="tonal" @click="runAction('clear_queue', { source: dialogSource })">{{ dialogSource === 'annual' ? '清空年度候选' : dialogSource === 'non_annual' ? '清空随机/其他等候' : '批量清空' }}</VBtn></div>
           <VDataTable :headers="queueHeaders" :items="visibleQueueItems" :search="queueSearch" :items-per-page="20" :items-per-page-options="pageSizes" item-value="key" density="compact" hover>
             <template #item.actions="{ item }"><VBtn size="small" color="error" variant="tonal" @click="runAction('remove_queue', { key: item.key })">取消下载</VBtn></template>
+          </VDataTable>
+        </VCardText>
+      </VCard>
+      <VCard v-else-if="dialog === 'no_resource'" :title="dialogSource === 'annual' ? '年度无资源' : dialogSource === 'non_annual' ? '随机无资源' : '全部无资源电影'">
+        <VDialogCloseBtn @click="dialog = ''" />
+        <VCardText>
+          <VAlert type="info" variant="tonal" density="compact" class="mb-3">连续 3 次没有符合 MoviePilot 规则的资源后移到这里，不再占用等候队列。重查沿用站点搜索间隔与安全额度；找到资源后加入原来源的等候下载队列。</VAlert>
+          <VAlert v-if="state.resource_recheck?.running || state.resource_recheck?.message" :type="state.resource_recheck?.running ? 'info' : 'success'" variant="tonal" density="compact" class="mb-3">{{ state.resource_recheck?.message }}（已查 {{ state.resource_recheck?.done || 0 }}/{{ state.resource_recheck?.total || 0 }}，找到 {{ state.resource_recheck?.found || 0 }}）</VAlert>
+          <div class="d-flex flex-wrap ga-2 mb-3">
+            <VTextField v-model="noResourceSearch" label="搜索影片" prepend-inner-icon="mdi-magnify" clearable hide-details style="min-width: 220px" />
+            <VBtn color="primary" variant="tonal" :disabled="!noResourceSelected.length || state.resource_recheck?.running" @click="runAction('recheck_no_resource', { keys: noResourceSelected })">重查选中（{{ noResourceSelected.length }}）</VBtn>
+            <VBtn color="info" variant="tonal" :disabled="!visibleNoResourceItems.length || state.resource_recheck?.running" @click="runAction('recheck_no_resource', { source: dialogSource })">重查当前分类全部</VBtn>
+            <VBtn color="error" variant="tonal" :disabled="!noResourceSelected.length" @click="runAction('remove_no_resource', { keys: noResourceSelected })">移除选中</VBtn>
+          </div>
+          <VDataTable v-model="noResourceSelected" show-select :headers="noResourceHeaders" :items="visibleNoResourceItems" :search="noResourceSearch" :items-per-page="20" :items-per-page-options="pageSizes" item-value="key" density="compact" hover>
+            <template #item.source="{ item }">{{ item.source === 'annual' ? '年度' : '随机' }}</template>
+            <template #item.actions="{ item }"><VBtn size="small" color="primary" variant="tonal" :disabled="state.resource_recheck?.running" @click="runAction('recheck_no_resource', { keys: [item.key] })">搜索资源</VBtn></template>
           </VDataTable>
         </VCardText>
       </VCard>

@@ -12,6 +12,7 @@ import subprocess
 import threading
 import time
 from contextlib import closing
+from pathlib import Path
 from types import SimpleNamespace
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -54,7 +55,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.63"
+    plugin_version = "0.9.68"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -111,6 +112,9 @@ class SmartMoviePush(_PluginBase):
     _suppressed_key = "suppressed_movies"
     _daily_messages_key = "daily_messages"
     _download_queue_key = "download_queue"
+    _no_resource_key = "no_resource_movies"
+    _resource_recheck_key = "no_resource_recheck"
+    _resource_recheck_lock = threading.Lock()
     _download_history_key = "download_history"
     _plugin_logs_key = "plugin_logs"
     _run_status_key = "run_status"
@@ -772,6 +776,113 @@ class SmartMoviePush(_PluginBase):
             self.save_data(self._download_queue_key, retained)
         return {"success": True, "message": f"已清空 {count} 部等候下载电影"}
 
+    def _api_remove_no_resource(self, keys: Any) -> dict:
+        selected = {str(key) for key in keys} if isinstance(keys, list) else set()
+        if not selected:
+            return {"success": False, "message": "请先选择无资源电影"}
+        with self._queue_lock:
+            items = self._load_no_resource()
+            retained = [item for item in items if str(item.get("key")) not in selected]
+            self.save_data(self._no_resource_key, retained)
+        return {"success": True, "message": f"已从无资源列表移除 {len(items) - len(retained)} 部"}
+
+    def _api_recheck_no_resource(self, keys: Any, source: str = "all") -> dict:
+        if not self._enabled:
+            return {"success": False, "message": "请先启用插件"}
+        if source not in {"all", "annual", "non_annual"}:
+            return {"success": False, "message": "未知的电影来源"}
+        selected = {str(key) for key in keys} if isinstance(keys, list) else None
+        if selected is not None and not selected:
+            return {"success": False, "message": "请先选择无资源电影"}
+        items = [item for item in self._load_no_resource()
+                 if (selected is None or str(item.get("key")) in selected)
+                 and (source == "all" or (item.get("source") == "annual") == (source == "annual"))]
+        if not items:
+            return {"success": False, "message": "所选电影已不在无资源列表"}
+        if not self._resource_recheck_lock.acquire(blocking=False):
+            return {"success": False, "message": "已有无资源重查正在运行，请稍后查看进度"}
+        job = {"running": True, "total": len(items), "done": 0, "found": 0,
+               "still_missing": 0, "skipped": 0, "message": "正在逐部搜索站点资源",
+               "started_at": datetime.now().isoformat(timespec="seconds")}
+        self.save_data(self._resource_recheck_key, job)
+        try:
+            threading.Thread(target=self._recheck_no_resource_worker,
+                             args=(items, job), daemon=True).start()
+        except Exception:
+            self._resource_recheck_lock.release()
+            raise
+        return {"success": True, "message": f"已开始后台重查 {len(items)} 部；找到资源后自动加入原来源的等候下载队列"}
+
+    def _recheck_no_resource_worker(self, items: List[dict], job: dict) -> None:
+        try:
+            for item in items:
+                key = str(item.get("key") or "")
+                if not any(str(row.get("key")) == key for row in self._load_no_resource()):
+                    job["skipped"] += 1
+                    job["done"] += 1
+                    continue
+                try:
+                    results = self._search_site_contexts(int(item["tmdb_id"]))
+                    if not results:
+                        with self._queue_lock:
+                            no_resource = self._load_no_resource()
+                            for row in no_resource:
+                                if str(row.get("key")) == key:
+                                    row["last_resource_check"] = datetime.now().isoformat(timespec="seconds")
+                                    row["last_error"] = "所选站点中没有符合规则的资源"
+                            self.save_data(self._no_resource_key, no_resource)
+                        job["still_missing"] += 1
+                    else:
+                        with self._queue_lock:
+                            no_resource = self._load_no_resource()
+                            current = next((row for row in no_resource if str(row.get("key")) == key), None)
+                            if current:
+                                movie_id = str(current.get("tmdb_id") or "")
+                                existing = any(str(row.get("tmdb_id")) == movie_id
+                                               for row in self._load_download_queue())
+                                submitted = any(str(row.get("tmdb_id")) == movie_id
+                                                and row.get("status") != "identity_conflict"
+                                                for row in self._load_stats_history())
+                                active = movie_id in self._mp_active_movie_ids(DownloadChain().downloading() or [])
+                                library = self._library_snapshot_for_scan(force=True)
+                                if not library:
+                                    raise PTSearchUnavailable("Emby 目录暂不可核对，不能安全重新入队")
+                                in_library = movie_id in library["tmdb_ids"]
+                                self.save_data(self._no_resource_key,
+                                               [row for row in no_resource if str(row.get("key")) != key])
+                                if not (existing or submitted or active or in_library):
+                                    current["torrent_identity"] = self._torrent_identity(results[0])
+                                    current["attempts"] = 0
+                                    current["resource_misses"] = 0
+                                    current.pop("last_error", None)
+                                    current.pop("last_attempt", None)
+                                    current.pop("last_resource_check", None)
+                                    queue = self._load_download_queue()
+                                    queue.append(current)
+                                    self.save_data(self._download_queue_key, queue[-2000:])
+                                    job["found"] += 1
+                                    self._append_plugin_log("年度下载" if current.get("source") == "annual" else "资源重查",
+                                                            f"{current.get('title')} 重新找到资源，已加入等候下载")
+                                else:
+                                    job["skipped"] += 1
+                    job["done"] += 1
+                    job["message"] = f"已处理 {job['done']}/{job['total']} 部"
+                except PTSearchUnavailable as err:
+                    job["message"] = f"站点暂不可用，已暂停重查：{err}；剩余电影保留在无资源列表"
+                    break
+                except Exception as err:
+                    job["skipped"] += 1
+                    job["done"] += 1
+                    job["message"] = f"{item.get('title')} 重查失败：{err}"
+                    logger.warning(job["message"])
+                finally:
+                    self.save_data(self._resource_recheck_key, dict(job))
+            job["running"] = False
+            job["finished_at"] = datetime.now().isoformat(timespec="seconds")
+            self.save_data(self._resource_recheck_key, dict(job))
+        finally:
+            self._resource_recheck_lock.release()
+
     def _api_clear_download_history(self) -> dict:
         count = len(self._load_stats_history())
         try:
@@ -1170,6 +1281,7 @@ class SmartMoviePush(_PluginBase):
         suppressed = self._load_suppressed()
         cache = self.get_data(self._scan_cache_key)
         queue = self._load_download_queue()
+        no_resource = self._load_no_resource()
         history = self._load_download_history()
         active_count, active_items = self._active_download_snapshot()
         annual_occupied, non_annual_occupied = self._active_download_counts()
@@ -1189,6 +1301,7 @@ class SmartMoviePush(_PluginBase):
                 "push_interval_minutes": self._push_interval_minutes,
                 "cache_count": len(cache) if isinstance(cache, dict) else 0,
                 "queue_count": len(queue),
+                "no_resource_count": len(no_resource),
                 "non_annual_queue_count": sum(item.get("source") != "annual" for item in queue),
                 "history_count": self._history_total_count(history),
                 "non_annual_history_count": len(stats_history) - annual_history_count,
@@ -1209,6 +1322,8 @@ class SmartMoviePush(_PluginBase):
                 "max_searches": self._max_searches,
             },
             "queue": list(queue),
+            "no_resource": list(reversed(no_resource)),
+            "resource_recheck": self.get_data(self._resource_recheck_key) or {},
             "history": list(reversed(history)),
             "logs": list(reversed(self._load_plugin_logs())),
             "run_status": self.get_data(self._run_status_key) or {},
@@ -1443,6 +1558,7 @@ class SmartMoviePush(_PluginBase):
                 active_sources[movie_id] = str(record.get("source") or "legacy")
         queue_by_id = {str(item.get("tmdb_id")): item for item in self._load_download_queue()}
         queue_ids = set(queue_by_id)
+        no_resource_ids = {str(item.get("tmdb_id")) for item in self._load_no_resource()}
         pushed_ids = set(self._load_recent_pushes())
         suppressed_ids = set(self._load_suppressed())
         cache = self._load_scan_cache(include_expired=True)
@@ -1482,6 +1598,8 @@ class SmartMoviePush(_PluginBase):
                 status = "library"
             elif movie_id in queue_ids:
                 status = "queued"
+            elif movie_id in no_resource_ids:
+                status = "no_resource"
             elif movie_id in pushed_ids:
                 status = "pushed"
             elif movie_id in suppressed_ids:
@@ -1723,6 +1841,10 @@ class SmartMoviePush(_PluginBase):
             result = self._api_remove_queue(str(payload.get("key") or ""))
         elif action == "clear_queue":
             result = self._api_clear_queue(str(payload.get("source") or "all"))
+        elif action == "recheck_no_resource":
+            result = self._api_recheck_no_resource(payload.get("keys"), str(payload.get("source") or "all"))
+        elif action == "remove_no_resource":
+            result = self._api_remove_no_resource(payload.get("keys"))
         elif action == "remove_suppressed":
             result = self._api_remove_suppressed(str(payload.get("tmdb_id") or ""))
         elif action == "clear_suppressed":
@@ -2252,8 +2374,43 @@ class SmartMoviePush(_PluginBase):
                                 site_downloader=site.get("downloader"), **row)
                     for row in parsed]
 
-    def _search_site_contexts(self, tmdb_id: int) -> list:
-        """沿用 MoviePilot 的过滤与精确匹配，馒头查询额外处理限流。"""
+    @staticmethod
+    def _torrent_identity_conflict(media: MediaInfo, context: Context) -> Optional[str]:
+        """Reject a one-year fallback when the subtitle names a different Chinese movie."""
+        torrent = getattr(context, "torrent_info", None)
+        meta = getattr(context, "meta_info", None)
+        if not torrent or not meta:
+            return None
+        try:
+            media_year = int(str(media.year or "")[:4])
+            torrent_year = int(str(getattr(meta, "year", "") or "")[:4])
+        except (TypeError, ValueError):
+            return None
+        if abs(media_year - torrent_year) != 1:
+            return None
+
+        description = str(getattr(torrent, "description", "") or "").strip()
+        if not description or not any(marker in description for marker in ("导演", "主演", "又名", "/")):
+            return None
+        lead = re.split(r"[【|/\n\r]", description, maxsplit=1)[0].strip()
+        lead_cn = "".join(re.findall(r"[\u4e00-\u9fff]", lead))
+        if not 2 <= len(lead_cn) <= 20:
+            return None
+
+        known_titles = {
+            "".join(re.findall(r"[\u4e00-\u9fff]", str(value or "")))
+            for value in (
+                media.title,
+                media.original_title,
+                *(media.names or []),
+            )
+        } - {""}
+        if any(title in lead_cn or lead_cn in title for title in known_titles):
+            return None
+        return f"副标题片名“{lead}”不属于目标影片 {media.title_year}"
+
+    def _search_site_contexts(self, tmdb_id: int, keyword_index: Optional[int] = None) -> list:
+        """沿用 MoviePilot 的过滤与精确匹配；队列每轮只查一个片名以节省站点额度。"""
         indexers = {site.get("id"): site for site in SitesHelper().get_indexers()}
         unavailable = [sid for sid in self._site_ids if sid not in indexers]
         if unavailable:
@@ -2262,14 +2419,16 @@ class SmartMoviePush(_PluginBase):
                  if sid in indexers and indexers[sid].get("parser") == "mTorrent"]
         other_sites = [sid for sid in self._site_ids if sid not in {site["id"] for site in mteam}]
         contexts = []
+        chain = SearchChain()
+        media = chain.recognize_media(tmdbid=int(tmdb_id), mtype=MediaType.MOVIE)
+        if not media:
+            raise PTSearchUnavailable(f"TMDB {tmdb_id} 媒体信息识别失败")
         if mteam:
-            chain = SearchChain()
-            media = chain.recognize_media(tmdbid=int(tmdb_id), mtype=MediaType.MOVIE)
-            if not media:
-                raise PTSearchUnavailable(f"TMDB {tmdb_id} 媒体信息识别失败")
             keywords = list(dict.fromkeys(str(value).strip() for value in
                                           (media.original_title, media.en_title, media.title)
                                           if value and str(value).strip()))
+            if keyword_index is not None and keywords:
+                keywords = [keywords[keyword_index % len(keywords)]]
             for site in mteam:
                 for keyword in keywords:
                     torrents = self._request_mteam_torrents(site, keyword)
@@ -2283,14 +2442,26 @@ class SmartMoviePush(_PluginBase):
             contexts.extend(SearchChain().search_by_id(
                 tmdbid=int(tmdb_id), mtype=MediaType.MOVIE,
                 sites=other_sites, cache_local=False) or [])
-        return contexts
+        validated = []
+        for context in contexts:
+            conflict = self._torrent_identity_conflict(media, context)
+            if conflict:
+                torrent = getattr(context, "torrent_info", None)
+                logger.warning(
+                    f"SmartMoviePush 拦截疑似同名错片：{conflict}；"
+                    f"资源：{getattr(torrent, 'title', '未知资源')}"
+                )
+                continue
+            validated.append(context)
+        return validated
 
     def _scan_monthly_resources(self, year: int, month: int, candidates: list, force: bool,
                                 target_tmdb_ids: list = None) -> None:
         try:
             cached = {} if force else self._load_monthly_resource_cache(year, month)
             library = self._library_snapshot_for_scan()
-            downloaded = {str(item.get("tmdb_id")) for item in self._load_stats_history()}
+            downloaded = {str(item.get("tmdb_id")) for item in self._load_stats_history()
+                          if item.get("status") != "identity_conflict"}
             queued = {str(item.get("tmdb_id")) for item in self._load_download_queue()}
             remaining = {str(item["tmdb_id"]): item for item in candidates}
             ordered_ids = list(remaining)
@@ -2392,7 +2563,8 @@ class SmartMoviePush(_PluginBase):
 
     def _run_monthly_batch_download(self, year: int, month: int, validated: list) -> None:
         try:
-            plugin_ids = {str(item.get("tmdb_id")) for item in self._load_stats_history()}
+            plugin_ids = {str(item.get("tmdb_id")) for item in self._load_stats_history()
+                          if item.get("status") != "identity_conflict"}
             library = self._library_snapshot_for_scan(force=True)
             if not library:
                 self._monthly_batch_job["errors"] = len(validated)
@@ -2413,6 +2585,7 @@ class SmartMoviePush(_PluginBase):
                 queue = self._load_download_queue()
                 new_entries = []
                 queued_ids = {str(entry.get("tmdb_id")) for entry in queue}
+                no_resource_ids = {str(entry.get("tmdb_id")) for entry in self._load_no_resource()}
                 duplicates = 0
                 for item, _ in validated:
                     movie_id = str(item["tmdb_id"])
@@ -2421,7 +2594,7 @@ class SmartMoviePush(_PluginBase):
                             self._monthly_batch_job["skipped"] += 1
                         elif movie_id in plugin_ids or movie_id in library["tmdb_ids"] or movie_id in active_ids:
                             self._monthly_batch_job["skipped"] += 1
-                        elif movie_id in queued_ids:
+                        elif movie_id in queued_ids or movie_id in no_resource_ids:
                             # 随机队列已经负责下载，不复制到年度队列。
                             duplicates += 1
                             self._monthly_batch_job["skipped"] += 1
@@ -2845,6 +3018,10 @@ class SmartMoviePush(_PluginBase):
 
     def _load_download_queue(self) -> List[dict]:
         value = self.get_data(self._download_queue_key)
+        return value if isinstance(value, list) else []
+
+    def _load_no_resource(self) -> List[dict]:
+        value = self.get_data(self._no_resource_key)
         return value if isinstance(value, list) else []
 
     def _remove_queued_movie(self, tmdb_id: Any, reason: str = "已提交下载") -> int:
@@ -3374,6 +3551,7 @@ class SmartMoviePush(_PluginBase):
         timezone = pytz.timezone(settings.TZ)
         cutoff = datetime.now(tz=timezone) - timedelta(days=3)
         candidates = [item for item in history if item.get("download_id") and not item.get("organized_at")
+                      and item.get("status") != "identity_conflict"
                       and (all_pending or (self._parse_history_time(
                           item.get("download_completed_at") or item.get("submitted_at"), timezone
                       ) or cutoff) >= cutoff)]
@@ -3406,6 +3584,30 @@ class SmartMoviePush(_PluginBase):
             timestamp = self._parse_history_time(getattr(row, "date", None), timezone)
             if outcome == "success":
                 if not timestamp:
+                    continue
+                expected_tmdb_id = str(item.get("tmdb_id") or "").strip()
+                actual_tmdb_id = str(getattr(row, "tmdbid", None) or "").strip()
+                if expected_tmdb_id and actual_tmdb_id and expected_tmdb_id != actual_tmdb_id:
+                    actual_title = str(getattr(row, "title", "") or f"TMDB {actual_tmdb_id}").strip()
+                    actual_year = str(getattr(row, "year", "") or "").strip()
+                    if actual_year and actual_year not in actual_title:
+                        actual_title = f"{actual_title} ({actual_year})"
+                    item["status"] = "identity_conflict"
+                    item["identity_conflict_at"] = datetime.now(tz=timezone).isoformat(timespec="seconds")
+                    item["expected_tmdb_id"] = expected_tmdb_id
+                    item["actual_tmdb_id"] = actual_tmdb_id
+                    item["actual_title"] = actual_title
+                    item["quarantine_path"] = ""
+                    changed += 1
+                    changed_items.append(item)
+                    detail = (
+                        f"目标：{item.get('title') or f'TMDB {expected_tmdb_id}'}\n"
+                        f"实际整理：{actual_title}\n"
+                        f"TMDB：{expected_tmdb_id} -> {actual_tmdb_id}\n"
+                        "处理：轮询发现错片，已停止入库；请检查本地整理目录"
+                    )
+                    self._append_plugin_log("识别冲突", detail, level="error")
+                    self._send_telegram_direct(title="MoviePilot 识别冲突，已停止入库", text=detail)
                     continue
                 title = str(getattr(row, "title", "") or "").strip()
                 year = str(getattr(row, "year", "") or "").strip()
@@ -3489,7 +3691,7 @@ class SmartMoviePush(_PluginBase):
             active_movie_ids = self._mp_active_movie_ids(active_torrents)
             history = self._load_stats_history()
             submitted_movie_ids = {str(row.get("tmdb_id")) for row in history
-                                   if row.get("tmdb_id")}
+                                   if row.get("tmdb_id") and row.get("status") != "identity_conflict"}
             annual_active, non_annual_active = self._active_download_counts(active_torrents, history)
             annual_slots = max(0, self._annual_max_active_downloads - annual_active)
             non_annual_slots = (max(0, self._max_active_downloads - non_annual_active)
@@ -3518,18 +3720,36 @@ class SmartMoviePush(_PluginBase):
             annual_submitted = 0
             non_annual_submitted = 0
             annual_attempts = 0
-            non_annual_blocked = False
+            # 两类候选交替检查，避免大量年度候选先耗光站点额度，随机空位一直得不到搜索机会。
+            annual_candidates = [item for item in queue if item.get("source") == "annual"]
+            random_candidates = [item for item in queue if item.get("source") != "annual"]
+            ordered = []
+            for index in range(max(len(annual_candidates), len(random_candidates))):
+                if index < len(random_candidates):
+                    ordered.append(random_candidates[index])
+                if index < len(annual_candidates):
+                    ordered.append(annual_candidates[index])
             # 只处理本次进入函数时已有的项目，失败项留到下一分钟，防止同轮反复重试。
-            for item in queue[:]:
+            for item in ordered:
                 is_annual = item.get("source") == "annual"
                 if is_annual and annual_submitted >= annual_slots:
                     continue
-                if not is_annual and (non_annual_blocked or non_annual_submitted >= non_annual_slots):
+                if not is_annual and non_annual_submitted >= non_annual_slots:
                     continue
                 if is_annual and (not self._annual_dispatch_enabled or annual_submitted >= self._annual_dispatch_count
                                   or annual_attempts >= self._annual_dispatch_count * 2):
                     continue
-                if is_annual and item.get("last_attempt"):
+                if item.get("last_resource_check"):
+                    try:
+                        checked = datetime.fromisoformat(str(item["last_resource_check"]))
+                        if datetime.now(tz=checked.tzinfo) - checked < timedelta(minutes=self._push_interval_minutes):
+                            continue
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                # 限额和站点故障不算影片无资源，也不进入影片级指数退避。
+                transient_error = str(item.get("last_error") or "")
+                rate_limited = "安全额度" in transient_error or "限流" in transient_error
+                if item.get("last_attempt") and not rate_limited and transient_error != "所选站点中没有符合规则的资源":
                     try:
                         last_attempt = datetime.fromisoformat(str(item["last_attempt"]))
                         retry_minutes = min(15 * 2 ** min(max(int(item.get("attempts") or 1) - 1, 0), 4), 240)
@@ -3544,19 +3764,36 @@ class SmartMoviePush(_PluginBase):
                 try:
                     if is_annual:
                         self._append_plugin_log("年度下载", f"正在查询 {item.get('title')} 的 PT 资源（本次补位 {annual_attempts}/{self._annual_dispatch_count * 2}）")
-                    results = self._search_site_contexts(int(item["tmdb_id"]))
+                    results = self._search_site_contexts(
+                        int(item["tmdb_id"]), keyword_index=int(item.get("resource_misses") or 0))
                     context = next(
                         (ctx for ctx in results if self._torrent_identity(ctx) == item.get("torrent_identity")),
                         results[0] if results else None,
                     )
                     if not context:
-                        if item.get("source") == "annual":
-                            remaining = [row for row in self._load_download_queue()
-                                         if row.get("key") != item.get("key")]
-                            self.save_data(self._download_queue_key, remaining)
-                            self._append_plugin_log("年度下载", f"{item.get('title')}：PT 站没有符合 MoviePilot 规则的资源，已从候选队列移除")
+                        remaining = self._load_download_queue()
+                        current = next((row for row in remaining if row.get("key") == item.get("key")), None)
+                        if not current:
                             continue
-                        raise RuntimeError("所选站点中已找不到可下载资源")
+                        current["resource_misses"] = int(current.get("resource_misses") or 0) + 1
+                        current["last_resource_check"] = datetime.now().isoformat(timespec="seconds")
+                        current["last_error"] = "所选站点中没有符合规则的资源"
+                        current["attempts"] = 0
+                        current.pop("last_attempt", None)
+                        if current["resource_misses"] >= 3:
+                            no_resource = self._load_no_resource()
+                            if not any(str(row.get("tmdb_id")) == str(current.get("tmdb_id")) for row in no_resource):
+                                no_resource.append(dict(current))
+                                self.save_data(self._no_resource_key, no_resource[-2000:])
+                            remaining = [row for row in remaining if row.get("key") != current.get("key")]
+                            self._append_plugin_log("年度下载" if is_annual else "资源查询",
+                                                    f"{current.get('title')} 连续 3 次没有匹配资源，已移到无资源列表")
+                        else:
+                            self._append_plugin_log("年度下载" if is_annual else "资源查询",
+                                                    f"{current.get('title')} 未找到资源（{current['resource_misses']}/3），"
+                                                    f"约 {self._push_interval_minutes} 分钟后重试；继续下一部")
+                        self.save_data(self._download_queue_key, remaining)
+                        continue
                     media = context.media_info
                     if (is_annual and not self._annual_dispatch_enabled) or (not is_annual and not self._random_download_enabled):
                         continue
@@ -3576,6 +3813,11 @@ class SmartMoviePush(_PluginBase):
                     else:
                         non_annual_submitted += 1
                     logger.info(f"顺序下载队列已提交：{item.get('title')}")
+                except PTSearchUnavailable as err:
+                    # 站点级故障影响整轮搜索；只记一次，等下一轮再尝试，不能刷满所有候选的重试次数。
+                    logger.warning(f"下载队列本轮暂停搜索：{err}")
+                    self._append_plugin_log("年度下载" if is_annual else "资源查询", f"站点暂不可用，本轮补位暂停：{err}", "warning")
+                    break
                 except Exception as err:
                     # 提交时如发现 MP 刚开始下载，同片等候项已被清除，不得用旧快照写回来。
                     remaining = self._load_download_queue()
@@ -3592,9 +3834,7 @@ class SmartMoviePush(_PluginBase):
                     logger.error(f"顺序下载队列提交失败：{item.get('title')}：{err}")
                     if is_annual:
                         self._append_plugin_log("年度下载", f"{item.get('title')} 提交失败：{err}", "error")
-                    # 同一来源内保持原有语义，但一边失败不能阻止另一边补位。
-                    if not is_annual:
-                        non_annual_blocked = True
+                    # 影片级失败不阻挡队列后面的候选。
             self.save_data(self._download_queue_key, remaining)
             if submitted:
                 logger.info(f"下载队列本轮提交 {submitted} 部，剩余 {len(remaining)} 部")
@@ -3914,7 +4154,46 @@ class SmartMoviePush(_PluginBase):
         # TransferComplete 是全局事件；哈希不属于插件时绝不能统计或清理消息。
         if not history_item:
             return
-        tmdb_id = history_item.get("tmdb_id") or (getattr(media, "tmdb_id", None) if media else None)
+        expected_tmdb_id = str(history_item.get("tmdb_id") or "").strip()
+        actual_tmdb_id = str(getattr(media, "tmdb_id", None) or "").strip() if media else ""
+        tmdb_id = expected_tmdb_id or actual_tmdb_id
+        if expected_tmdb_id and actual_tmdb_id and expected_tmdb_id != actual_tmdb_id:
+            transferinfo = data.get("transferinfo")
+            target_diritem = getattr(transferinfo, "target_diritem", None) if transferinfo else None
+            target_path = Path(str(getattr(target_diritem, "path", "") or ""))
+            quarantine_path = ""
+            try:
+                allowed_root = Path("/home/mp_guaxiao").resolve()
+                resolved_target = target_path.resolve()
+                if target_path.is_dir() and resolved_target.is_relative_to(allowed_root):
+                    quarantine_root = Path("/home/mp_quarantine/识别冲突")
+                    quarantine_root.mkdir(parents=True, exist_ok=True)
+                    suffix = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    destination = quarantine_root / f"{suffix}_{target_path.name}"
+                    shutil.move(str(target_path), str(destination))
+                    quarantine_path = str(destination)
+            except (OSError, ValueError) as err:
+                logger.error(f"错片隔离失败：{target_path}：{err}")
+
+            actual_title = getattr(media, "title_year", None) if media else f"TMDB {actual_tmdb_id}"
+            history_item["status"] = "identity_conflict"
+            history_item["identity_conflict_at"] = datetime.now(
+                tz=pytz.timezone(settings.TZ)
+            ).isoformat(timespec="seconds")
+            history_item["expected_tmdb_id"] = expected_tmdb_id
+            history_item["actual_tmdb_id"] = actual_tmdb_id
+            history_item["actual_title"] = str(actual_title or "")
+            history_item["quarantine_path"] = quarantine_path
+            self._save_download_history(history)
+            detail = (
+                f"目标：{history_item.get('title') or f'TMDB {expected_tmdb_id}'}\n"
+                f"实际整理：{actual_title}\n"
+                f"TMDB：{expected_tmdb_id} -> {actual_tmdb_id}\n"
+                f"处理：{'已移到 ' + quarantine_path if quarantine_path else '未能自动隔离，请立即检查'}"
+            )
+            self._append_plugin_log("识别冲突", detail, level="error")
+            self._send_telegram_direct(title="MoviePilot 识别冲突，已停止入库", text=detail)
+            return
         title = getattr(media, "title_year", None) if media else None
         if title:
             history_item["title"] = str(title)
@@ -4705,9 +4984,13 @@ class SmartMoviePush(_PluginBase):
             self._set_run_status(run_id, source, "读取 TMDB 候选", "正在读取月份名单" if month_task else "正在获取热门、近期、经典与随机电影", target=target, selected=0, searched=0, sent=0)
             pushed = self._load_recent_pushes()
             pushed_ids = set(pushed)
+            no_resource_ids = {str(item.get("tmdb_id")) for item in self._load_no_resource()}
             if month_task:
                 # 月份任务可以反复续跑，历史提交与等待队列必须永久排除，不能只依赖 30 天推送去重。
-                pushed_ids.update(str(item.get("tmdb_id")) for item in self._load_stats_history() if item.get("tmdb_id"))
+                pushed_ids.update(
+                    str(item.get("tmdb_id")) for item in self._load_stats_history()
+                    if item.get("tmdb_id") and item.get("status") != "identity_conflict"
+                )
                 pushed_ids.update(str(item.get("tmdb_id")) for item in self._load_download_queue() if item.get("tmdb_id"))
             suppressed_ids = set(self._load_suppressed())
             scan_history = self._load_scan_cache(include_expired=True)
@@ -4743,10 +5026,14 @@ class SmartMoviePush(_PluginBase):
                 "pushed": 0, "suppressed": 0, "cached": 0, "library": 0,
                 "searched": 0, "no_resource": 0, "errors": 0,
             }
+            site_unavailable = False
 
             def try_bucket(items: List[MediaInfo], wanted: int) -> int:
+                nonlocal site_unavailable
                 bucket_sent = 0
                 for media in items:
+                    if site_unavailable:
+                        break
                     if month_task_id and not (self._monthly_task(month_task_id) or {}).get("active"):
                         break
                     if self._disk_guard_blocks_new():
@@ -4765,6 +5052,9 @@ class SmartMoviePush(_PluginBase):
                         continue
                     if tmdb_id in suppressed_ids:
                         stats["suppressed"] += 1
+                        continue
+                    if tmdb_id in no_resource_ids:
+                        stats["cached"] += 1
                         continue
                     if tmdb_id in attempted:
                         continue
@@ -4796,10 +5086,26 @@ class SmartMoviePush(_PluginBase):
                             trace("资源查询", f"{media.title_year}：无资源或未通过 MoviePilot 过滤规则")
                             released = self._release_date(media)
                             age_days = max(0, (datetime.now().date() - released).days) if released else 3650
+                            previous = scan_history.get(tmdb_id) or {}
+                            misses = int(previous.get("resource_misses") or 0) + 1
                             scan_cache[tmdb_id] = {
                                 "status": "no_resource", "scope": search_scope,
-                                "age_days": age_days,
+                                "age_days": age_days, "resource_misses": misses,
                                 "checked_at": datetime.now().isoformat(timespec="seconds")}
+                            if misses >= 3:
+                                with self._queue_lock:
+                                    no_resource = self._load_no_resource()
+                                    if not any(str(row.get("tmdb_id")) == tmdb_id for row in no_resource):
+                                        no_resource.append({
+                                            "key": hashlib.sha1(f"no-resource|{tmdb_id}".encode()).hexdigest()[:12],
+                                            "tmdb_id": media.tmdb_id, "title": media.title_year,
+                                            "source": "annual" if month_task else "random",
+                                            "resource_misses": misses,
+                                            "last_resource_check": datetime.now().isoformat(timespec="seconds"),
+                                            "last_error": "所选站点中没有符合规则的资源",
+                                        })
+                                        self.save_data(self._no_resource_key, no_resource[-2000:])
+                                no_resource_ids.add(tmdb_id)
                             continue
                         selected.append((media, best))
                         scan_history.pop(tmdb_id, None)
@@ -4807,6 +5113,11 @@ class SmartMoviePush(_PluginBase):
                         trace("筛选成功", f"{media.title_year}：{torrent.title or '未知资源'}；站点 {torrent.site}；大小 {StringUtils.format_size(torrent.size) if torrent.size else '未知'}")
                         self._set_run_status(run_id, source, "搜索站点", f"已选中 {media.title_year}", target=target, selected=len(selected), searched=stats["searched"], sent=0)
                         bucket_sent += 1
+                    except PTSearchUnavailable as err:
+                        site_unavailable = True
+                        stats["errors"] += 1
+                        trace("筛选异常", f"站点暂不可用，本轮停止继续搜索：{err}", "warning")
+                        break
                     except Exception as err:
                         stats["errors"] += 1
                         trace("筛选异常", f"{media.title_year}：{err}", "error")
@@ -4817,10 +5128,12 @@ class SmartMoviePush(_PluginBase):
                 return bucket_sent
 
             for bucket_name, wanted in plans:
+                if site_unavailable:
+                    break
                 try_bucket(buckets[bucket_name], wanted)
 
             # 某一组资源不足时，按新片→近期→经典→随机的顺序继续补齐到总数。
-            if len(selected) < target and not month_task:
+            if len(selected) < target and not month_task and not site_unavailable:
                 fallback = []
                 for bucket_name in ("new", "recent", "classic", "random"):
                     fallback.extend(buckets[bucket_name])
