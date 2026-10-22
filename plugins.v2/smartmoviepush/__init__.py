@@ -55,7 +55,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.68"
+    plugin_version = "0.9.70"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -2317,12 +2317,12 @@ class SmartMoviePush(_PluginBase):
             if now < cls._pt_cooldown_until:
                 wait_minutes = math.ceil((cls._pt_cooldown_until - now) / 60)
                 raise PTSearchUnavailable(f"馒头接口仍在限流，请约 {wait_minutes} 分钟后重试")
-            # 站点建议近 24 小时最多 1000 次；插件最多使用其中 400 次，
-            # 其余留给 MoviePilot 和用户的手动搜索。跨重启保存，避免重启重置额度。
+            # 站点建议近 24 小时最多 1000 次；插件最多使用其中 600 次，
+            # 至少保留 400 次给 MoviePilot 和用户的手动搜索。跨重启保存额度。
             wall_now = time.time()
             attempts = [stamp for stamp in (self.get_data(self._pt_request_log_key) or [])
                         if isinstance(stamp, (int, float)) and wall_now - 86400 < stamp <= wall_now]
-            if len(attempts) >= 400:
+            if len(attempts) >= 600:
                 wait_minutes = math.ceil((attempts[0] + 86400 - wall_now) / 60)
                 raise PTSearchUnavailable(f"馒头搜索已达到插件近 24 小时安全额度，请约 {wait_minutes} 分钟后重试")
             delay = cls._pt_next_request_at - now
@@ -2425,7 +2425,7 @@ class SmartMoviePush(_PluginBase):
             raise PTSearchUnavailable(f"TMDB {tmdb_id} 媒体信息识别失败")
         if mteam:
             keywords = list(dict.fromkeys(str(value).strip() for value in
-                                          (media.original_title, media.en_title, media.title)
+                                          (media.title, media.en_title, media.original_title)
                                           if value and str(value).strip()))
             if keyword_index is not None and keywords:
                 keywords = [keywords[keyword_index % len(keywords)]]
@@ -3721,7 +3721,12 @@ class SmartMoviePush(_PluginBase):
             non_annual_submitted = 0
             annual_attempts = 0
             # 两类候选交替检查，避免大量年度候选先耗光站点额度，随机空位一直得不到搜索机会。
-            annual_candidates = [item for item in queue if item.get("source") == "annual"]
+            # 有空位时先覆盖从未搜过的年度候选，避免前排已搜空影片反复耗尽每日额度。
+            # Python 的稳定排序保留同一重试轮次内的原有入队顺序。
+            annual_candidates = sorted(
+                (item for item in queue if item.get("source") == "annual"),
+                key=lambda row: int(row.get("resource_misses") or 0),
+            )
             random_candidates = [item for item in queue if item.get("source") != "annual"]
             ordered = []
             for index in range(max(len(annual_candidates), len(random_candidates))):
@@ -3765,7 +3770,7 @@ class SmartMoviePush(_PluginBase):
                     if is_annual:
                         self._append_plugin_log("年度下载", f"正在查询 {item.get('title')} 的 PT 资源（本次补位 {annual_attempts}/{self._annual_dispatch_count * 2}）")
                     results = self._search_site_contexts(
-                        int(item["tmdb_id"]), keyword_index=int(item.get("resource_misses") or 0))
+                        int(item["tmdb_id"]), keyword_index=int(item.get("resource_keyword_index") or 0))
                     context = next(
                         (ctx for ctx in results if self._torrent_identity(ctx) == item.get("torrent_identity")),
                         results[0] if results else None,
@@ -3776,6 +3781,7 @@ class SmartMoviePush(_PluginBase):
                         if not current:
                             continue
                         current["resource_misses"] = int(current.get("resource_misses") or 0) + 1
+                        current["resource_keyword_index"] = int(current.get("resource_keyword_index") or 0) + 1
                         current["last_resource_check"] = datetime.now().isoformat(timespec="seconds")
                         current["last_error"] = "所选站点中没有符合规则的资源"
                         current["attempts"] = 0
@@ -5405,5 +5411,6 @@ class SmartMoviePush(_PluginBase):
         if not ok:
             self._reply_telegram_action("下载提交失败", error or "未知错误", chat_id)
             return
+
 
 

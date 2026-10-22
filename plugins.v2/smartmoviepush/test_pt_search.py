@@ -7,6 +7,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Optional
 
 
 SOURCE = Path(__file__).with_name("__init__.py")
@@ -14,6 +15,8 @@ tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
 plugin = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "SmartMoviePush")
 method = next(node for node in plugin.body if isinstance(node, ast.FunctionDef)
               and node.name == "_request_mteam_torrents")
+search_method = next(node for node in plugin.body if isinstance(node, ast.FunctionDef)
+                     and node.name == "_search_site_contexts")
 
 
 class MTorrentSpider:
@@ -48,7 +51,7 @@ namespace = {
     "MediaType": SimpleNamespace(MOVIE="movie"),
     "TorrentInfo": lambda **values: SimpleNamespace(**values),
     "RequestUtils": lambda **_kwargs: SimpleNamespace(post_res=lambda **_kwargs: namespace["response"]),
-    "time": time, "math": math,
+    "time": time, "math": math, "Optional": Optional,
 }
 exec(compile(ast.fix_missing_locations(ast.Module(body=[
     next(node for node in tree.body if isinstance(node, ast.ClassDef)
@@ -57,6 +60,9 @@ exec(compile(ast.fix_missing_locations(ast.Module(body=[
 ], type_ignores=[])), str(SOURCE), "exec"), namespace)
 SearchUnderTest = namespace["SearchUnderTest"]
 PTSearchUnavailable = namespace["PTSearchUnavailable"]
+exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ClassDef(
+    name="SearchKeywordsUnderTest", bases=[], keywords=[], body=[search_method], decorator_list=[]
+)], type_ignores=[])), str(SOURCE), "exec"), namespace)
 
 
 class PTSearchTest(unittest.TestCase):
@@ -85,7 +91,7 @@ class PTSearchTest(unittest.TestCase):
         self.assertEqual(torrents[0].site, 1)
 
     def test_daily_budget_stops_search_before_site_request(self):
-        self.data[self.subject._pt_request_log_key] = [time.time() - 10] * 400
+        self.data[self.subject._pt_request_log_key] = [time.time() - 10] * 600
         namespace["response"] = FakeResponse({"code": 0, "data": {"data": []}})
         with self.assertRaisesRegex(PTSearchUnavailable, "安全额度"):
             self.subject._request_mteam_torrents(self.site, "They Will Kill You")
@@ -95,6 +101,20 @@ class PTSearchTest(unittest.TestCase):
         self.subject._request_mteam_torrents(self.site, "They Will Kill You")
         self.assertEqual(len(self.data[self.subject._pt_request_log_key]), 1)
 
+    def test_queue_tries_chinese_title_before_english_and_original(self):
+        namespace["SitesHelper"] = lambda: SimpleNamespace(get_indexers=lambda: [
+            {"id": 1, "parser": "mTorrent"}])
+        namespace["SearchChain"] = lambda: SimpleNamespace(recognize_media=lambda **_kwargs: SimpleNamespace(
+            title="默杀", en_title="A Place Called Silence", original_title="Un lugar llamado silencio"))
+        subject = namespace["SearchKeywordsUnderTest"]()
+        subject._site_ids = [1]
+        searched = []
+        subject._request_mteam_torrents = lambda _site, keyword: searched.append(keyword) or []
+        for index in range(3):
+            self.assertEqual(subject._search_site_contexts(1300945, keyword_index=index), [])
+        self.assertEqual(searched, ["默杀", "A Place Called Silence", "Un lugar llamado silencio"])
+
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -719,6 +719,25 @@ class MonthlyTasksTest(unittest.TestCase):
         self.assertEqual([item["key"] for item in self.store["download_queue"]], ["one"])
         self.assertEqual(self.store["download_queue"][0]["resource_misses"], 1)
 
+    def test_annual_refill_searches_untouched_before_previous_misses(self):
+        self.subject._annual_dispatch_enabled = True
+        self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
+        searched = []
+        self.subject._search_site_contexts = lambda movie_id, **kwargs: searched.append(
+            (movie_id, kwargs.get("keyword_index"))) or []
+        original = namespace.get("DownloadChain")
+        namespace["DownloadChain"] = lambda: SimpleNamespace(downloading=lambda: [])
+        self.addCleanup(lambda: namespace.__setitem__("DownloadChain", original))
+        self.store["download_queue"] = [
+            {"key": "retry", "tmdb_id": 1, "title": "已搜空", "source": "annual",
+             "resource_misses": 2,
+             "last_resource_check": (datetime.now() - timedelta(minutes=61)).isoformat(timespec="seconds")},
+            {"key": "fresh", "tmdb_id": 2, "title": "新候选", "source": "annual"},
+        ]
+        self.subject.process_download_queue()
+        self.assertEqual(searched, [(2, 0), (1, 0)])
+        self.assertEqual(self.store["download_queue"][0]["resource_keyword_index"], 1)
+
     def test_three_empty_searches_move_random_and_annual_to_no_resource(self):
         self.subject._annual_dispatch_enabled = True
         self.subject._library_snapshot_for_scan = lambda force=False: {"tmdb_ids": set()}
@@ -1107,3 +1126,4 @@ class MonthlyTasksTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
