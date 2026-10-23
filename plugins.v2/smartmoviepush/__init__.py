@@ -55,7 +55,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.73"
+    plugin_version = "0.9.74"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -3196,17 +3196,15 @@ class SmartMoviePush(_PluginBase):
 
     def _display_run_status(self, value: Any) -> dict:
         status = dict(value) if isinstance(value, dict) else {}
-        if status.get("stage") not in {"已完成", "已终止", "运行失败"}:
-            return status
-        finished_at = self._format_result_time(status.get("updated_at"))
-        if not finished_at:
+        shown_at = self._format_result_time(status.get("updated_at"))
+        if not shown_at:
             return status
         detail = str(status.get("detail") or "")
         if status.get("target"):
             detail += (f"（目标 {status['target']}，已查询 {status.get('searched') or 0}，"
                        f"选中 {status.get('selected') or 0}，已推送 {status.get('sent') or 0}）")
             status.pop("target", None)
-        status["detail"] = f"{detail} · {finished_at}"
+        status["detail"] = f"{detail} · {shown_at}"
         # 旧版前端也会单独追加 updated_at；展示数据中移除它，避免时间重复。
         status.pop("updated_at", None)
         status["time_in_detail"] = True

@@ -33,10 +33,14 @@ class RunStatusDisplayTest(unittest.TestCase):
         self.assertTrue(shown["time_in_detail"])
         self.assertEqual(raw["target"], 10)
 
-    def test_running_result_keeps_progress_counts(self):
+    def test_running_result_also_shows_last_update_time(self):
         raw = {"stage": "搜索站点", "detail": "正在查询", "target": 10,
                "updated_at": "2026-01-23T13:20:59+08:00"}
-        self.assertEqual(StatusUnderTest()._display_run_status(raw), raw)
+        shown = StatusUnderTest()._display_run_status(raw)
+        self.assertEqual(shown["detail"], "正在查询（目标 10，已查询 0，选中 0，已推送 0） · 2026.1.23 13:20")
+        self.assertTrue(shown["time_in_detail"])
+        self.assertNotIn("updated_at", shown)
+        self.assertNotIn("target", shown)
 
 
 if __name__ == "__main__":
