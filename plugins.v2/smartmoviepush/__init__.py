@@ -55,7 +55,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.71"
+    plugin_version = "0.9.72"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1328,7 +1328,7 @@ class SmartMoviePush(_PluginBase):
             "resource_recheck": self.get_data(self._resource_recheck_key) or {},
             "history": list(reversed(history)),
             "logs": list(reversed(self._load_plugin_logs())),
-            "run_status": self.get_data(self._run_status_key) or {},
+            "run_status": self._display_run_status(self.get_data(self._run_status_key) or {}),
             "suppressed": [
                 {"tmdb_id": tmdb_id, **item}
                 for tmdb_id, item in sorted(
@@ -3174,6 +3174,31 @@ class SmartMoviePush(_PluginBase):
         }
         status.update(counts)
         self.save_data(self._run_status_key, status)
+
+    @staticmethod
+    def _format_result_time(value: str) -> str:
+        try:
+            when = datetime.fromisoformat(str(value))
+            when = when.astimezone(pytz.timezone(settings.TZ))
+            return f"{when.year}.{when.month}.{when.day} {when.hour:02d}:{when.minute:02d}"
+        except (TypeError, ValueError):
+            return ""
+
+    def _display_run_status(self, value: Any) -> dict:
+        status = dict(value) if isinstance(value, dict) else {}
+        if status.get("stage") not in {"已完成", "已终止", "运行失败"}:
+            return status
+        finished_at = self._format_result_time(status.get("updated_at"))
+        if not finished_at:
+            return status
+        detail = str(status.get("detail") or "")
+        if status.get("target"):
+            detail += (f"（目标 {status['target']}，已查询 {status.get('searched') or 0}，"
+                       f"选中 {status.get('selected') or 0}，已推送 {status.get('sent') or 0}）")
+            status.pop("target", None)
+        status["detail"] = f"{detail} · {finished_at}"
+        status["time_in_detail"] = True
+        return status
 
     @staticmethod
     def _download_history_identity(item: dict) -> str:
@@ -5418,6 +5443,5 @@ class SmartMoviePush(_PluginBase):
         if not ok:
             self._reply_telegram_action("下载提交失败", error or "未知错误", chat_id)
             return
-
 
 

@@ -172,11 +172,12 @@ const message = ref('');
 function formatRunTime(value) {
   if (!value) return ''
   const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value).replace('T', ' ').slice(0, 19)
-  return new Intl.DateTimeFormat('zh-CN', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
-  }).format(date).replace(/\//g, '-')
+  if (Number.isNaN(date.getTime())) return ''
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date).map(part => [part.type, part.value]));
+  return `${parts.year}.${parts.month}.${parts.day} ${parts.hour}:${parts.minute}`
 }
 const accessReady = ref(false);
 const accessPassword = ref('');
@@ -1579,8 +1580,8 @@ return (_ctx, _cache) => {
                               (state.value.run_status.target)
                                 ? (_openBlock(), _createElementBlock("span", _hoisted_41, "（目标 " + _toDisplayString(state.value.run_status.target) + "，已查询 " + _toDisplayString(state.value.run_status.searched || 0) + "，选中 " + _toDisplayString(state.value.run_status.selected || 0) + "，已推送 " + _toDisplayString(state.value.run_status.sent || 0) + "）", 1))
                                 : _createCommentVNode("", true),
-                              (state.value.run_status.updated_at)
-                                ? (_openBlock(), _createElementBlock("span", _hoisted_42, " · " + _toDisplayString(state.value.run_status.stage === '已完成' ? '完成于' : '更新于') + " " + _toDisplayString(formatRunTime(state.value.run_status.updated_at)) + "（北京时间）", 1))
+                              (state.value.run_status.updated_at && !state.value.run_status.time_in_detail)
+                                ? (_openBlock(), _createElementBlock("span", _hoisted_42, " · " + _toDisplayString(formatRunTime(state.value.run_status.updated_at)), 1))
                                 : _createCommentVNode("", true)
                             ]),
                             _: 1
@@ -1793,7 +1794,21 @@ return (_ctx, _cache) => {
                               _: 1
                             })
                           ]),
-                          _createElementVNode("div", _hoisted_55, _toDisplayString(summary.value.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停') + "；每分钟检查空位，单次最多新增 " + _toDisplayString(summary.value.annual_dispatch_count || 5) + " 部。年度占用 " + _toDisplayString(summary.value.annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.annual_max_active_downloads || 5) + "，随机/其他占用 " + _toDisplayString(summary.value.non_annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.max_active_downloads || 10) + "；两边名额互不挤占，硬盘保护与同片去重仍生效。最近检查：" + _toDisplayString(summary.value.annual_last_check_at ? `${formatRunTime(summary.value.annual_last_check_at)}（北京时间）` : '尚未检查') + "。", 1)
+                          _createElementVNode("div", _hoisted_55, _toDisplayString(summary.value.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停') + "；每分钟检查空位，单次最多新增 " + _toDisplayString(summary.value.annual_dispatch_count || 5) + " 部。年度占用 " + _toDisplayString(summary.value.annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.annual_max_active_downloads || 5) + "，随机/其他占用 " + _toDisplayString(summary.value.non_annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.max_active_downloads || 10) + "；两边名额互不挤占，硬盘保护与同片去重仍生效。", 1),
+                          (summary.value.annual_last_check_at)
+                            ? (_openBlock(), _createBlock(_component_VAlert, {
+                                key: 0,
+                                class: "mt-3",
+                                type: "info",
+                                variant: "tonal",
+                                density: "compact"
+                              }, {
+                                default: _withCtx(() => [
+                                  _createTextVNode("年度补位 · 本轮检查完成 · " + _toDisplayString(formatRunTime(summary.value.annual_last_check_at)), 1)
+                                ]),
+                                _: 1
+                              }))
+                            : _createCommentVNode("", true)
                         ]),
                         _createElementVNode("div", _hoisted_56, [
                           _createVNode(_component_VCombobox, {
@@ -2911,7 +2926,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-1131c146"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-04bf6821"]]);
 
 export { Page as default };
-
