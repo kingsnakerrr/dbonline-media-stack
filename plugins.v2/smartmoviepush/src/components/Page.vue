@@ -8,6 +8,15 @@ const props = defineProps({
 const loading = ref(false)
 const error = ref('')
 const message = ref('')
+function formatRunTime(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value).replace('T', ' ').slice(0, 19)
+  return new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+  }).format(date).replace(/\//g, '-')
+}
 const accessReady = ref(false)
 const accessPassword = ref('')
 const accessToken = ref('')
@@ -851,6 +860,7 @@ onUnmounted(() => {
       <VAlert v-if="state.run_status?.run_id" class="mt-3" type="info" variant="tonal" density="compact">
         {{ state.run_status.source }} · {{ state.run_status.stage }}：{{ state.run_status.detail }}
         <span v-if="state.run_status.target">（目标 {{ state.run_status.target }}，已查询 {{ state.run_status.searched || 0 }}，选中 {{ state.run_status.selected || 0 }}，已推送 {{ state.run_status.sent || 0 }}）</span>
+        <span v-if="state.run_status.updated_at"> · {{ state.run_status.stage === '已完成' ? '完成于' : '更新于' }} {{ formatRunTime(state.run_status.updated_at) }}（北京时间）</span>
       </VAlert>
     </VCard>
     </div>
@@ -877,7 +887,7 @@ onUnmounted(() => {
           </template>
           <VBtn color="info" variant="tonal" @click="openLogs('annual')">查看年度日志</VBtn>
         </div>
-        <div class="text-caption text-medium-emphasis mt-2">{{ summary.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停' }}；每分钟检查空位，单次最多新增 {{ summary.annual_dispatch_count || 5 }} 部。年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}，随机/其他占用 {{ summary.non_annual_occupied_download_slots || 0 }}/{{ summary.max_active_downloads || 10 }}；两边名额互不挤占，硬盘保护与同片去重仍生效。</div>
+        <div class="text-caption text-medium-emphasis mt-2">{{ summary.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停' }}；每分钟检查空位，单次最多新增 {{ summary.annual_dispatch_count || 5 }} 部。年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}，随机/其他占用 {{ summary.non_annual_occupied_download_slots || 0 }}/{{ summary.max_active_downloads || 10 }}；两边名额互不挤占，硬盘保护与同片去重仍生效。最近检查：{{ summary.annual_last_check_at ? `${formatRunTime(summary.annual_last_check_at)}（北京时间）` : '尚未检查' }}。</div>
       </div>
       <div class="d-flex flex-wrap align-center ga-3 mt-4 mb-3">
         <VCombobox v-model="archiveYear" :items="archiveYearOptions" label="选择或输入年份" type="number" density="compact" hide-details class="monthly-year-select">
@@ -1166,3 +1176,4 @@ onUnmounted(() => {
 .monthly-row-status { width: max-content; max-width: 200px; justify-self: start; white-space: nowrap; }
 @media (max-width: 600px) { .page-switcher { align-items: flex-start; } .page-switcher-tabs { gap: 4px; } .page-switcher-tabs :deep(.v-btn) { min-width: 0; padding: 0 8px; font-size: 12px; } .page-panel { min-height: calc(100dvh - 110px); } .monthly-movie-row { grid-template-columns: 28px 44px minmax(0, 1fr); gap: 8px; padding: 8px; } .monthly-row-poster { width: 44px; height: 62px; } .monthly-row-score { grid-column: 3; width: auto; } .monthly-row-status { grid-column: 3; } .monthly-row-votes { display: none; } }
 </style>
+

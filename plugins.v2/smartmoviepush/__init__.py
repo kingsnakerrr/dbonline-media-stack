@@ -55,7 +55,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.70"
+    plugin_version = "0.9.71"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -118,6 +118,7 @@ class SmartMoviePush(_PluginBase):
     _download_history_key = "download_history"
     _plugin_logs_key = "plugin_logs"
     _run_status_key = "run_status"
+    _annual_last_check_key = "annual_last_check_at"
     _daily_summary_key = "daily_completion_summary"
     _access_auth_key = "access_auth"
     _access_sessions_key = "access_sessions"
@@ -1295,6 +1296,7 @@ class SmartMoviePush(_PluginBase):
                 "auto_download": self._auto_download,
                 "random_download_enabled": self._random_download_enabled,
                 "annual_dispatch_enabled": self._annual_dispatch_enabled,
+                "annual_last_check_at": self.get_data(self._annual_last_check_key) or "",
                 "annual_dispatch_count": self._annual_dispatch_count,
                 "annual_max_active_downloads": self._annual_max_active_downloads,
                 "cron": self._cron,
@@ -3846,6 +3848,11 @@ class SmartMoviePush(_PluginBase):
                 logger.info(f"下载队列本轮提交 {submitted} 部，剩余 {len(remaining)} 部")
         finally:
             self._queue_lock.release()
+            if self._annual_dispatch_enabled:
+                self.save_data(
+                    self._annual_last_check_key,
+                    datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
+                )
 
     def _load_suppressed(self) -> Dict[str, dict]:
         value = self.get_data(self._suppressed_key)

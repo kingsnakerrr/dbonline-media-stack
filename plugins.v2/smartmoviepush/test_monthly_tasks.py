@@ -111,6 +111,7 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._monthly_batch_job = {}
         self.subject._monthly_batch_lock = threading.Lock()
         self.subject._queue_lock = threading.RLock()
+        self.subject._annual_last_check_key = "annual_last_check_at"
         self.subject._download_queue_key = "download_queue"
         self.subject._no_resource_key = "no_resource_movies"
         self.subject._resource_recheck_key = "no_resource_recheck"
@@ -737,6 +738,12 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject.process_download_queue()
         self.assertEqual(searched, [(2, 0), (1, 0)])
         self.assertEqual(self.store["download_queue"][0]["resource_keyword_index"], 1)
+        self.assertTrue(self.store["annual_last_check_at"])
+
+    def test_annual_check_time_updates_even_when_queue_is_empty(self):
+        self.subject._annual_dispatch_enabled = True
+        self.subject.process_download_queue()
+        self.assertIsNotNone(datetime.fromisoformat(self.store["annual_last_check_at"]))
 
     def test_three_empty_searches_move_random_and_annual_to_no_resource(self):
         self.subject._annual_dispatch_enabled = True
