@@ -3197,6 +3197,8 @@ class SmartMoviePush(_PluginBase):
                        f"选中 {status.get('selected') or 0}，已推送 {status.get('sent') or 0}）")
             status.pop("target", None)
         status["detail"] = f"{detail} · {finished_at}"
+        # 旧版前端也会单独追加 updated_at；展示数据中移除它，避免时间重复。
+        status.pop("updated_at", None)
         status["time_in_detail"] = True
         return status
 

@@ -29,6 +29,7 @@ class RunStatusDisplayTest(unittest.TestCase):
         shown = StatusUnderTest()._display_run_status(raw)
         self.assertEqual(shown["detail"], "TMDB候选 284（目标 10，已查询 3，选中 0，已推送 0） · 2026.1.23 13:20")
         self.assertNotIn("target", shown)
+        self.assertNotIn("updated_at", shown)
         self.assertTrue(shown["time_in_detail"])
         self.assertEqual(raw["target"], 10)
 
