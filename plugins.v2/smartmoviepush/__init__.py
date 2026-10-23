@@ -55,7 +55,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.72"
+    plugin_version = "0.9.73"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -133,6 +133,7 @@ class SmartMoviePush(_PluginBase):
     _monthly_tasks_key = "monthly_movie_tasks"
     _pt_request_lock = threading.RLock()
     _pt_request_log_key = "mteam_search_attempts_24h"
+    _pt_annual_request_log_key = "mteam_annual_attempts_24h"
     _pt_next_request_at = 0.0
     _pt_cooldown_until = 0.0
     _monthly_tasks_lock = threading.RLock()
@@ -2308,7 +2309,7 @@ class SmartMoviePush(_PluginBase):
             raise
         return {"success": True, "message": f"后台开始核对 {len(batch)} 部电影的站点资源；匹配结果逐步显示"}
 
-    def _request_mteam_torrents(self, site: dict, keyword: str) -> list:
+    def _request_mteam_torrents(self, site: dict, keyword: str, purpose: str = "random") -> list:
         """读取馒头 API，区分真实空结果与限流/接口错误。"""
         spider = MTorrentSpider(site)
         if not spider._apikey:
@@ -2319,21 +2320,29 @@ class SmartMoviePush(_PluginBase):
             if now < cls._pt_cooldown_until:
                 wait_minutes = math.ceil((cls._pt_cooldown_until - now) / 60)
                 raise PTSearchUnavailable(f"馒头接口仍在限流，请约 {wait_minutes} 分钟后重试")
-            # 站点建议近 24 小时最多 1000 次；插件最多使用其中 600 次，
-            # 至少保留 400 次给 MoviePilot 和用户的手动搜索。跨重启保存额度。
+            # 真实站点限流由接口返回处理；不再用插件的 600 次总闸拦住随机推送。
+            # 年度补位是后台任务，单独限制其消耗，避免长期挤占随机搜索。
             wall_now = time.time()
             attempts = [stamp for stamp in (self.get_data(self._pt_request_log_key) or [])
                         if isinstance(stamp, (int, float)) and wall_now - 86400 < stamp <= wall_now]
-            if len(attempts) >= 600:
-                wait_minutes = math.ceil((attempts[0] + 86400 - wall_now) / 60)
-                raise PTSearchUnavailable(f"馒头搜索已达到插件近 24 小时安全额度，请约 {wait_minutes} 分钟后重试")
+            annual_attempts = []
+            if purpose == "annual":
+                annual_attempts = [stamp for stamp in (self.get_data(self._pt_annual_request_log_key) or [])
+                                   if isinstance(stamp, (int, float)) and wall_now - 86400 < stamp <= wall_now]
+                if len(annual_attempts) >= 200:
+                    wait_minutes = math.ceil((annual_attempts[0] + 86400 - wall_now) / 60)
+                    raise PTSearchUnavailable(f"年度后台搜索已用完本轮额度，请约 {wait_minutes} 分钟后重试")
             delay = cls._pt_next_request_at - now
             if delay > 0:
                 time.sleep(delay)
             # 短时间批量选择可更快处理；若站点仍返回限流，沿用一小时冷却。
             cls._pt_next_request_at = time.monotonic() + 30
-            attempts.append(time.time())
+            stamp = time.time()
+            attempts.append(stamp)
             self.save_data(self._pt_request_log_key, attempts)
+            if purpose == "annual":
+                annual_attempts.append(stamp)
+                self.save_data(self._pt_annual_request_log_key, annual_attempts)
             try:
                 response = RequestUtils(
                     headers={"Content-Type": "application/json",
@@ -2411,7 +2420,8 @@ class SmartMoviePush(_PluginBase):
             return None
         return f"副标题片名“{lead}”不属于目标影片 {media.title_year}"
 
-    def _search_site_contexts(self, tmdb_id: int, keyword_index: Optional[int] = None) -> list:
+    def _search_site_contexts(self, tmdb_id: int, keyword_index: Optional[int] = None,
+                              purpose: str = "random") -> list:
         """沿用 MoviePilot 的过滤与精确匹配；队列每轮只查一个片名以节省站点额度。"""
         indexers = {site.get("id"): site for site in SitesHelper().get_indexers()}
         unavailable = [sid for sid in self._site_ids if sid not in indexers]
@@ -2433,7 +2443,7 @@ class SmartMoviePush(_PluginBase):
                 keywords = [keywords[keyword_index % len(keywords)]]
             for site in mteam:
                 for keyword in keywords:
-                    torrents = self._request_mteam_torrents(site, keyword)
+                    torrents = self._request_mteam_torrents(site, keyword, purpose=purpose)
                     if not torrents:
                         continue
                     matched = chain._SearchChain__parse_result(torrents=torrents, mediainfo=media)
@@ -3701,6 +3711,9 @@ class SmartMoviePush(_PluginBase):
         """每分钟清理重复候选，并分别按随机与年度的独立空位补位。"""
         if not self._enabled:
             return
+        # 随机扫描期间不让每分钟的年度补位插队消耗站点搜索机会。
+        if getattr(self, "_running_lock", None) and self._running_lock.locked():
+            return
         if self._disk_guard_blocks_new():
             queue_count = len(self._load_download_queue())
             if queue_count:
@@ -3723,6 +3736,11 @@ class SmartMoviePush(_PluginBase):
                                    if row.get("tmdb_id") and row.get("status") != "identity_conflict"}
             annual_active, non_annual_active = self._active_download_counts(active_torrents, history)
             annual_slots = max(0, self._annual_max_active_downloads - annual_active)
+            annual_now = time.time()
+            annual_usage = [stamp for stamp in (self.get_data(getattr(self, "_pt_annual_request_log_key", "mteam_annual_attempts_24h")) or [])
+                            if isinstance(stamp, (int, float)) and annual_now - 86400 < stamp <= annual_now]
+            if len(annual_usage) >= 200:
+                annual_slots = 0
             non_annual_slots = (max(0, self._max_active_downloads - non_annual_active)
                                 if self._random_download_enabled else 0)
             # 有下载空位时强制更新 Emby 索引，避免其他来源刚入库的影片被重复提交。
@@ -3799,7 +3817,8 @@ class SmartMoviePush(_PluginBase):
                     if is_annual:
                         self._append_plugin_log("年度下载", f"正在查询 {item.get('title')} 的 PT 资源（本次补位 {annual_attempts}/{self._annual_dispatch_count * 2}）")
                     results = self._search_site_contexts(
-                        int(item["tmdb_id"]), keyword_index=int(item.get("resource_keyword_index") or 0))
+                        int(item["tmdb_id"]), keyword_index=int(item.get("resource_keyword_index") or 0),
+                        purpose="annual" if is_annual else "random")
                     context = next(
                         (ctx for ctx in results if self._torrent_identity(ctx) == item.get("torrent_identity")),
                         results[0] if results else None,

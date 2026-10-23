@@ -71,6 +71,7 @@ class PTSearchTest(unittest.TestCase):
         SearchUnderTest._pt_next_request_at = 0.0
         SearchUnderTest._pt_cooldown_until = 0.0
         SearchUnderTest._pt_request_log_key = "mteam_search_attempts_24h"
+        SearchUnderTest._pt_annual_request_log_key = "mteam_annual_attempts_24h"
         self.subject = SearchUnderTest()
         self.data = {}
         self.subject.get_data = lambda key: self.data.get(key)
@@ -90,11 +91,18 @@ class PTSearchTest(unittest.TestCase):
         self.assertEqual(len(torrents), 1)
         self.assertEqual(torrents[0].site, 1)
 
-    def test_daily_budget_stops_search_before_site_request(self):
+    def test_old_total_budget_does_not_block_random_search(self):
         self.data[self.subject._pt_request_log_key] = [time.time() - 10] * 600
         namespace["response"] = FakeResponse({"code": 0, "data": {"data": []}})
-        with self.assertRaisesRegex(PTSearchUnavailable, "安全额度"):
-            self.subject._request_mteam_torrents(self.site, "They Will Kill You")
+        self.assertEqual(self.subject._request_mteam_torrents(self.site, "They Will Kill You"), [])
+        self.assertEqual(len(self.data[self.subject._pt_request_log_key]), 601)
+
+    def test_annual_background_budget_does_not_block_random_search(self):
+        self.data[self.subject._pt_annual_request_log_key] = [time.time() - 10] * 200
+        namespace["response"] = FakeResponse({"code": 0, "data": {"data": []}})
+        with self.assertRaisesRegex(PTSearchUnavailable, "年度后台搜索"):
+            self.subject._request_mteam_torrents(self.site, "They Will Kill You", purpose="annual")
+        self.assertEqual(self.subject._request_mteam_torrents(self.site, "They Will Kill You"), [])
 
     def test_success_records_attempt(self):
         namespace["response"] = FakeResponse({"code": 0, "data": {"data": []}})
@@ -109,7 +117,7 @@ class PTSearchTest(unittest.TestCase):
         subject = namespace["SearchKeywordsUnderTest"]()
         subject._site_ids = [1]
         searched = []
-        subject._request_mteam_torrents = lambda _site, keyword: searched.append(keyword) or []
+        subject._request_mteam_torrents = lambda _site, keyword, **_kwargs: searched.append(keyword) or []
         for index in range(3):
             self.assertEqual(subject._search_site_contexts(1300945, keyword_index=index), [])
         self.assertEqual(searched, ["默杀", "A Place Called Silence", "Un lugar llamado silencio"])
@@ -117,4 +125,3 @@ class PTSearchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
