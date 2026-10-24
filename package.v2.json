@@ -2,7 +2,7 @@
   "SmartMoviePush": {
     "name": "智能下载影视资源_惹咪之北",
     "description": "从 TMDB 候选及已选 PT 站点筛选电影，支持 Telegram 推荐、顺序下载、磁盘保护和 Emby 入库核验。",
-    "version": "0.9.75",
+    "version": "0.9.76",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Telegram_A.png",
     "author": "kingsnakerrr",
     "level": 1,

@@ -1,7 +1,7 @@
 {
   "name": "moviepilot-smartmoviepush-plugin",
   "private": true,
-  "version": "0.9.75",
+  "version": "0.9.76",
   "type": "module",
   "scripts": {
     "build": "vite build"

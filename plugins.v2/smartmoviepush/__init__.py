@@ -55,7 +55,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.75"
+    plugin_version = "0.9.76"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -1915,9 +1915,9 @@ class SmartMoviePush(_PluginBase):
             source = str(payload.get("source") or "all")
             logs = self._load_plugin_logs()
             if source == "annual":
-                retained = [item for item in logs if item.get("category") != "年度下载"]
+                retained = [item for item in logs if item.get("category") not in {"年度下载", "年度筛选"}]
             elif source == "random":
-                retained = [item for item in logs if item.get("category") == "年度下载"]
+                retained = [item for item in logs if item.get("category") in {"年度下载", "年度筛选"}]
             else:
                 retained = []
             self.save_data(self._plugin_logs_key, retained)

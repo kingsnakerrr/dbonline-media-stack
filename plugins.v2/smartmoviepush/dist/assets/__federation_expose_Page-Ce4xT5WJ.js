@@ -59,99 +59,98 @@ const _hoisted_37 = { class: "disk-controls-grid" };
 const _hoisted_38 = { class: "mt-2 d-flex align-center flex-wrap ga-2" };
 const _hoisted_39 = { class: "text-caption disk-rule-text" };
 const _hoisted_40 = { class: "d-flex flex-wrap ga-2" };
-const _hoisted_41 = { key: 0 };
-const _hoisted_42 = { key: 1 };
-const _hoisted_43 = {
+const _hoisted_41 = {
   key: 1,
   class: "page-panel",
   role: "tabpanel"
 };
-const _hoisted_44 = { class: "d-flex justify-space-between align-center" };
-const _hoisted_45 = { class: "text-h6 font-weight-bold" };
-const _hoisted_46 = { class: "text-caption mt-1" };
+const _hoisted_42 = { class: "d-flex justify-space-between align-center" };
+const _hoisted_43 = { class: "text-h6 font-weight-bold" };
+const _hoisted_44 = { class: "text-caption mt-1" };
+const _hoisted_45 = { class: "d-flex justify-space-between align-center" };
+const _hoisted_46 = { class: "text-h6 font-weight-bold" };
 const _hoisted_47 = { class: "d-flex justify-space-between align-center" };
 const _hoisted_48 = { class: "text-h6 font-weight-bold" };
 const _hoisted_49 = { class: "d-flex justify-space-between align-center" };
 const _hoisted_50 = { class: "text-h6 font-weight-bold" };
-const _hoisted_51 = { class: "d-flex justify-space-between align-center" };
-const _hoisted_52 = { class: "text-h6 font-weight-bold" };
-const _hoisted_53 = { class: "monthly-task-row pa-3 mb-3" };
-const _hoisted_54 = { class: "d-flex flex-wrap align-center ga-3" };
-const _hoisted_55 = { class: "text-caption text-medium-emphasis mt-2" };
-const _hoisted_56 = { class: "d-flex flex-wrap align-center ga-3 mt-4 mb-3" };
-const _hoisted_57 = { key: 0 };
-const _hoisted_58 = {
+const _hoisted_51 = { class: "monthly-task-row pa-3 mb-3" };
+const _hoisted_52 = { class: "d-flex flex-wrap align-center ga-3" };
+const _hoisted_53 = { class: "text-caption text-medium-emphasis mt-2" };
+const _hoisted_54 = { class: "d-flex flex-wrap align-center ga-3 mt-4 mb-3" };
+const _hoisted_55 = { key: 0 };
+const _hoisted_56 = {
   key: 2,
   class: "page-panel",
   role: "tabpanel"
 };
-const _hoisted_59 = { class: "d-flex align-center ga-2" };
-const _hoisted_60 = { class: "text-caption text-no-wrap" };
-const _hoisted_61 = { class: "d-flex ga-2 mb-3" };
-const _hoisted_62 = { class: "d-flex flex-wrap ga-2 mb-3" };
-const _hoisted_63 = { class: "d-flex flex-wrap align-center ga-2 mb-3" };
-const _hoisted_64 = { class: "text-caption text-medium-emphasis mb-2" };
-const _hoisted_65 = { class: "d-flex align-center justify-end ga-3 mt-3" };
-const _hoisted_66 = { class: "text-caption" };
-const _hoisted_67 = {
+const _hoisted_57 = { class: "d-flex align-center ga-2" };
+const _hoisted_58 = { class: "text-caption text-no-wrap" };
+const _hoisted_59 = { class: "d-flex ga-2 mb-3" };
+const _hoisted_60 = { class: "d-flex flex-wrap ga-2 mb-3" };
+const _hoisted_61 = { class: "d-flex flex-wrap align-center ga-2 mb-3" };
+const _hoisted_62 = { class: "text-caption text-medium-emphasis mb-2" };
+const _hoisted_63 = { class: "d-flex align-center justify-end ga-3 mt-3" };
+const _hoisted_64 = { class: "text-caption" };
+const _hoisted_65 = {
   key: 0,
   class: "monthly-task-row pa-4 mb-3"
 };
-const _hoisted_68 = { class: "text-subtitle-1 mb-3" };
-const _hoisted_69 = { class: "d-flex flex-wrap align-center ga-3" };
-const _hoisted_70 = {
+const _hoisted_66 = { class: "text-subtitle-1 mb-3" };
+const _hoisted_67 = { class: "d-flex flex-wrap align-center ga-3" };
+const _hoisted_68 = {
   key: 0,
   class: "text-caption text-warning mt-2"
 };
-const _hoisted_71 = { class: "d-flex flex-wrap align-center justify-space-between ga-2" };
-const _hoisted_72 = { class: "text-caption" };
-const _hoisted_73 = {
+const _hoisted_69 = { class: "d-flex flex-wrap align-center justify-space-between ga-2" };
+const _hoisted_70 = { class: "text-caption" };
+const _hoisted_71 = {
   key: 0,
   class: "text-error"
 };
-const _hoisted_74 = { class: "d-flex flex-wrap ga-2" };
-const _hoisted_75 = { class: "d-flex flex-wrap align-center ga-2 mb-3" };
-const _hoisted_76 = {
+const _hoisted_72 = { class: "d-flex flex-wrap ga-2" };
+const _hoisted_73 = { class: "d-flex flex-wrap align-center ga-2 mb-3" };
+const _hoisted_74 = {
   key: 0,
   class: "d-flex flex-wrap align-center justify-start ga-2 mb-3"
 };
-const _hoisted_77 = { class: "text-caption text-medium-emphasis mb-3" };
-const _hoisted_78 = {
+const _hoisted_75 = { class: "text-caption text-medium-emphasis mb-3" };
+const _hoisted_76 = {
   key: 1,
   class: "text-caption mb-3"
 };
-const _hoisted_79 = {
+const _hoisted_77 = {
   key: 0,
   class: "text-error"
 };
-const _hoisted_80 = { class: "d-flex flex-wrap align-center ga-2 mb-3" };
-const _hoisted_81 = {
+const _hoisted_78 = { class: "d-flex flex-wrap align-center ga-2 mb-3" };
+const _hoisted_79 = {
   key: 2,
   class: "text-center text-medium-emphasis pa-8"
 };
-const _hoisted_82 = {
+const _hoisted_80 = {
   key: 3,
   class: "monthly-movie-list"
 };
-const _hoisted_83 = { class: "monthly-row-check" };
-const _hoisted_84 = {
+const _hoisted_81 = { class: "monthly-row-check" };
+const _hoisted_82 = {
   key: 1,
   class: "monthly-row-poster monthly-row-poster-empty"
 };
-const _hoisted_85 = { class: "monthly-row-main" };
-const _hoisted_86 = ["href"];
-const _hoisted_87 = {
+const _hoisted_83 = { class: "monthly-row-main" };
+const _hoisted_84 = ["href"];
+const _hoisted_85 = {
   key: 0,
   class: "monthly-row-subtitle"
 };
-const _hoisted_88 = { class: "monthly-row-subtitle" };
-const _hoisted_89 = { class: "monthly-row-score" };
-const _hoisted_90 = { class: "monthly-row-votes" };
-const _hoisted_91 = { class: "d-flex align-center justify-end ga-3 mt-3" };
-const _hoisted_92 = { class: "text-caption" };
-const _hoisted_93 = { class: "d-flex ga-2 mb-3" };
-const _hoisted_94 = { class: "d-flex ga-2 mb-3" };
-const _hoisted_95 = { class: "text-caption text-medium-emphasis mb-2" };
+const _hoisted_86 = { class: "monthly-row-subtitle" };
+const _hoisted_87 = { class: "monthly-row-score" };
+const _hoisted_88 = { class: "monthly-row-votes" };
+const _hoisted_89 = { class: "d-flex align-center justify-end ga-3 mt-3" };
+const _hoisted_90 = { class: "text-caption" };
+const _hoisted_91 = { class: "d-flex ga-2 mb-3" };
+const _hoisted_92 = { class: "d-flex ga-2 mb-3" };
+const _hoisted_93 = { class: "text-caption text-medium-emphasis mb-2" };
+const _hoisted_94 = { class: "text-no-wrap" };
 
 const {computed,nextTick,onMounted,onUnmounted,ref,watch} = await importShared('vue');
 
@@ -179,6 +178,16 @@ function formatRunTime(value) {
     hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
   }).formatToParts(date).map(part => [part.type, part.value]));
   return `${parts.year}.${parts.month}.${parts.day} ${parts.hour}:${parts.minute}`
+}
+function formatLogTime(value) {
+  if (!value) return ''
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return ''
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date).map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`
 }
 const accessReady = ref(false);
 const accessPassword = ref('');
@@ -343,23 +352,19 @@ const historyDateOptions = computed(() => [
 const suppressedSearch = ref('');
 const logSearch = ref('');
 const logSource = ref('random');
-const showDetailedLogs = ref(false);
 const logsRefreshing = ref(false);
 const logsRefreshedAt = ref('');
 const pageSizes = [20, 50, 100];
-const briefLogCategories = new Set(['提交下载', '提交失败', '推送成功', '推送失败', '整理完成', 'Emby 已入库', '每日统计']);
-const visibleLogs = computed(() => (state.value.logs || []).filter(item => {
-  const annual = item.category === '年度下载';
-  if (logSource.value === 'annual') return annual
-  if (annual) return false
-  return showDetailedLogs.value || briefLogCategories.has(item.category)
-}));
-const sourceLogCount = computed(() => (state.value.logs || []).filter(item =>
-  logSource.value === 'annual' ? item.category === '年度下载' : item.category !== '年度下载').length);
-
-async function toggleDetailedLogs() {
-  showDetailedLogs.value = !showDetailedLogs.value;
-  await refreshLogs();
+const annualLogCategories = new Set(['年度下载', '年度筛选']);
+function isAnnualLog(item) { return annualLogCategories.has(item.category) }
+const randomLogs = computed(() => (state.value.logs || []).filter(item => !isAnnualLog(item)));
+const annualLogs = computed(() => (state.value.logs || []).filter(isAnnualLog));
+const visibleLogs = computed(() => logSource.value === 'annual' ? annualLogs.value : randomLogs.value);
+const latestRandomLog = computed(() => randomLogs.value[0]);
+const latestAnnualLog = computed(() => annualLogs.value[0]);
+function logPreview(message) {
+  const singleLine = String(message || '').replace(/\s+/g, ' ').trim();
+  return singleLine.length > 180 ? `${singleLine.slice(0, 180)}…` : singleLine
 }
 async function refreshLogs() {
   logsRefreshing.value = true;
@@ -770,7 +775,7 @@ const activeHeaders = [
   { title: '剩余时间', key: 'eta', width: 120 },
 ];
 const logHeaders = [
-  { title: '时间', key: 'created_at', width: 210 },
+  { title: '时间', key: 'created_at', width: 170 },
   { title: '类型', key: 'category', width: 130 },
   { title: '内容', key: 'message' },
 ];
@@ -1568,32 +1573,26 @@ return (_ctx, _cache) => {
                           onClick: _cache[36] || (_cache[36] = $event => (loadStatus()))
                         }, null, 8, ["loading"])
                       ]),
-                      (state.value.run_status?.run_id)
+                      (latestRandomLog.value)
                         ? (_openBlock(), _createBlock(_component_VAlert, {
                             key: 0,
                             class: "mt-3",
-                            type: "info",
+                            type: latestRandomLog.value.level === 'error' ? 'error' : latestRandomLog.value.level === 'warning' ? 'warning' : 'info',
                             variant: "tonal",
                             density: "compact"
                           }, {
                             default: _withCtx(() => [
-                              _createTextVNode(_toDisplayString(state.value.run_status.source) + " · " + _toDisplayString(state.value.run_status.stage) + "：" + _toDisplayString(state.value.run_status.detail) + " ", 1),
-                              (state.value.run_status.target)
-                                ? (_openBlock(), _createElementBlock("span", _hoisted_41, "（目标 " + _toDisplayString(state.value.run_status.target) + "，已查询 " + _toDisplayString(state.value.run_status.searched || 0) + "，选中 " + _toDisplayString(state.value.run_status.selected || 0) + "，已推送 " + _toDisplayString(state.value.run_status.sent || 0) + "）", 1))
-                                : _createCommentVNode("", true),
-                              (state.value.run_status.updated_at && !state.value.run_status.time_in_detail)
-                                ? (_openBlock(), _createElementBlock("span", _hoisted_42, " · " + _toDisplayString(formatRunTime(state.value.run_status.updated_at)), 1))
-                                : _createCommentVNode("", true)
+                              _createTextVNode(_toDisplayString(latestRandomLog.value.category) + "：" + _toDisplayString(logPreview(latestRandomLog.value.message)) + " · " + _toDisplayString(formatLogTime(latestRandomLog.value.created_at)), 1)
                             ]),
                             _: 1
-                          }))
+                          }, 8, ["type"]))
                         : _createCommentVNode("", true)
                     ]),
                     _: 1
                   })
                 ]))
               : (activePage.value === 'annual')
-                ? (_openBlock(), _createElementBlock("div", _hoisted_43, [
+                ? (_openBlock(), _createElementBlock("div", _hoisted_41, [
                     _createVNode(_component_VCard, {
                       variant: "outlined",
                       class: "pa-4 mb-4"
@@ -1618,11 +1617,11 @@ return (_ctx, _cache) => {
                                   onClick: _cache[37] || (_cache[37] = $event => (openActive('annual')))
                                 }, {
                                   default: _withCtx(() => [
-                                    _createElementVNode("div", _hoisted_44, [
+                                    _createElementVNode("div", _hoisted_42, [
                                       _createElementVNode("div", null, [
                                         _cache[125] || (_cache[125] = _createElementVNode("div", { class: "text-caption" }, "年度正在下载", -1)),
-                                        _createElementVNode("div", _hoisted_45, _toDisplayString(annualActiveItems.value.length), 1),
-                                        _createElementVNode("div", _hoisted_46, "年度占用 " + _toDisplayString(summary.value.annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.annual_max_active_downloads || 5), 1)
+                                        _createElementVNode("div", _hoisted_43, _toDisplayString(annualActiveItems.value.length), 1),
+                                        _createElementVNode("div", _hoisted_44, "年度占用 " + _toDisplayString(summary.value.annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.annual_max_active_downloads || 5), 1)
                                       ]),
                                       _createVNode(_component_VIcon, { icon: "mdi-chevron-right" })
                                     ])
@@ -1644,10 +1643,10 @@ return (_ctx, _cache) => {
                                   onClick: _cache[38] || (_cache[38] = $event => (openQueue('annual')))
                                 }, {
                                   default: _withCtx(() => [
-                                    _createElementVNode("div", _hoisted_47, [
+                                    _createElementVNode("div", _hoisted_45, [
                                       _createElementVNode("div", null, [
                                         _cache[126] || (_cache[126] = _createElementVNode("div", { class: "text-caption" }, "年度待下载候选", -1)),
-                                        _createElementVNode("div", _hoisted_48, _toDisplayString(annualQueueItems.value.length), 1)
+                                        _createElementVNode("div", _hoisted_46, _toDisplayString(annualQueueItems.value.length), 1)
                                       ]),
                                       _createVNode(_component_VIcon, { icon: "mdi-chevron-right" })
                                     ])
@@ -1669,10 +1668,10 @@ return (_ctx, _cache) => {
                                   onClick: _cache[39] || (_cache[39] = $event => (openNoResource('annual')))
                                 }, {
                                   default: _withCtx(() => [
-                                    _createElementVNode("div", _hoisted_49, [
+                                    _createElementVNode("div", _hoisted_47, [
                                       _createElementVNode("div", null, [
                                         _cache[127] || (_cache[127] = _createElementVNode("div", { class: "text-caption" }, "年度无资源", -1)),
-                                        _createElementVNode("div", _hoisted_50, _toDisplayString(annualNoResourceItems.value.length), 1)
+                                        _createElementVNode("div", _hoisted_48, _toDisplayString(annualNoResourceItems.value.length), 1)
                                       ]),
                                       _createVNode(_component_VIcon, { icon: "mdi-chevron-right" })
                                     ])
@@ -1694,10 +1693,10 @@ return (_ctx, _cache) => {
                                   onClick: _cache[40] || (_cache[40] = $event => (openHistory('annual')))
                                 }, {
                                   default: _withCtx(() => [
-                                    _createElementVNode("div", _hoisted_51, [
+                                    _createElementVNode("div", _hoisted_49, [
                                       _createElementVNode("div", null, [
                                         _cache[128] || (_cache[128] = _createElementVNode("div", { class: "text-caption" }, "年度下载记录", -1)),
-                                        _createElementVNode("div", _hoisted_52, _toDisplayString(summary.value.annual_history_count || 0), 1)
+                                        _createElementVNode("div", _hoisted_50, _toDisplayString(summary.value.annual_history_count || 0), 1)
                                       ]),
                                       _createVNode(_component_VIcon, { icon: "mdi-chevron-right" })
                                     ])
@@ -1710,8 +1709,8 @@ return (_ctx, _cache) => {
                           ]),
                           _: 1
                         }),
-                        _createElementVNode("div", _hoisted_53, [
-                          _createElementVNode("div", _hoisted_54, [
+                        _createElementVNode("div", _hoisted_51, [
+                          _createElementVNode("div", _hoisted_52, [
                             _createVNode(_component_VTextField, {
                               modelValue: annualDispatchForm.value.annual_dispatch_count,
                               "onUpdate:modelValue": _cache[41] || (_cache[41] = $event => ((annualDispatchForm.value.annual_dispatch_count) = $event)),
@@ -1795,20 +1794,20 @@ return (_ctx, _cache) => {
                               _: 1
                             })
                           ]),
-                          _createElementVNode("div", _hoisted_55, _toDisplayString(summary.value.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停') + "；每分钟检查空位，单次最多新增 " + _toDisplayString(summary.value.annual_dispatch_count || 5) + " 部。年度占用 " + _toDisplayString(summary.value.annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.annual_max_active_downloads || 5) + "，随机/其他占用 " + _toDisplayString(summary.value.non_annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.max_active_downloads || 10) + "；两边名额互不挤占，硬盘保护与同片去重仍生效。", 1),
-                          (summary.value.annual_last_check_at)
+                          _createElementVNode("div", _hoisted_53, _toDisplayString(summary.value.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停') + "；每分钟检查空位，单次最多新增 " + _toDisplayString(summary.value.annual_dispatch_count || 5) + " 部。年度占用 " + _toDisplayString(summary.value.annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.annual_max_active_downloads || 5) + "，随机/其他占用 " + _toDisplayString(summary.value.non_annual_occupied_download_slots || 0) + "/" + _toDisplayString(summary.value.max_active_downloads || 10) + "；两边名额互不挤占，硬盘保护与同片去重仍生效。", 1),
+                          (latestAnnualLog.value)
                             ? (_openBlock(), _createBlock(_component_VAlert, {
                                 key: 0,
                                 class: "mt-3",
-                                type: "info",
+                                type: latestAnnualLog.value.level === 'error' ? 'error' : latestAnnualLog.value.level === 'warning' ? 'warning' : 'info',
                                 variant: "tonal",
                                 density: "compact"
                               }, {
                                 default: _withCtx(() => [
-                                  _createTextVNode("年度补位 · 本轮检查完成 · " + _toDisplayString(formatRunTime(summary.value.annual_last_check_at)), 1)
+                                  _createTextVNode(_toDisplayString(latestAnnualLog.value.category) + "：" + _toDisplayString(logPreview(latestAnnualLog.value.message)) + " · " + _toDisplayString(formatLogTime(latestAnnualLog.value.created_at)), 1)
                                 ]),
                                 _: 1
-                              }))
+                              }, 8, ["type"]))
                             : _createCommentVNode("", true),
                           (Number(summary.value.site_cooldown_until) * 1000 > Date.now())
                             ? (_openBlock(), _createBlock(_component_VAlert, {
@@ -1825,7 +1824,7 @@ return (_ctx, _cache) => {
                               }))
                             : _createCommentVNode("", true)
                         ]),
-                        _createElementVNode("div", _hoisted_56, [
+                        _createElementVNode("div", _hoisted_54, [
                           _createVNode(_component_VCombobox, {
                             modelValue: archiveYear.value,
                             "onUpdate:modelValue": _cache[47] || (_cache[47] = $event => ((archiveYear).value = $event)),
@@ -1900,7 +1899,7 @@ return (_ctx, _cache) => {
                               default: _withCtx(() => [
                                 _createTextVNode("年度片单缓存：" + _toDisplayString(archiveYear.value) + " 年已保存 " + _toDisplayString(annualEntry.value.movies) + " 部电影，已扫描 " + _toDisplayString(annualEntry.value.scans) + " 次。这里是名单数量，不是已推送数量；重新打开可直接读取。", 1),
                                 (annualEntry.value.latest.scanned_at)
-                                  ? (_openBlock(), _createElementBlock("span", _hoisted_57, " · 最近扫描 " + _toDisplayString(formatRunTime(annualEntry.value.latest.scanned_at)), 1))
+                                  ? (_openBlock(), _createElementBlock("span", _hoisted_55, " · 最近扫描 " + _toDisplayString(formatRunTime(annualEntry.value.latest.scanned_at)), 1))
                                   : _createCommentVNode("", true)
                               ]),
                               _: 1
@@ -1910,7 +1909,7 @@ return (_ctx, _cache) => {
                       _: 1
                     })
                   ]))
-                : (_openBlock(), _createElementBlock("div", _hoisted_58, [
+                : (_openBlock(), _createElementBlock("div", _hoisted_56, [
                     _createVNode(_component_VCard, {
                       variant: "outlined",
                       class: "pa-4 mb-4"
@@ -2049,14 +2048,14 @@ return (_ctx, _cache) => {
                                   hover: ""
                                 }, {
                                   "item.progress": _withCtx(({ item }) => [
-                                    _createElementVNode("div", _hoisted_59, [
+                                    _createElementVNode("div", _hoisted_57, [
                                       _createVNode(_component_VProgressLinear, {
                                         "model-value": item.progress,
                                         color: "info",
                                         height: "8",
                                         rounded: ""
                                       }, null, 8, ["model-value"]),
-                                      _createElementVNode("span", _hoisted_60, _toDisplayString(item.progress) + "%", 1)
+                                      _createElementVNode("span", _hoisted_58, _toDisplayString(item.progress) + "%", 1)
                                     ])
                                   ]),
                                   _: 1
@@ -2079,7 +2078,7 @@ return (_ctx, _cache) => {
                           }),
                           _createVNode(_component_VCardText, null, {
                             default: _withCtx(() => [
-                              _createElementVNode("div", _hoisted_61, [
+                              _createElementVNode("div", _hoisted_59, [
                                 _createVNode(_component_VTextField, {
                                   modelValue: queueSearch.value,
                                   "onUpdate:modelValue": _cache[55] || (_cache[55] = $event => ((queueSearch).value = $event)),
@@ -2166,7 +2165,7 @@ return (_ctx, _cache) => {
                                       _: 1
                                     }, 8, ["type"]))
                                   : _createCommentVNode("", true),
-                                _createElementVNode("div", _hoisted_62, [
+                                _createElementVNode("div", _hoisted_60, [
                                   _createVNode(_component_VTextField, {
                                     modelValue: noResourceSearch.value,
                                     "onUpdate:modelValue": _cache[58] || (_cache[58] = $event => ((noResourceSearch).value = $event)),
@@ -2281,7 +2280,7 @@ return (_ctx, _cache) => {
                                     ]),
                                     _: 1
                                   }, 8, ["modelValue"]),
-                                  _createElementVNode("div", _hoisted_63, [
+                                  _createElementVNode("div", _hoisted_61, [
                                     _createVNode(_component_VSelect, {
                                       modelValue: historyPeriod.value,
                                       "onUpdate:modelValue": _cache[65] || (_cache[65] = $event => ((historyPeriod).value = $event)),
@@ -2333,7 +2332,7 @@ return (_ctx, _cache) => {
                                       _: 1
                                     }, 8, ["loading"])
                                   ]),
-                                  _createElementVNode("div", _hoisted_64, "当前列表 " + _toDisplayString(historyView.value.total || 0) + " 条；" + _toDisplayString(historySource.value === 'annual' ? '只显示明确标记为年度方式提交的任务；旧版未记录来源的任务不猜测归属。' : '仅统计本插件提交的任务，含历史归档。') + "默认每页 100 条。待入库＝下载完成、等待 MP 整理；已整理＝MP 已整理、等待上传及 Emby 扫描；已整理未入库＝整理超过 24 小时仍未在 Emby 找到，需排查上传、扫描或匹配情况。", 1),
+                                  _createElementVNode("div", _hoisted_62, "当前列表 " + _toDisplayString(historyView.value.total || 0) + " 条；" + _toDisplayString(historySource.value === 'annual' ? '只显示明确标记为年度方式提交的任务；旧版未记录来源的任务不猜测归属。' : '仅统计本插件提交的任务，含历史归档。') + "默认每页 100 条。待入库＝下载完成、等待 MP 整理；已整理＝MP 已整理、等待上传及 Emby 扫描；已整理未入库＝整理超过 24 小时仍未在 Emby 找到，需排查上传、扫描或匹配情况。", 1),
                                   _createVNode(_component_VDataTable, {
                                     headers: historyHeaders,
                                     items: historyView.value.items || [],
@@ -2356,8 +2355,8 @@ return (_ctx, _cache) => {
                                     ]),
                                     _: 1
                                   }, 8, ["items", "items-per-page"]),
-                                  _createElementVNode("div", _hoisted_65, [
-                                    _createElementVNode("span", _hoisted_66, "第 " + _toDisplayString(historyView.value.page || 1) + " / " + _toDisplayString(Math.max(1, Math.ceil((historyView.value.total || 0) / historyPageSize.value))) + " 页", 1),
+                                  _createElementVNode("div", _hoisted_63, [
+                                    _createElementVNode("span", _hoisted_64, "第 " + _toDisplayString(historyView.value.page || 1) + " / " + _toDisplayString(Math.max(1, Math.ceil((historyView.value.total || 0) / historyPageSize.value))) + " 页", 1),
                                     _createVNode(_component_VBtn, {
                                       size: "small",
                                       variant: "tonal",
@@ -2399,9 +2398,9 @@ return (_ctx, _cache) => {
                                 _createVNode(_component_VCardText, null, {
                                   default: _withCtx(() => [
                                     (monthlyEditMode.value)
-                                      ? (_openBlock(), _createElementBlock("div", _hoisted_67, [
-                                          _createElementVNode("div", _hoisted_68, _toDisplayString(monthlyForm.value.task_id ? '修改任务并重扫' : '新建年度扫描'), 1),
-                                          _createElementVNode("div", _hoisted_69, [
+                                      ? (_openBlock(), _createElementBlock("div", _hoisted_65, [
+                                          _createElementVNode("div", _hoisted_66, _toDisplayString(monthlyForm.value.task_id ? '修改任务并重扫' : '新建年度扫描'), 1),
+                                          _createElementVNode("div", _hoisted_67, [
                                             _createVNode(_component_VTextField, {
                                               modelValue: monthlyForm.value.min_score,
                                               "onUpdate:modelValue": _cache[72] || (_cache[72] = $event => ((monthlyForm.value.min_score) = $event)),
@@ -2458,7 +2457,7 @@ return (_ctx, _cache) => {
                                               : _createCommentVNode("", true)
                                           ]),
                                           (!monthlyForm.value.task_id && (state.value.monthly_tasks || []).length >= 5)
-                                            ? (_openBlock(), _createElementBlock("div", _hoisted_70, "已有 5 个任务，请先删除不需要的任务；已保存的月份名单不受删除影响。"))
+                                            ? (_openBlock(), _createElementBlock("div", _hoisted_68, "已有 5 个任务，请先删除不需要的任务；已保存的月份名单不受删除影响。"))
                                             : _createCommentVNode("", true)
                                         ]))
                                       : _createCommentVNode("", true),
@@ -2467,14 +2466,14 @@ return (_ctx, _cache) => {
                                         key: task.id,
                                         class: "monthly-task-row pa-3 mb-3"
                                       }, [
-                                        _createElementVNode("div", _hoisted_71, [
-                                          _createElementVNode("div", _hoisted_72, [
+                                        _createElementVNode("div", _hoisted_69, [
+                                          _createElementVNode("div", _hoisted_70, [
                                             _createTextVNode("扫描任务 ≥" + _toDisplayString(task.min_score) + " 分 · " + _toDisplayString(task.scan_progress || '等待扫描'), 1),
                                             (task.scan_error)
-                                              ? (_openBlock(), _createElementBlock("span", _hoisted_73, " · " + _toDisplayString(task.scan_error), 1))
+                                              ? (_openBlock(), _createElementBlock("span", _hoisted_71, " · " + _toDisplayString(task.scan_error), 1))
                                               : _createCommentVNode("", true)
                                           ]),
-                                          _createElementVNode("div", _hoisted_74, [
+                                          _createElementVNode("div", _hoisted_72, [
                                             _createVNode(_component_VBtn, {
                                               size: "default",
                                               variant: "tonal",
@@ -2541,7 +2540,7 @@ return (_ctx, _cache) => {
                                       : _createCommentVNode("", true),
                                     (monthlyArchiveYear.value || monthlyTaskId.value)
                                       ? (_openBlock(), _createElementBlock(_Fragment, { key: 3 }, [
-                                          _createElementVNode("div", _hoisted_75, [
+                                          _createElementVNode("div", _hoisted_73, [
                                             _createVNode(_component_VTextField, {
                                               modelValue: monthlyMinScore.value,
                                               "onUpdate:modelValue": _cache[76] || (_cache[76] = $event => ((monthlyMinScore).value = $event)),
@@ -2612,7 +2611,7 @@ return (_ctx, _cache) => {
                                             }, null, 8, ["modelValue"])
                                           ]),
                                           (monthlyArchiveYear.value)
-                                            ? (_openBlock(), _createElementBlock("div", _hoisted_76, [
+                                            ? (_openBlock(), _createElementBlock("div", _hoisted_74, [
                                                 _createVNode(_component_VBtn, {
                                                   variant: "tonal",
                                                   loading: monthlyBusy.value,
@@ -2625,16 +2624,16 @@ return (_ctx, _cache) => {
                                                 }, 8, ["loading"])
                                               ]))
                                             : _createCommentVNode("", true),
-                                          _createElementVNode("div", _hoisted_77, "电影名单只读取 TMDB。勾选后先核对 Emby、MoviePilot 下载和随机等候队列；未重复的影片只进入年度候选。首页启动推送后才按年度独立空位逐部搜索 PT 并提交，不占随机下载名额。" + _toDisplayString(monthlyView.value.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。'), 1),
+                                          _createElementVNode("div", _hoisted_75, "电影名单只读取 TMDB。勾选后先核对 Emby、MoviePilot 下载和随机等候队列；未重复的影片只进入年度候选。首页启动推送后才按年度独立空位逐部搜索 PT 并提交，不占随机下载名额。" + _toDisplayString(monthlyView.value.emby_fresh ? '' : 'Emby 暂不可用，当前显示最近记录。'), 1),
                                           (monthlyView.value.batch_progress?.total)
-                                            ? (_openBlock(), _createElementBlock("div", _hoisted_78, [
+                                            ? (_openBlock(), _createElementBlock("div", _hoisted_76, [
                                                 _createTextVNode("批量下载：已处理 " + _toDisplayString(monthlyView.value.batch_progress.done || 0) + "/" + _toDisplayString(monthlyView.value.batch_progress.total) + " · 已提交 " + _toDisplayString(monthlyView.value.batch_progress.submitted || 0) + " · 等候 " + _toDisplayString(monthlyView.value.batch_progress.queued || 0) + " · 跳过 " + _toDisplayString(monthlyView.value.batch_progress.skipped || 0) + " · 失败 " + _toDisplayString(monthlyView.value.batch_progress.errors || 0), 1),
                                                 (monthlyView.value.batch_progress.message)
-                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_79, " · " + _toDisplayString(monthlyView.value.batch_progress.message), 1))
+                                                  ? (_openBlock(), _createElementBlock("span", _hoisted_77, " · " + _toDisplayString(monthlyView.value.batch_progress.message), 1))
                                                   : _createCommentVNode("", true)
                                               ]))
                                             : _createCommentVNode("", true),
-                                          _createElementVNode("div", _hoisted_80, [
+                                          _createElementVNode("div", _hoisted_78, [
                                             _createVNode(_component_VBtn, {
                                               size: "small",
                                               variant: "tonal",
@@ -2670,14 +2669,14 @@ return (_ctx, _cache) => {
                                             }, 8, ["disabled"])
                                           ]),
                                           (!monthlyView.value.items?.length)
-                                            ? (_openBlock(), _createElementBlock("div", _hoisted_81, "暂无符合当前筛选条件的电影"))
-                                            : (_openBlock(), _createElementBlock("div", _hoisted_82, [
+                                            ? (_openBlock(), _createElementBlock("div", _hoisted_79, "暂无符合当前筛选条件的电影"))
+                                            : (_openBlock(), _createElementBlock("div", _hoisted_80, [
                                                 (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(monthlyView.value.items, (item) => {
                                                   return (_openBlock(), _createElementBlock("div", {
                                                     key: item.tmdb_id,
                                                     class: "monthly-movie-row"
                                                   }, [
-                                                    _createElementVNode("div", _hoisted_83, [
+                                                    _createElementVNode("div", _hoisted_81, [
                                                       _createVNode(_component_VCheckboxBtn, {
                                                         "model-value": monthlySelected.value.includes(String(item.tmdb_id)),
                                                         disabled: !monthlyCanDownload(item),
@@ -2694,27 +2693,27 @@ return (_ctx, _cache) => {
                                                           cover: "",
                                                           class: "monthly-row-poster"
                                                         }, null, 8, ["src"]))
-                                                      : (_openBlock(), _createElementBlock("div", _hoisted_84, [
+                                                      : (_openBlock(), _createElementBlock("div", _hoisted_82, [
                                                           _createVNode(_component_VIcon, {
                                                             icon: "mdi-movie-open",
                                                             size: "23"
                                                           })
                                                         ])),
-                                                    _createElementVNode("div", _hoisted_85, [
+                                                    _createElementVNode("div", _hoisted_83, [
                                                       _createElementVNode("a", {
                                                         class: "monthly-row-title",
                                                         href: `https://www.themoviedb.org/movie/${item.tmdb_id}?language=zh-CN`,
                                                         target: "_blank",
                                                         rel: "noopener noreferrer"
-                                                      }, _toDisplayString(movieTitle(item)) + " (" + _toDisplayString(item.year) + ")", 9, _hoisted_86),
+                                                      }, _toDisplayString(movieTitle(item)) + " (" + _toDisplayString(item.year) + ")", 9, _hoisted_84),
                                                       (item.original_title && item.original_title !== movieTitle(item))
-                                                        ? (_openBlock(), _createElementBlock("div", _hoisted_87, _toDisplayString(item.original_title), 1))
+                                                        ? (_openBlock(), _createElementBlock("div", _hoisted_85, _toDisplayString(item.original_title), 1))
                                                         : _createCommentVNode("", true),
-                                                      _createElementVNode("div", _hoisted_88, _toDisplayString(item.release_date || '日期未知'), 1)
+                                                      _createElementVNode("div", _hoisted_86, _toDisplayString(item.release_date || '日期未知'), 1)
                                                     ]),
-                                                    _createElementVNode("div", _hoisted_89, [
+                                                    _createElementVNode("div", _hoisted_87, [
                                                       _createTextVNode("⭐ " + _toDisplayString(Number(item.score || 0).toFixed(1)), 1),
-                                                      _createElementVNode("span", _hoisted_90, _toDisplayString(item.vote_count || 0) + " 人评价", 1)
+                                                      _createElementVNode("span", _hoisted_88, _toDisplayString(item.vote_count || 0) + " 人评价", 1)
                                                     ]),
                                                     _createVNode(_component_VChip, {
                                                       size: "small",
@@ -2729,8 +2728,8 @@ return (_ctx, _cache) => {
                                                   ]))
                                                 }), 128))
                                               ])),
-                                          _createElementVNode("div", _hoisted_91, [
-                                            _createElementVNode("span", _hoisted_92, "第 " + _toDisplayString(monthlyView.value.page || 1) + " / " + _toDisplayString(Math.max(1, Math.ceil((monthlyView.value.total || 0) / monthlyPageSize.value))) + " 页，共 " + _toDisplayString(monthlyView.value.total || 0) + " 部", 1),
+                                          _createElementVNode("div", _hoisted_89, [
+                                            _createElementVNode("span", _hoisted_90, "第 " + _toDisplayString(monthlyView.value.page || 1) + " / " + _toDisplayString(Math.max(1, Math.ceil((monthlyView.value.total || 0) / monthlyPageSize.value))) + " 页，共 " + _toDisplayString(monthlyView.value.total || 0) + " 部", 1),
                                             _createVNode(_component_VBtn, {
                                               size: "small",
                                               variant: "tonal",
@@ -2773,7 +2772,7 @@ return (_ctx, _cache) => {
                                   }),
                                   _createVNode(_component_VCardText, null, {
                                     default: _withCtx(() => [
-                                      _createElementVNode("div", _hoisted_93, [
+                                      _createElementVNode("div", _hoisted_91, [
                                         _createVNode(_component_VTextField, {
                                           modelValue: suppressedSearch.value,
                                           "onUpdate:modelValue": _cache[88] || (_cache[88] = $event => ((suppressedSearch).value = $event)),
@@ -2870,7 +2869,7 @@ return (_ctx, _cache) => {
                                       }),
                                       _createVNode(_component_VCardText, null, {
                                         default: _withCtx(() => [
-                                          _createElementVNode("div", _hoisted_94, [
+                                          _createElementVNode("div", _hoisted_92, [
                                             _createVNode(_component_VTextField, {
                                               modelValue: logSearch.value,
                                               "onUpdate:modelValue": _cache[92] || (_cache[92] = $event => ((logSearch).value = $event)),
@@ -2879,21 +2878,6 @@ return (_ctx, _cache) => {
                                               clearable: "",
                                               "hide-details": ""
                                             }, null, 8, ["modelValue"]),
-                                            (logSource.value !== 'annual')
-                                              ? (_openBlock(), _createBlock(_component_VBtn, {
-                                                  key: 0,
-                                                  color: showDetailedLogs.value ? 'primary' : 'secondary',
-                                                  variant: "tonal",
-                                                  loading: logsRefreshing.value,
-                                                  class: "flex-shrink-0",
-                                                  onClick: toggleDetailedLogs
-                                                }, {
-                                                  default: _withCtx(() => [
-                                                    _createTextVNode(_toDisplayString(showDetailedLogs.value ? '详情日志：开' : '详情日志：关'), 1)
-                                                  ]),
-                                                  _: 1
-                                                }, 8, ["color", "loading"]))
-                                              : _createCommentVNode("", true),
                                             _createVNode(_component_VBtn, {
                                               variant: "tonal",
                                               class: "flex-shrink-0",
@@ -2916,7 +2900,7 @@ return (_ctx, _cache) => {
                                               _: 1
                                             })
                                           ]),
-                                          _createElementVNode("div", _hoisted_95, "当前显示 " + _toDisplayString(visibleLogs.value.length) + "/" + _toDisplayString(sourceLogCount.value) + " 条。" + _toDisplayString(logSource.value === 'annual' ? '显示年度推送、PT 查询、提交与失败记录' : showDetailedLogs.value ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步') + "。" + _toDisplayString(logsRefreshedAt.value ? `最近刷新：${logsRefreshedAt.value}。` : '') + "升级前未记录的步骤无法补写。", 1),
+                                          _createElementVNode("div", _hoisted_93, "共 " + _toDisplayString(visibleLogs.value.length) + " 条，包含定时任务及运行过程；每 5 秒自动刷新。" + _toDisplayString(logsRefreshedAt.value ? `最近刷新：${logsRefreshedAt.value}。` : ''), 1),
                                           _createVNode(_component_VDataTable, {
                                             headers: logHeaders,
                                             items: visibleLogs.value,
@@ -2925,7 +2909,12 @@ return (_ctx, _cache) => {
                                             "items-per-page-options": pageSizes,
                                             density: "compact",
                                             hover: ""
-                                          }, null, 8, ["items", "search"])
+                                          }, {
+                                            "item.created_at": _withCtx(({ item }) => [
+                                              _createElementVNode("span", _hoisted_94, _toDisplayString(formatLogTime(item.created_at)), 1)
+                                            ]),
+                                            _: 1
+                                          }, 8, ["items", "search"])
                                         ]),
                                         _: 1
                                       })
@@ -2944,6 +2933,6 @@ return (_ctx, _cache) => {
 }
 
 };
-const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-13dd4ffd"]]);
+const Page = /*#__PURE__*/_export_sfc(_sfc_main, [['__scopeId',"data-v-e77d9019"]]);
 
 export { Page as default };

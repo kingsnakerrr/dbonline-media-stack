@@ -18,6 +18,16 @@ function formatRunTime(value) {
   }).formatToParts(date).map(part => [part.type, part.value]))
   return `${parts.year}.${parts.month}.${parts.day} ${parts.hour}:${parts.minute}`
 }
+function formatLogTime(value) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(date).map(part => [part.type, part.value]))
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`
+}
 const accessReady = ref(false)
 const accessPassword = ref('')
 const accessToken = ref('')
@@ -182,23 +192,19 @@ const historyDateOptions = computed(() => [
 const suppressedSearch = ref('')
 const logSearch = ref('')
 const logSource = ref('random')
-const showDetailedLogs = ref(false)
 const logsRefreshing = ref(false)
 const logsRefreshedAt = ref('')
 const pageSizes = [20, 50, 100]
-const briefLogCategories = new Set(['提交下载', '提交失败', '推送成功', '推送失败', '整理完成', 'Emby 已入库', '每日统计'])
-const visibleLogs = computed(() => (state.value.logs || []).filter(item => {
-  const annual = item.category === '年度下载'
-  if (logSource.value === 'annual') return annual
-  if (annual) return false
-  return showDetailedLogs.value || briefLogCategories.has(item.category)
-}))
-const sourceLogCount = computed(() => (state.value.logs || []).filter(item =>
-  logSource.value === 'annual' ? item.category === '年度下载' : item.category !== '年度下载').length)
-
-async function toggleDetailedLogs() {
-  showDetailedLogs.value = !showDetailedLogs.value
-  await refreshLogs()
+const annualLogCategories = new Set(['年度下载', '年度筛选'])
+function isAnnualLog(item) { return annualLogCategories.has(item.category) }
+const randomLogs = computed(() => (state.value.logs || []).filter(item => !isAnnualLog(item)))
+const annualLogs = computed(() => (state.value.logs || []).filter(isAnnualLog))
+const visibleLogs = computed(() => logSource.value === 'annual' ? annualLogs.value : randomLogs.value)
+const latestRandomLog = computed(() => randomLogs.value[0])
+const latestAnnualLog = computed(() => annualLogs.value[0])
+function logPreview(message) {
+  const singleLine = String(message || '').replace(/\s+/g, ' ').trim()
+  return singleLine.length > 180 ? `${singleLine.slice(0, 180)}…` : singleLine
 }
 async function refreshLogs() {
   logsRefreshing.value = true
@@ -625,7 +631,7 @@ const activeHeaders = [
   { title: '剩余时间', key: 'eta', width: 120 },
 ]
 const logHeaders = [
-  { title: '时间', key: 'created_at', width: 210 },
+  { title: '时间', key: 'created_at', width: 170 },
   { title: '类型', key: 'category', width: 130 },
   { title: '内容', key: 'message' },
 ]
@@ -858,10 +864,8 @@ onUnmounted(() => {
         <VBtn color="info" variant="tonal" @click="openLogs('random')">查看随机日志</VBtn>
         <VBtn variant="text" icon="mdi-refresh" :loading="loading" @click="loadStatus()" />
       </div>
-      <VAlert v-if="state.run_status?.run_id" class="mt-3" type="info" variant="tonal" density="compact">
-        {{ state.run_status.source }} · {{ state.run_status.stage }}：{{ state.run_status.detail }}
-        <span v-if="state.run_status.target">（目标 {{ state.run_status.target }}，已查询 {{ state.run_status.searched || 0 }}，选中 {{ state.run_status.selected || 0 }}，已推送 {{ state.run_status.sent || 0 }}）</span>
-        <span v-if="state.run_status.updated_at && !state.run_status.time_in_detail"> · {{ formatRunTime(state.run_status.updated_at) }}</span>
+      <VAlert v-if="latestRandomLog" class="mt-3" :type="latestRandomLog.level === 'error' ? 'error' : latestRandomLog.level === 'warning' ? 'warning' : 'info'" variant="tonal" density="compact">
+        {{ latestRandomLog.category }}：{{ logPreview(latestRandomLog.message) }} · {{ formatLogTime(latestRandomLog.created_at) }}
       </VAlert>
     </VCard>
     </div>
@@ -889,7 +893,7 @@ onUnmounted(() => {
           <VBtn color="info" variant="tonal" @click="openLogs('annual')">查看年度日志</VBtn>
         </div>
         <div class="text-caption text-medium-emphasis mt-2">{{ summary.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停' }}；每分钟检查空位，单次最多新增 {{ summary.annual_dispatch_count || 5 }} 部。年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}，随机/其他占用 {{ summary.non_annual_occupied_download_slots || 0 }}/{{ summary.max_active_downloads || 10 }}；两边名额互不挤占，硬盘保护与同片去重仍生效。</div>
-        <VAlert v-if="summary.annual_last_check_at" class="mt-3" type="info" variant="tonal" density="compact">年度补位 · 本轮检查完成 · {{ formatRunTime(summary.annual_last_check_at) }}</VAlert>
+        <VAlert v-if="latestAnnualLog" class="mt-3" :type="latestAnnualLog.level === 'error' ? 'error' : latestAnnualLog.level === 'warning' ? 'warning' : 'info'" variant="tonal" density="compact">{{ latestAnnualLog.category }}：{{ logPreview(latestAnnualLog.message) }} · {{ formatLogTime(latestAnnualLog.created_at) }}</VAlert>
         <VAlert v-if="Number(summary.site_cooldown_until) * 1000 > Date.now()" class="mt-3" type="warning" variant="tonal" density="compact">PT 站点限流中，暂停搜索至 {{ formatRunTime(Number(summary.site_cooldown_until) * 1000) }}；候选保留，冷却后自动继续。</VAlert>
       </div>
       <div class="d-flex flex-wrap align-center ga-3 mt-4 mb-3">
@@ -1082,12 +1086,13 @@ onUnmounted(() => {
         <VCardText>
           <div class="d-flex ga-2 mb-3">
             <VTextField v-model="logSearch" label="搜索日志" prepend-inner-icon="mdi-magnify" clearable hide-details />
-            <VBtn v-if="logSource !== 'annual'" :color="showDetailedLogs ? 'primary' : 'secondary'" variant="tonal" :loading="logsRefreshing" class="flex-shrink-0" @click="toggleDetailedLogs">{{ showDetailedLogs ? '详情日志：开' : '详情日志：关' }}</VBtn>
             <VBtn variant="tonal" class="flex-shrink-0" :loading="logsRefreshing" @click="refreshLogs">刷新</VBtn>
             <VBtn color="error" variant="tonal" @click="runAction('clear_logs', { source: logSource })">清空当前日志</VBtn>
           </div>
-          <div class="text-caption text-medium-emphasis mb-2">当前显示 {{ visibleLogs.length }}/{{ sourceLogCount }} 条。{{ logSource === 'annual' ? '显示年度推送、PT 查询、提交与失败记录' : showDetailedLogs ? '含操作、筛选、站点查询、跳过原因、发送结果和定时任务' : '仅显示推送、下载和入库记录；打开详情日志可排查每一步' }}。{{ logsRefreshedAt ? `最近刷新：${logsRefreshedAt}。` : '' }}升级前未记录的步骤无法补写。</div>
-          <VDataTable :headers="logHeaders" :items="visibleLogs" :search="logSearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover />
+          <div class="text-caption text-medium-emphasis mb-2">共 {{ visibleLogs.length }} 条，包含定时任务及运行过程；每 5 秒自动刷新。{{ logsRefreshedAt ? `最近刷新：${logsRefreshedAt}。` : '' }}</div>
+          <VDataTable :headers="logHeaders" :items="visibleLogs" :search="logSearch" :items-per-page="20" :items-per-page-options="pageSizes" density="compact" hover>
+            <template #item.created_at="{ item }"><span class="text-no-wrap">{{ formatLogTime(item.created_at) }}</span></template>
+          </VDataTable>
         </VCardText>
       </VCard>
     </VDialog>
