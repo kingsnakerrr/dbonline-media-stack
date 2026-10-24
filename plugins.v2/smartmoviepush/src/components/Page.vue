@@ -890,6 +890,7 @@ onUnmounted(() => {
         </div>
         <div class="text-caption text-medium-emphasis mt-2">{{ summary.annual_dispatch_enabled ? '年度推送已开启' : '年度推送已暂停' }}；每分钟检查空位，单次最多新增 {{ summary.annual_dispatch_count || 5 }} 部。年度占用 {{ summary.annual_occupied_download_slots || 0 }}/{{ summary.annual_max_active_downloads || 5 }}，随机/其他占用 {{ summary.non_annual_occupied_download_slots || 0 }}/{{ summary.max_active_downloads || 10 }}；两边名额互不挤占，硬盘保护与同片去重仍生效。</div>
         <VAlert v-if="summary.annual_last_check_at" class="mt-3" type="info" variant="tonal" density="compact">年度补位 · 本轮检查完成 · {{ formatRunTime(summary.annual_last_check_at) }}</VAlert>
+        <VAlert v-if="Number(summary.site_cooldown_until) * 1000 > Date.now()" class="mt-3" type="warning" variant="tonal" density="compact">PT 站点限流中，暂停搜索至 {{ formatRunTime(Number(summary.site_cooldown_until) * 1000) }}；候选保留，冷却后自动继续。</VAlert>
       </div>
       <div class="d-flex flex-wrap align-center ga-3 mt-4 mb-3">
         <VCombobox v-model="archiveYear" :items="archiveYearOptions" label="选择或输入年份" type="number" density="compact" hide-details class="monthly-year-select">
@@ -903,7 +904,7 @@ onUnmounted(() => {
       </div>
       <VAlert v-if="annualEntry.scanTask" type="info" variant="tonal" density="compact" class="mt-3">{{ annualEntry.scanTask.scan_progress || '全年扫描中' }}</VAlert>
       <VAlert v-if="annualEntry.failedTask" type="error" variant="tonal" density="compact" class="mt-3">{{ annualEntry.failedTask.scan_error || '扫描中断，请查看年度日志后重试' }}</VAlert>
-      <VAlert v-if="annualEntry.latest" type="info" variant="tonal" density="compact" class="mt-3">年度片单缓存：{{ archiveYear }} 年已保存 {{ annualEntry.movies }} 部电影，已扫描 {{ annualEntry.scans }} 次。这里是名单数量，不是已推送数量；重新打开可直接读取。</VAlert>
+      <VAlert v-if="annualEntry.latest" type="info" variant="tonal" density="compact" class="mt-3">年度片单缓存：{{ archiveYear }} 年已保存 {{ annualEntry.movies }} 部电影，已扫描 {{ annualEntry.scans }} 次。这里是名单数量，不是已推送数量；重新打开可直接读取。<span v-if="annualEntry.latest.scanned_at"> · 最近扫描 {{ formatRunTime(annualEntry.latest.scanned_at) }}</span></VAlert>
     </VCard>
     </div>
 

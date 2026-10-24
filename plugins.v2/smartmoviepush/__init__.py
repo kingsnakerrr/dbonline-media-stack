@@ -55,7 +55,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.74"
+    plugin_version = "0.9.75"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -134,6 +134,8 @@ class SmartMoviePush(_PluginBase):
     _pt_request_lock = threading.RLock()
     _pt_request_log_key = "mteam_search_attempts_24h"
     _pt_annual_request_log_key = "mteam_annual_attempts_24h"
+    _pt_cooldown_key = "mteam_cooldown_until"
+    _pt_annual_daily_limit = 300
     _pt_next_request_at = 0.0
     _pt_cooldown_until = 0.0
     _monthly_tasks_lock = threading.RLock()
@@ -362,6 +364,16 @@ class SmartMoviePush(_PluginBase):
         if self._disk_guard_blocks_new():
             self._append_plugin_log("定时任务", "到达计划时间；硬盘空间保护中，本轮跳过", "warning")
             return
+        if time.time() < float(self.get_data(self._pt_cooldown_key) or 0):
+            self._append_plugin_log("定时任务", "馒头站点限流冷却中，本轮暂停新增搜索", "warning")
+            return
+        # 自动下载已有大量命中过资源的等候项时，先让每分钟队列补空位；
+        # 继续扫描新片只会扩大积压并消耗 PT 站点的搜索机会。
+        if self._auto_download and self._random_download_enabled:
+            queued = sum(item.get("source") != "annual" for item in self._load_download_queue())
+            if queued >= max(self._limit, self._max_active_downloads * 2):
+                self._append_plugin_log("定时任务", f"随机等候下载已有 {queued} 部，暂停新增搜索，优先给现有队列补位")
+                return
         self._append_plugin_log("定时任务", f"到达计划时间，开始筛选；目标 {self._limit} 部")
         self.run_once(limit=self._limit, test_mode=False)
 
@@ -1298,6 +1310,7 @@ class SmartMoviePush(_PluginBase):
                 "random_download_enabled": self._random_download_enabled,
                 "annual_dispatch_enabled": self._annual_dispatch_enabled,
                 "annual_last_check_at": self.get_data(self._annual_last_check_key) or "",
+                "site_cooldown_until": self.get_data(self._pt_cooldown_key) or 0,
                 "annual_dispatch_count": self._annual_dispatch_count,
                 "annual_max_active_downloads": self._annual_max_active_downloads,
                 "cron": self._cron,
@@ -2317,19 +2330,25 @@ class SmartMoviePush(_PluginBase):
         cls = type(self)
         with cls._pt_request_lock:
             now = time.monotonic()
+            wall_now = time.time()
+            try:
+                stored_cooldown = float(self.get_data(self._pt_cooldown_key) or 0)
+            except (TypeError, ValueError):
+                stored_cooldown = 0
+            if wall_now < stored_cooldown:
+                wait_minutes = math.ceil((stored_cooldown - wall_now) / 60)
+                raise PTSearchUnavailable(f"馒头接口仍在限流，请约 {wait_minutes} 分钟后重试")
             if now < cls._pt_cooldown_until:
                 wait_minutes = math.ceil((cls._pt_cooldown_until - now) / 60)
                 raise PTSearchUnavailable(f"馒头接口仍在限流，请约 {wait_minutes} 分钟后重试")
-            # 真实站点限流由接口返回处理；不再用插件的 600 次总闸拦住随机推送。
-            # 年度补位是后台任务，单独限制其消耗，避免长期挤占随机搜索。
-            wall_now = time.time()
+            # 真实站点限流由接口返回处理；年度后台单独限制其消耗。
             attempts = [stamp for stamp in (self.get_data(self._pt_request_log_key) or [])
                         if isinstance(stamp, (int, float)) and wall_now - 86400 < stamp <= wall_now]
             annual_attempts = []
             if purpose == "annual":
                 annual_attempts = [stamp for stamp in (self.get_data(self._pt_annual_request_log_key) or [])
                                    if isinstance(stamp, (int, float)) and wall_now - 86400 < stamp <= wall_now]
-                if len(annual_attempts) >= 200:
+                if len(annual_attempts) >= self._pt_annual_daily_limit:
                     wait_minutes = math.ceil((annual_attempts[0] + 86400 - wall_now) / 60)
                     raise PTSearchUnavailable(f"年度后台搜索已用完本轮额度，请约 {wait_minutes} 分钟后重试")
             delay = cls._pt_next_request_at - now
@@ -2367,6 +2386,7 @@ class SmartMoviePush(_PluginBase):
                 message = str(payload.get("message") or "接口未返回数据") if isinstance(payload, dict) else "接口未返回数据"
                 if "頻繁" in message or "频繁" in message or str(payload.get("code")) == "4":
                     cls._pt_cooldown_until = time.monotonic() + 3600
+                    self.save_data(self._pt_cooldown_key, time.time() + 3600)
                     raise PTSearchUnavailable("馒头接口请求过于频繁，已暂停站点查询 1 小时；不会标记为无资源")
                 raise PTSearchUnavailable(f"馒头接口错误：{message[:100]}；未缓存为无资源")
             rows = data.get("data") or []
@@ -3723,6 +3743,8 @@ class SmartMoviePush(_PluginBase):
             queue = self._load_download_queue()
             if not queue:
                 return
+            if time.time() < float(self.get_data(self._pt_cooldown_key) or 0):
+                return
             try:
                 active_torrents = DownloadChain().downloading() or []
             except Exception as err:
@@ -3737,7 +3759,7 @@ class SmartMoviePush(_PluginBase):
             annual_now = time.time()
             annual_usage = [stamp for stamp in (self.get_data(getattr(self, "_pt_annual_request_log_key", "mteam_annual_attempts_24h")) or [])
                             if isinstance(stamp, (int, float)) and annual_now - 86400 < stamp <= annual_now]
-            if len(annual_usage) >= 200:
+            if len(annual_usage) >= self._pt_annual_daily_limit:
                 annual_slots = 0
             non_annual_slots = (max(0, self._max_active_downloads - non_annual_active)
                                 if self._random_download_enabled else 0)

@@ -112,6 +112,8 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._monthly_batch_lock = threading.Lock()
         self.subject._queue_lock = threading.RLock()
         self.subject._annual_last_check_key = "annual_last_check_at"
+        self.subject._pt_annual_daily_limit = 300
+        self.subject._pt_cooldown_key = "mteam_cooldown_until"
         self.subject._download_queue_key = "download_queue"
         self.subject._no_resource_key = "no_resource_movies"
         self.subject._resource_recheck_key = "no_resource_recheck"
@@ -1133,4 +1135,3 @@ class MonthlyTasksTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

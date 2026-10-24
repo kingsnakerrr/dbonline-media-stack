@@ -72,6 +72,8 @@ class PTSearchTest(unittest.TestCase):
         SearchUnderTest._pt_cooldown_until = 0.0
         SearchUnderTest._pt_request_log_key = "mteam_search_attempts_24h"
         SearchUnderTest._pt_annual_request_log_key = "mteam_annual_attempts_24h"
+        SearchUnderTest._pt_cooldown_key = "mteam_cooldown_until"
+        SearchUnderTest._pt_annual_daily_limit = 300
         self.subject = SearchUnderTest()
         self.data = {}
         self.subject.get_data = lambda key: self.data.get(key)
@@ -98,11 +100,17 @@ class PTSearchTest(unittest.TestCase):
         self.assertEqual(len(self.data[self.subject._pt_request_log_key]), 601)
 
     def test_annual_background_budget_does_not_block_random_search(self):
-        self.data[self.subject._pt_annual_request_log_key] = [time.time() - 10] * 200
+        self.data[self.subject._pt_annual_request_log_key] = [time.time() - 10] * 300
         namespace["response"] = FakeResponse({"code": 0, "data": {"data": []}})
         with self.assertRaisesRegex(PTSearchUnavailable, "年度后台搜索"):
             self.subject._request_mteam_torrents(self.site, "They Will Kill You", purpose="annual")
         self.assertEqual(self.subject._request_mteam_torrents(self.site, "They Will Kill You"), [])
+
+    def test_site_cooldown_survives_plugin_restart(self):
+        self.data[self.subject._pt_cooldown_key] = time.time() + 120
+        namespace["response"] = FakeResponse({"code": 0, "data": {"data": []}})
+        with self.assertRaisesRegex(PTSearchUnavailable, "限流"):
+            self.subject._request_mteam_torrents(self.site, "They Will Kill You")
 
     def test_success_records_attempt(self):
         namespace["response"] = FakeResponse({"code": 0, "data": {"data": []}})
