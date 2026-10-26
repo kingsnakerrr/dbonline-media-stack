@@ -1,6 +1,6 @@
 # 智能下载影视资源_惹咪之北
 
-> 0.9.76：随机、年度首页显示各自最新日志并自动刷新；完整运行日志在各自弹窗中查看，时间统一显示为 `YYYY-MM-DD HH:mm`。
+> 0.9.77：插件错误统一进入插件日志并发送 Telegram；同一错误每 30 分钟最多提醒一次，避免 Emby 等服务故障重复刷屏。
 
 MoviePilot V2 私人电影推荐与下载插件。插件从 TMDB 候选中排除媒体库已有影片，再到所选 PT 站点搜索资源，按 MoviePilot 过滤规则选择结果，可推送到 Telegram 或自动提交下载。
 
@@ -14,6 +14,7 @@ MoviePilot V2 私人电影推荐与下载插件。插件从 TMDB 候选中排除
 - 硬盘剩余空间保护，空间不足时暂停定时与手动推荐、停止新增下载；旧下载和既有等候队列保留
 - 等候下载、不再推送列表支持搜索和分页；首页“下载记录”卡片是唯一入口，点开默认显示全部，可切换今天、昨天、本周、本月、上个月、今年或指定提交日期（含 SQLite 归档），搜索影片或 TMDB ID，按状态查看，默认每页 100 条并可翻页
 - Telegram 推荐、下载按钮、不再推送按钮及每日统计
+- Emby 不可用、下载提交失败、年度处理失败等插件错误记录到插件日志并推送 Telegram；通知包含时间和原因，敏感凭据会遮盖。Telegram 自身发送故障只写插件日志，避免告警递归。
 - Telegram 管理员首次打开独立机器人时点 Open 即可由 `/start` 打开菜单；`/smartmovie` 查看统计，`/smartcontrol` 打开随机定时推送、随机自动下载和年度下载的独立启停按钮，`/smartstatus` 查看队列和下载状态，`/smartdisk` 查看检测盘的容量、已用、剩余和保护阈值，`/help` 查看用法。共享 MoviePilot 机器人也注册了带 `smart` 前缀的命令。暂停只阻止新增自动下载，不中断 qB 已开始的任务；随机手动确认仍可提交。只有配置的 Telegram 管理员可使用这些命令和按钮。统计按任务提交时间归属周期，保留记录不足时会提示可能不完整。
 - 插件下载记录超过近期 1000 条时，较旧任务会自动写入插件数据目录的 SQLite 归档；后台继续核验并写回归档任务的下载、整理和 Emby 状态，周、月、年统计会合并查询。升级前已被旧版本截断的记录无法凭空恢复，统计会标出可核验记录起点。
 - 每日统计每行一部电影，尽量合并为单条 Telegram 消息；已入库影片不加后缀，🟠 表示未完成下载，🟡 表示下载完待整理，🔴 表示整理失败或待入库，超过单条容量才拆分。
@@ -42,12 +43,13 @@ MoviePilot V2 私人电影推荐与下载插件。插件从 TMDB 候选中排除
    cp -a smartmoviepush /opt/docker-compose/moviepilot/config/local-plugins/plugins.v2/
    ```
 
-3. 确认容器实际加载的文件也已更新。当前 `takehost` 部署必须同时复制进容器；只更新宿主机目录不会让页面生效：
+3. 确认容器实际加载的文件也已更新。当前 `takehost` 把插件 Python 文件单独绑定到宿主机的 `overrides/smartmoviepush.py`，而 `dist` 绑定到本地插件目录；请更新绑定源文件，不能对容器里的 `__init__.py` 执行 `docker cp`：
 
    ```bash
-   docker exec moviepilot-v2 mkdir -p /app/app/plugins/smartmoviepush
-   docker cp smartmoviepush/. moviepilot-v2:/app/app/plugins/smartmoviepush/
+   cp smartmoviepush/__init__.py /opt/docker-compose/moviepilot/overrides/smartmoviepush.py
    ```
+
+   若是没有这项绑定的其他部署，才使用 `docker cp smartmoviepush/. moviepilot-v2:/app/app/plugins/smartmoviepush/`。
 
 4. 重启 MoviePilot，并核对容器内的 `plugin_version` 与安装包版本一致：
 

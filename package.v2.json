@@ -2,12 +2,13 @@
   "SmartMoviePush": {
     "name": "智能下载影视资源_惹咪之北",
     "description": "从 TMDB 候选及已选 PT 站点筛选电影，支持 Telegram 推荐、顺序下载、磁盘保护和 Emby 入库核验。",
-    "version": "0.9.76",
+    "version": "0.9.77",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/Telegram_A.png",
     "author": "kingsnakerrr",
     "level": 1,
     "system_version": ">=2.5.7,<3",
     "history": {
+      "v0.9.77": "插件错误统一写入插件日志并发送 Telegram；Emby 连接、下载补位、年度任务等错误含原因与时间，同一错误 30 分钟内限频，Telegram 自身故障只记日志避免递归告警。",
       "v0.9.75": "年度搜索额度提高至 300 次；随机等候队列积压时暂停新增扫描、优先补位；站点实际限流跨重启保留；年度片单与补位提示显示时间及冷却状态。",
       "v0.9.74": "运行中、已完成、已终止及失败状态统一在结果末尾显示北京时间，旧版页面缓存也能显示。",
       "v0.9.73": "移除阻断随机推送的插件 600 次搜索总闸；年度后台搜索独立限额，随机扫描期间年度补位让路，站点实际限流仍暂停。",

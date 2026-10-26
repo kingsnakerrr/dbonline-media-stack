@@ -55,7 +55,7 @@ class SmartMoviePush(_PluginBase):
     plugin_name = "智能下载影视资源_惹咪之北"
     plugin_desc = "从新片、近期口碑、经典热门和随机发现中筛选影视资源并推送或自动下载。"
     plugin_icon = "Telegram_A.png"
-    plugin_version = "0.9.76"
+    plugin_version = "0.9.77"
     plugin_author = "kingsnakerrr"
     author_url = "https://github.com/kingsnakerrr"
     plugin_config_prefix = "smartmoviepush_"
@@ -117,6 +117,8 @@ class SmartMoviePush(_PluginBase):
     _resource_recheck_lock = threading.Lock()
     _download_history_key = "download_history"
     _plugin_logs_key = "plugin_logs"
+    _error_alerts_key = "error_alerts"
+    _error_alert_lock = threading.RLock()
     _run_status_key = "run_status"
     _annual_last_check_key = "annual_last_check_at"
     _daily_summary_key = "daily_completion_summary"
@@ -743,7 +745,7 @@ class SmartMoviePush(_PluginBase):
                     disable_web_page_preview=True,
                 )
                 if not source or not result:
-                    logger.error("电影推荐立即运行失败通知未送达 Telegram，请检查机器人和目标频道权限")
+                    self._report_error("Telegram", "电影推荐立即运行失败通知未送达 Telegram，请检查机器人和目标频道权限", notify=False)
                 logger.warning(f"立即运行前置保护拦截：{blocked_message}")
                 return {"success": False, "message": blocked_message}
         threading.Thread(target=self.run_once,
@@ -905,7 +907,7 @@ class SmartMoviePush(_PluginBase):
                     with db:
                         db.execute("DELETE FROM history_archive")
         except Exception as err:
-            logger.error(f"清理本插件历史归档失败：{err}")
+            self._report_error("历史归档", f"清理本插件历史归档失败：{err}")
             return {"success": False, "message": "清理历史归档失败，近期记录未清空；请检查插件日志"}
         self.save_data(self._download_history_key, [])
         return {"success": True, "message": f"已清空 {count} 条下载记录"}
@@ -1035,7 +1037,7 @@ class SmartMoviePush(_PluginBase):
             return self._disk_free_bytes() <= self._disk_guard_threshold_gb * (1024 ** 3)
         except Exception as err:
             # 无法读磁盘时宁可等候，也不能继续把未知状态的磁盘写满。
-            logger.error(f"硬盘保护无法读取 {self._disk_guard_path}：{err}")
+            self._report_error("硬盘保护", f"硬盘保护无法读取 {self._disk_guard_path}：{err}")
             return True
 
     @staticmethod
@@ -1078,7 +1080,7 @@ class SmartMoviePush(_PluginBase):
             )
             return bool(result)
         except Exception as err:
-            logger.error(f"发送硬盘保护 Telegram 告警失败：{err}")
+            self._report_error("Telegram", f"发送硬盘保护 Telegram 告警失败：{err}", notify=False)
             return False
 
     def disk_guard_tick(self, force_alert: bool = False) -> None:
@@ -1097,7 +1099,7 @@ class SmartMoviePush(_PluginBase):
                 state["last_checked_at"] = now.isoformat(timespec="seconds")
                 state["last_error"] = str(err)
                 self.save_data(self._disk_guard_state_key, state)
-                logger.error(f"硬盘保护检查失败：{err}")
+                self._report_error("硬盘保护", f"硬盘保护检查失败：{err}")
                 return
 
             threshold = self._disk_guard_threshold_gb * (1024 ** 3)
@@ -1165,9 +1167,9 @@ class SmartMoviePush(_PluginBase):
                         )
                     except Exception as err:
                         stopped = False
-                        logger.error(f"硬盘保护暂停种子异常：{waiting[torrent_hash]['title']}：{err}")
+                        self._report_error("硬盘保护", f"硬盘保护暂停种子异常：{waiting[torrent_hash]['title']}：{err}")
                     if not stopped:
-                        logger.error(f"硬盘保护暂停种子失败：{waiting[torrent_hash]['title']} ({torrent_hash})")
+                        self._report_error("硬盘保护", f"硬盘保护暂停种子失败：{waiting[torrent_hash]['title']} ({torrent_hash})")
 
             state.update({
                 "waiting": list(waiting.values()),
@@ -2644,7 +2646,7 @@ class SmartMoviePush(_PluginBase):
                             self._monthly_batch_job["queued"] += 1
                     except Exception as err:
                         self._monthly_batch_job["errors"] += 1
-                        logger.error(f"年度候选登记 {movie_id} 失败：{err}", exc_info=True)
+                        self._report_error("年度候选", f"年度候选登记 {movie_id} 失败：{err}", exc_info=True)
                     finally:
                         self._monthly_batch_job["done"] += 1
                 if self._monthly_batch_job["queued"]:
@@ -2702,7 +2704,7 @@ class SmartMoviePush(_PluginBase):
                     self._save_monthly_archive(task, candidates)
                     self._update_monthly_task(str(task["id"]), candidates=candidates, scan_key=key)
         except Exception as err:
-            logger.error(f"迁移月份名单归档失败：{type(err).__name__}：{err}")
+            self._report_error("月份筛选", f"迁移月份名单归档失败：{type(err).__name__}：{err}")
 
     def _scan_monthly_task(self, task_id: str) -> None:
         """按首映年或月翻页，使用 TMDB 中文发现结果建立候选名单。"""
@@ -3100,7 +3102,7 @@ class SmartMoviePush(_PluginBase):
                             )
             except Exception as err:
                 # 归档失败时宁可暂时放大 MP 记录，也不丢失淘汰的任务。
-                logger.error(f"归档本插件历史下载记录失败，暂不截断：{err}")
+                self._report_error("历史归档", f"归档本插件历史下载记录失败，暂不截断：{err}")
                 self.save_data(self._download_history_key, history)
                 return
         self.save_data(self._download_history_key, history[-1000:])
@@ -3114,7 +3116,7 @@ class SmartMoviePush(_PluginBase):
             active_ids = {str(item.get("record_uid")) for item in active if item.get("record_uid")}
             return [item for item in older if str(item.get("record_uid")) not in active_ids] + active
         except Exception as err:
-            logger.error(f"读取本插件历史归档失败，统计仅含近期记录：{err}")
+            self._report_error("历史归档", f"读取本插件历史归档失败，统计仅含近期记录：{err}")
             return active
 
     def _save_reconciled_history(self, changed_items: List[dict]) -> None:
@@ -3124,7 +3126,7 @@ class SmartMoviePush(_PluginBase):
         changes = {str(item.get("record_uid")): item for item in changed_items
                    if item.get("record_uid")}
         if not changes:
-            logger.error("核验记录缺少 record_uid，无法安全写回历史")
+            self._report_error("历史核验", "核验记录缺少 record_uid，无法安全写回历史")
             return
         active = self._load_download_history()
         active_ids = {str(item.get("record_uid")) for item in active if item.get("record_uid")}
@@ -3148,7 +3150,7 @@ class SmartMoviePush(_PluginBase):
                                  for item in archived],
                             )
             except Exception as err:
-                logger.error(f"写回归档下载状态失败：{err}")
+                self._report_error("历史归档", f"写回归档下载状态失败：{err}")
 
     def _history_total_count(self, active: Optional[List[dict]] = None) -> int:
         active = active if active is not None else self._load_download_history()
@@ -3158,7 +3160,7 @@ class SmartMoviePush(_PluginBase):
                     archived = int(db.execute("SELECT COUNT(*) FROM history_archive").fetchone()[0])
             return len(active) + archived
         except Exception as err:
-            logger.error(f"读取本插件历史总数失败：{err}")
+            self._report_error("历史归档", f"读取本插件历史总数失败：{err}")
             return len(active)
 
     def _migrate_legacy_organized_history(self) -> None:
@@ -3184,16 +3186,71 @@ class SmartMoviePush(_PluginBase):
         value = self.get_data(self._plugin_logs_key)
         return value if isinstance(value, list) else []
 
-    def _append_plugin_log(self, category: str, message: str, level: str = "info") -> None:
+    def _append_plugin_log(self, category: str, message: str, level: str = "info",
+                           notify: bool = True) -> None:
+        message = self._safe_error_text(message) if level == "error" else str(message or "")
         with self._plugin_log_lock:
             logs = self._load_plugin_logs()
             logs.append({
                 "created_at": datetime.now(tz=pytz.timezone(settings.TZ)).isoformat(timespec="seconds"),
                 "category": str(category or "运行"),
-                "message": str(message or ""),
+                "message": message,
                 "level": str(level or "info"),
             })
             self.save_data(self._plugin_logs_key, logs[-1000:])
+        if level == "error" and notify:
+            self._notify_plugin_error(str(category or "运行"), message)
+
+    @staticmethod
+    def _safe_error_text(message: Any) -> str:
+        """Exception messages can contain service URLs with credentials."""
+        text = str(message or "")
+        text = re.sub(r"(?i)([?&](?:api[_-]?key|token|password|passwd|secret|auth|authorization)=)[^\s&#]+",
+                      r"\1[REDACTED]", text)
+        text = re.sub(r"(?i)(\b(?:api[_-]?key|token|password|passwd|secret|authorization)\s*[:=]\s*)[^\s,;]+",
+                      r"\1[REDACTED]", text)
+        return text[:1200]
+
+    def _notify_plugin_error(self, category: str, message: str) -> None:
+        """Send one TG alert per distinct error in 30 minutes; keep every occurrence in plugin logs."""
+        signature = hashlib.sha256(f"{category}\n{message}".encode("utf-8")).hexdigest()
+        now = time.time()
+        try:
+            with self._error_alert_lock:
+                alerts = self.get_data(self._error_alerts_key)
+                alerts = alerts if isinstance(alerts, dict) else {}
+                previous = alerts.get(signature)
+                if isinstance(previous, (int, float)) and now - previous < 1800:
+                    return
+                alerts = {key: stamp for key, stamp in alerts.items()
+                          if isinstance(stamp, (int, float)) and now - stamp < 1800}
+                alerts[signature] = now
+                self.save_data(self._error_alerts_key, alerts)
+        except Exception as err:
+            logger.warning(f"保存智能下载插件错误告警限频状态失败：{type(err).__name__}")
+
+        def send_alert() -> None:
+            try:
+                _, result = self._send_telegram_direct(
+                    title="⚠️ 智能下载插件错误",
+                    text=(f"时间：{datetime.now(tz=pytz.timezone(settings.TZ)):%Y-%m-%d %H:%M}\n"
+                          f"位置：{category}\n原因：{message}"),
+                    userid=self._telegram_target(),
+                )
+                if not result:
+                    logger.warning("智能下载插件错误告警未送达 Telegram；错误已保留在插件日志")
+            except Exception as err:
+                logger.warning(f"智能下载插件错误告警发送失败：{type(err).__name__}")
+
+        threading.Thread(target=send_alert, daemon=True, name="smartmoviepush-error-alert").start()
+
+    def _report_error(self, category: str, message: str, exc_info: bool = False,
+                      notify: bool = True) -> None:
+        logger.error(self._safe_error_text(message), exc_info=exc_info)
+        try:
+            self._append_plugin_log(category, message, "error", notify=notify)
+        except Exception as err:
+            logger.warning(f"智能下载插件错误未能写入插件日志：{type(err).__name__}")
 
     def _set_run_status(self, run_id: str, source: str, stage: str,
                         detail: str = "", **counts: Any) -> None:
@@ -3297,7 +3354,7 @@ class SmartMoviePush(_PluginBase):
             logger.info(f"智能电影推荐历史补录完成：匹配 {len(records)} 条，新增 {added} 条")
             return {"success": True, "added": added, "total": len(history[-1000:])}
         except Exception as err:
-            logger.error(f"智能电影推荐历史补录失败：{err}")
+            self._report_error("历史补录", f"智能电影推荐历史补录失败：{err}")
             return {"success": False, "added": 0, "total": len(self._load_download_history()), "error": str(err)}
 
     def _active_download_count(self) -> int:
@@ -3306,7 +3363,7 @@ class SmartMoviePush(_PluginBase):
             return len(DownloadChain().downloading() or [])
         except Exception as err:
             # 读取失败时按已满处理，避免失联期间无限向下载器提交。
-            logger.error(f"读取 MoviePilot 正在下载任务失败：{err}")
+            self._report_error("下载核验", f"读取 MoviePilot 正在下载任务失败：{err}")
             return self._max_active_downloads
 
     def _active_download_counts(self, torrents: Optional[List[Any]] = None,
@@ -3333,7 +3390,7 @@ class SmartMoviePush(_PluginBase):
                     annual += 1
             return annual, len(torrents) - annual
         except Exception as err:
-            logger.error(f"无法区分年度与随机下载任务，暂停新增：{err}")
+            self._report_error("下载核验", f"无法区分年度与随机下载任务，暂停新增：{err}")
             return self._annual_max_active_downloads, self._max_active_downloads
 
     @staticmethod
@@ -3479,7 +3536,7 @@ class SmartMoviePush(_PluginBase):
                 })
             return len(items), items
         except Exception as err:
-            logger.error(f"读取 MoviePilot 正在下载详情失败：{err}")
+            self._report_error("下载核验", f"读取 MoviePilot 正在下载详情失败：{err}")
             return 0, []
 
     def _enqueue_download(self, media: MediaInfo, context: Context,
@@ -3905,9 +3962,8 @@ class SmartMoviePush(_PluginBase):
                             break
                     # 后续候选若成功，会重新读取队列并保存；先落盘以免覆盖本片的重试状态。
                     self.save_data(self._download_queue_key, remaining)
-                    logger.error(f"顺序下载队列提交失败：{item.get('title')}：{err}")
-                    if is_annual:
-                        self._append_plugin_log("年度下载", f"{item.get('title')} 提交失败：{err}", "error")
+                    self._report_error("年度下载" if is_annual else "随机下载",
+                                       f"顺序下载队列提交失败：{item.get('title')}：{err}")
                     # 影片级失败不阻挡队列后面的候选。
             self.save_data(self._download_queue_key, remaining)
             if submitted:
@@ -4011,7 +4067,7 @@ class SmartMoviePush(_PluginBase):
                         "original_chat_id": str(call.message.chat.id),
                     }))
                 except Exception as err:
-                    logger.error(f"处理插件专用 Telegram 按钮失败：{err}")
+                    self._report_error("Telegram 控制", f"处理插件专用 Telegram 按钮失败：{err}")
 
             @bot.message_handler(commands=["start", "smartmovie", "smartcontrol", "smartstatus", "smartdisk", "help"])
             def handle_plugin_command(message):
@@ -4054,7 +4110,7 @@ class SmartMoviePush(_PluginBase):
                 try:
                     bot.infinity_polling(skip_pending=False, long_polling_timeout=20)
                 except Exception as err:
-                    logger.error(f"插件专用 Telegram 接收服务停止：{err}")
+                    self._report_error("Telegram", f"插件专用 Telegram 接收服务停止：{err}", notify=False)
 
             thread = threading.Thread(target=poll, daemon=True, name="SmartMoviePushTelegram")
             with self._custom_telegram_lock:
@@ -4063,7 +4119,7 @@ class SmartMoviePush(_PluginBase):
                 self._custom_telegram_thread = thread
             thread.start()
         except Exception as err:
-            logger.error(f"启动插件专用 Telegram 机器人失败：{err}")
+            self._report_error("Telegram", f"启动插件专用 Telegram 机器人失败：{err}", notify=False)
 
     def _telegram_delivery_warning(self) -> str:
         target = self._telegram_target()
@@ -4120,7 +4176,7 @@ class SmartMoviePush(_PluginBase):
                                         reply_markup=markup, disable_web_page_preview=True)
             return {"success": True, "message_id": sent.message_id, "chat_id": sent.chat.id}
         except Exception as err:
-            logger.error(f"插件专用 Telegram 发送失败：{err}")
+            self._report_error("Telegram", f"插件专用 Telegram 发送失败：{err}", notify=False)
             return None
 
     def _send_telegram_direct(self, **kwargs) -> Tuple[Optional[str], Optional[dict]]:
@@ -4252,7 +4308,7 @@ class SmartMoviePush(_PluginBase):
                     shutil.move(str(target_path), str(destination))
                     quarantine_path = str(destination)
             except (OSError, ValueError) as err:
-                logger.error(f"错片隔离失败：{target_path}：{err}")
+                self._report_error("错片隔离", f"错片隔离失败：{target_path}：{err}")
 
             actual_title = getattr(media, "title_year", None) if media else f"TMDB {actual_tmdb_id}"
             history_item["status"] = "identity_conflict"
@@ -4388,6 +4444,7 @@ class SmartMoviePush(_PluginBase):
                    if getattr(conf, "enabled", False) and getattr(conf, "type", "") == "emby"]
         names = tuple(sorted(str(name) for name, _ in servers))
         if not servers:
+            self._append_plugin_log("Emby", "没有已启用的 Emby 服务器，随机和年度补位已暂停", "error")
             return None
         with self._library_snapshot_lock:
             if (not force and self._library_snapshot
@@ -4399,10 +4456,10 @@ class SmartMoviePush(_PluginBase):
             try:
                 indexes.append((name, *self._emby_index_for_server(conf.config or {})))
             except Exception as err:
-                logger.warning(f"预取 Emby 电影索引失败：{name}：{type(err).__name__}；回退逐部核验")
+                self._report_error("Emby", f"预取 Emby 电影索引失败：{name}：{type(err).__name__}：{err}；随机和年度补位暂停")
                 return None
         if not any(by_tmdb or by_title_year for _, by_tmdb, by_title_year in indexes):
-            logger.warning("Emby 返回空电影目录，本轮回退 MoviePilot 逐部核验")
+            self._report_error("Emby", "Emby 返回空电影目录；随机和年度补位暂停，请检查服务器地址与权限")
             return None
         self._remember_library_snapshot(indexes, list(names))
         with self._library_snapshot_lock:
@@ -4432,7 +4489,7 @@ class SmartMoviePush(_PluginBase):
         servers = [(name, conf) for name, conf in (configs or {}).items()
                    if getattr(conf, "enabled", False) and getattr(conf, "type", "") == "emby"]
         if not servers:
-            logger.warning("Emby 入库核验暂不可用：没有已启用的 Emby 服务器")
+            self._report_error("Emby", "Emby 入库核验暂不可用：没有已启用的 Emby 服务器")
             return 0
         indexes = []
         for name, conf in servers:
@@ -4440,14 +4497,13 @@ class SmartMoviePush(_PluginBase):
                 by_tmdb, by_title_year = self._emby_index_for_server(conf.config or {})
                 indexes.append((name, by_tmdb, by_title_year))
             except Exception as err:
-                # 不把含 API Key 的请求地址写进日志。
-                logger.warning(f"读取 Emby 电影索引失败：{name}：{type(err).__name__}")
+                self._report_error("Emby", f"读取 Emby 电影索引失败：{name}：{type(err).__name__}：{err}")
         if not indexes:
             return 0
         if all(not by_tmdb and not by_title_year for _, by_tmdb, by_title_year in indexes) and any(
             item.get("emby_ingested_at") for item in history
         ):
-            logger.warning("Emby 返回空电影目录，但插件此前已有入库记录；本轮不清除标记也不发送日报")
+            self._report_error("Emby", "Emby 返回空电影目录，但插件此前已有入库记录；本轮不清除标记也不发送日报")
             return 0
         all_servers_loaded = len(indexes) == len(servers)
         self._last_emby_check_ok = all_servers_loaded
@@ -4605,7 +4661,7 @@ class SmartMoviePush(_PluginBase):
                 disable_web_page_preview=True,
             )
             if not source or not result:
-                logger.error(f"每日电影统计第 {message_number + 1}/{len(messages)} 页未送达 Telegram")
+                self._report_error("Telegram", f"每日电影统计第 {message_number + 1}/{len(messages)} 页未送达 Telegram", notify=False)
                 self.save_data(self._daily_summary_key, {
                     "date": summary_date, "count": len(submitted), "downloaded_count": downloaded_count,
                     "organized_count": organized_count, "completed_count": ingested_count,
@@ -4699,7 +4755,7 @@ class SmartMoviePush(_PluginBase):
         source, result = self._send_telegram_direct(title=title, text=text,
                                                     userid=str(chat_id or self._telegram_target() or ""))
         if not result:
-            logger.error(f"Telegram 按钮反馈未送达：{title}")
+            self._report_error("Telegram", f"Telegram 按钮反馈未送达：{title}", notify=False)
         else:
             self._delete_telegram_reply_later(source, result, seconds=seconds)
 
@@ -4724,7 +4780,7 @@ class SmartMoviePush(_PluginBase):
             userid=chat_id, buttons=buttons,
         )
         if not result:
-            logger.error("Telegram 统计菜单未送达")
+            self._report_error("Telegram", "Telegram 统计菜单未送达", notify=False)
         else:
             self._delete_telegram_reply_later(source, result)
 
@@ -4803,7 +4859,7 @@ class SmartMoviePush(_PluginBase):
         if result:
             self._delete_telegram_reply_later(source, result, seconds=120)
         else:
-            logger.error("Telegram 任务控制菜单未送达")
+            self._report_error("Telegram", "Telegram 任务控制菜单未送达", notify=False)
 
     def _telegram_control_action(self, key: str) -> str:
         if key not in {"push_start", "push_stop", "random_start", "random_stop", "annual_start", "annual_stop"}:
@@ -5023,9 +5079,9 @@ class SmartMoviePush(_PluginBase):
             if self._disk_guard_blocks_new():
                 return False, False
             if not allow_queue:
-                logger.error(f"立即运行提交 {media.title_year} 失败且不排队：{error or '未知错误'}")
+                self._report_error("随机下载", f"立即运行提交 {media.title_year} 失败且不排队：{error or '未知错误'}")
                 return False, False
-            logger.error(f"自动下载 {media.title_year} 暂时失败，转入队列：{error or '未知错误'}")
+            self._report_error("随机下载", f"自动下载 {media.title_year} 暂时失败，转入队列：{error or '未知错误'}")
             if not self._enqueue_download(media, context, source=source):
                 return False, False
             self._push_movie(media, context, queued=True)
@@ -5318,7 +5374,7 @@ class SmartMoviePush(_PluginBase):
                         disable_web_page_preview=True,
                     )
                     if not source or not result:
-                        logger.error("立即运行受限通知未送达 Telegram，请检查机器人和目标频道权限")
+                        self._report_error("Telegram", "立即运行受限通知未送达 Telegram，请检查机器人和目标频道权限", notify=False)
                     logger.warning(notice.replace("\n", " "))
             else:
                 send_batch()
@@ -5337,7 +5393,7 @@ class SmartMoviePush(_PluginBase):
                 )
                 if not result:
                     trace("通知失败", "无候选结果的 Telegram 通知未送达", "warning")
-                    logger.error("本轮未选出电影的通知未送达 Telegram")
+                    self._report_error("Telegram", "本轮未选出电影的通知未送达 Telegram", notify=False)
         except Exception as err:
             trace("运行异常", f"{type(err).__name__}：{err}", "error")
             self._set_run_status(run_id, source, "运行失败", str(err)[:300])
@@ -5406,7 +5462,7 @@ class SmartMoviePush(_PluginBase):
                 sent_source, result = self._send_telegram_direct(
                     title=title, text=body, userid=target, parse_mode="HTML")
                 if not result:
-                    logger.error(f"Telegram 统计结果未送达：{key}")
+                    self._report_error("Telegram", f"Telegram 统计结果未送达：{key}", notify=False)
                     break
                 self._delete_telegram_reply_later(sent_source, result, seconds=600)
             return

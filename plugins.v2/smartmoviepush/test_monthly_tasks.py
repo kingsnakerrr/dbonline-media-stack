@@ -133,6 +133,7 @@ class MonthlyTasksTest(unittest.TestCase):
         self.subject._load_stats_history = lambda: []
         self.logs = []
         self.subject._append_plugin_log = lambda *args: self.logs.append(args)
+        self.subject._report_error = lambda category, message, **_kwargs: self.logs.append((category, message, "error"))
         self.subject._search_site_contexts = lambda movie_id, **_kwargs: namespace["SearchChain"]().search_by_id(
             tmdbid=movie_id, mtype=namespace["MediaType"].MOVIE,
             sites=getattr(self.subject, "_site_ids", [1]), cache_local=False) or []
