@@ -4,6 +4,17 @@ import { getTaskRuns, getOutputLogs, deleteOutputLog, cleanOutputLogs } from '..
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
 
+const errorDisplay = (value) => {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (raw === 'signal: killed') {
+    return { summary: '进程被强制终止（历史记录无法确认是否爆内存）', detail: raw };
+  }
+  const marker = raw.indexOf('（原始错误：');
+  if (marker > -1) return { summary: raw.slice(0, marker), detail: raw.slice(marker + 1, -1) };
+  return { summary: raw, detail: '' };
+};
+
 const Logs = () => {
   const [activeTab, setActiveTab] = useState('records');
   const [taskRuns, setTaskRuns] = useState([]);
@@ -707,7 +718,10 @@ const Logs = () => {
                             <span className="font-medium text-gray-800">{formatTransferSpeed(run.peak_speed)}</span>
                           </div>
                         </div>
-                        {run.error && <div className="mt-3 text-xs text-red-600 bg-red-50 rounded-lg p-2 break-all">{run.error}</div>}
+                        {run.error && <div className="mt-3 text-xs text-red-700 bg-red-50 rounded-lg p-2 break-all">
+                          <div className="font-medium">{errorDisplay(run.error).summary}</div>
+                          {errorDisplay(run.error).detail && <details className="mt-1 text-red-600"><summary className="cursor-pointer">查看原始报错</summary><div className="mt-1">{errorDisplay(run.error).detail}</div></details>}
+                        </div>}
                       </div>
                     );
                   })}

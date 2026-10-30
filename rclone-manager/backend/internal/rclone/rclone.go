@@ -90,6 +90,8 @@ type activeRunMetrics struct {
 type runObserver struct {
 	mu         sync.Mutex
 	limitError string
+	lastError  string
+	killOnLimit bool
 	cmd        *exec.Cmd
 }
 
@@ -115,17 +117,33 @@ func (o *runObserver) setCmd(cmd *exec.Cmd) {
 }
 
 func (o *runObserver) observe(line string) {
-	if o == nil || !isRotationLimitError(line) {
+	if o == nil {
 		return
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.limitError == "" {
+	trimmed := strings.TrimSpace(line)
+	if isUsefulRcloneError(trimmed) {
+		if len(trimmed) > 500 {
+			trimmed = trimmed[:500]
+		}
+		o.lastError = trimmed
+	}
+	if o.killOnLimit && o.limitError == "" && isRotationLimitError(line) {
 		o.limitError = strings.TrimSpace(line)
 		if o.cmd != nil && o.cmd.Process != nil {
 			_ = o.cmd.Process.Kill()
 		}
 	}
+}
+
+func (o *runObserver) LastError() string {
+	if o == nil {
+		return ""
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.lastError
 }
 
 func (o *runObserver) LimitError() string {
@@ -820,6 +838,8 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 	logOffset := taskLogOffset(logFile)
 
 	cmd := exec.Command("rclone", args...)
+	observer := &runObserver{}
+	oomBefore, oomReadable := readOOMKillCount()
 
 	// Setup output pipes
 	stdout, err := cmd.StdoutPipe()
@@ -846,8 +866,10 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 	// pipe buffer and WebSocket / log file get nothing.
 	// os.File.WriteString is concurrency-safe at the kernel level, so both
 	// goroutines can write to the same log file safely.
-	go e.streamOutput(task, stdout, f, "stdout", nil)
-	go e.streamOutput(task, stderr, f, "stderr", nil)
+	var outputReaders sync.WaitGroup
+	outputReaders.Add(2)
+	go func() { defer outputReaders.Done(); e.streamOutput(task, stdout, f, "stdout", observer) }()
+	go func() { defer outputReaders.Done(); e.streamOutput(task, stderr, f, "stderr", observer) }()
 
 	// Start progress polling goroutine
 	stopProgress := make(chan struct{})
@@ -887,6 +909,10 @@ func (e *Executor) ExecuteMoveWithCallback(task *models.Task, callback Completio
 	// Wait for completion
 	go func() {
 		err := cmd.Wait()
+		outputReaders.Wait()
+		if err != nil {
+			err = describeRcloneFailure(err, observer.LastError(), oomBefore, oomReadable)
+		}
 		success := err == nil
 		f.Close()
 		defer func() {
@@ -1105,7 +1131,7 @@ func (e *Executor) runRotation(taskID uint, generation uint64, callback Completi
 }
 
 func (e *Executor) runRcloneBlocking(task *models.Task, generation uint64) (*runObserver, error) {
-	observer := &runObserver{}
+	observer := &runObserver{killOnLimit: true}
 	if !e.hasRunningEntry(task.ID, generation) {
 		return observer, errTaskStopped
 	}
@@ -1149,6 +1175,7 @@ func (e *Executor) runRcloneBlocking(task *models.Task, generation uint64) (*run
 	logFile := filepath.Join(logger.GetLogDir(), fmt.Sprintf("task_%d.log", task.ID))
 	logOffset := taskLogOffset(logFile)
 	cmd := exec.Command("rclone", args...)
+	oomBefore, oomReadable := readOOMKillCount()
 	observer.setCmd(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -1164,8 +1191,10 @@ func (e *Executor) runRcloneBlocking(task *models.Task, generation uint64) (*run
 	}
 	defer f.Close()
 
-	go e.streamOutput(task, stdout, f, "stdout", observer)
-	go e.streamOutput(task, stderr, f, "stderr", observer)
+	var outputReaders sync.WaitGroup
+	outputReaders.Add(2)
+	go func() { defer outputReaders.Done(); e.streamOutput(task, stdout, f, "stdout", observer) }()
+	go func() { defer outputReaders.Done(); e.streamOutput(task, stderr, f, "stderr", observer) }()
 
 	stopProgress := make(chan struct{})
 	go e.pollProgress(task, stopProgress)
@@ -1176,6 +1205,10 @@ func (e *Executor) runRcloneBlocking(task *models.Task, generation uint64) (*run
 	}
 
 	err = cmd.Wait()
+	outputReaders.Wait()
+	if err != nil && observer.LimitError() == "" {
+		err = describeRcloneFailure(err, observer.LastError(), oomBefore, oomReadable)
+	}
 	close(stopProgress)
 
 	if e.hasRunningEntry(task.ID, generation) {

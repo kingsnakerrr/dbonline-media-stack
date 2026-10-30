@@ -43,14 +43,18 @@
     }
   },
   "RcloneManager": {
-    "name": "Rclone 管理",
-    "description": "在 MoviePilot V2 内创建、执行和监控 Rclone 任务，无需独立管理服务。",
-    "version": "0.1.0",
+    "name": "Rclone Manager 控制台",
+    "description": "监控独立 Rclone Manager 的实时传输，并启动、停止或跳转原管理界面。",
+    "version": "0.3.4",
     "icon": "https://rclone.org/img/rclone-32x32.png",
     "author": "kingsnakerrr",
     "level": 1,
     "system_version": ">=2.5.7,<3",
     "history": {
+      "v0.3.4": "联动独立管理器的新错误记录：已确认的 OOM 与原因未确认的强制终止分开显示；其他传输错误显示简短原因，详情仍在原管理器日志中。",
+      "v0.3.3": "公开发布控制台，自动使用当前主机链接；实时传输弹窗可选 20/50/100/1000 条，任务状态显示中文和简短错误提示。",
+      "v0.3.0": "增加未安装时的一键安装和安装后的卸载按钮；复用本机镜像，卸载只移除容器、保留镜像及任务数据；提示 signal: killed 的内存风险。",
+      "v0.2.0": "改为独立 Rclone Manager 控制台：服务启动/停止、实时传输和任务状态、原站跳转；不再在 MoviePilot 内创建传输任务。",
       "v0.1.0": "原生任务管理、定时与目录监控、日志、云盘挂载、目录浏览、OpenList 刷新及旧任务导入。"
     }
   }
