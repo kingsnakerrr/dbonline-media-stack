@@ -1,0 +1,131 @@
+/* Dark palette for the existing utility-based pages. The light palette is
+   untouched, and the toggle only adds/removes theme-dark on <html>. */
+html.theme-dark,
+html.theme-dark body {
+  background: #0f172a;
+  color: #e2e8f0;
+}
+
+html.theme-dark .bg-white { background-color: #1e293b; }
+html.theme-dark .bg-gray-50,
+html.theme-dark .bg-slate-50 { background-color: #0f172a; }
+html.theme-dark .bg-gray-100,
+html.theme-dark .bg-slate-100 { background-color: #273449; }
+html.theme-dark .bg-gray-200 { background-color: #334155; }
+
+html.theme-dark .bg-blue-50,
+html.theme-dark [class~="bg-blue-50/40"],
+html.theme-dark [class~="bg-blue-50/50"],
+html.theme-dark .bg-blue-100 { background-color: #172d4a; }
+html.theme-dark .bg-green-50,
+html.theme-dark [class~="bg-green-50/70"],
+html.theme-dark .bg-green-100,
+html.theme-dark .bg-emerald-100 { background-color: #173b35; }
+html.theme-dark .bg-red-50,
+html.theme-dark [class~="bg-red-50/80"],
+html.theme-dark .bg-red-100 { background-color: #432832; }
+html.theme-dark .bg-yellow-50,
+html.theme-dark [class~="bg-yellow-50/80"],
+html.theme-dark .bg-yellow-100,
+html.theme-dark .bg-amber-50,
+html.theme-dark .bg-amber-100 { background-color: #423524; }
+html.theme-dark .bg-purple-50,
+html.theme-dark .bg-purple-100,
+html.theme-dark .bg-violet-100 { background-color: #34284d; }
+html.theme-dark .bg-orange-100 { background-color: #473023; }
+html.theme-dark .bg-sky-100 { background-color: #173648; }
+html.theme-dark [class~="bg-gray-50/60"] { background-color: #1a2638; }
+
+html.theme-dark .text-gray-900 { color: #f8fafc; }
+html.theme-dark .text-gray-800 { color: #e2e8f0; }
+html.theme-dark .text-gray-700,
+html.theme-dark .text-gray-600 { color: #cbd5e1; }
+html.theme-dark .text-gray-500,
+html.theme-dark .text-slate-500 { color: #a8b6ca; }
+html.theme-dark .text-gray-400 { color: #94a3b8; }
+html.theme-dark .text-gray-300 { color: #a8b6ca; }
+html.theme-dark .text-slate-600,
+html.theme-dark .text-slate-700 { color: #cbd5e1; }
+html.theme-dark .text-blue-700,
+html.theme-dark .text-blue-800,
+html.theme-dark .text-sky-700 { color: #93c5fd; }
+html.theme-dark .text-blue-600,
+html.theme-dark .text-sky-600 { color: #60a5fa; }
+html.theme-dark .text-green-700,
+html.theme-dark .text-emerald-700 { color: #86efac; }
+html.theme-dark .text-green-600 { color: #4ade80; }
+html.theme-dark .text-red-700 { color: #fca5a5; }
+html.theme-dark .text-red-600 { color: #f87171; }
+html.theme-dark .text-yellow-700,
+html.theme-dark .text-amber-700,
+html.theme-dark .text-amber-800,
+html.theme-dark .text-amber-900 { color: #fcd34d; }
+html.theme-dark .text-yellow-600,
+html.theme-dark .text-amber-600 { color: #fbbf24; }
+html.theme-dark .text-purple-700,
+html.theme-dark .text-violet-700 { color: #c4b5fd; }
+html.theme-dark .text-purple-600 { color: #a78bfa; }
+html.theme-dark .text-orange-700 { color: #fdba74; }
+
+html.theme-dark .border,
+html.theme-dark .border-b,
+html.theme-dark .border-t,
+html.theme-dark .border-r,
+html.theme-dark .border-l,
+html.theme-dark .border-gray-100,
+html.theme-dark .border-gray-200,
+html.theme-dark .border-gray-300,
+html.theme-dark .border-slate-200 { border-color: #334155; }
+html.theme-dark .border-blue-100,
+html.theme-dark .border-blue-200,
+html.theme-dark .border-blue-300 { border-color: #315783; }
+html.theme-dark .border-green-200,
+html.theme-dark .border-emerald-100,
+html.theme-dark .border-emerald-200,
+html.theme-dark .border-emerald-50 { border-color: #276656; }
+html.theme-dark .border-red-100,
+html.theme-dark .border-red-200 { border-color: #79414d; }
+html.theme-dark .border-yellow-200,
+html.theme-dark .border-amber-100,
+html.theme-dark .border-amber-200 { border-color: #75603b; }
+html.theme-dark .border-orange-200 { border-color: #805436; }
+
+html.theme-dark [class~="hover:bg-gray-50"]:hover,
+html.theme-dark [class~="hover:bg-gray-100"]:hover,
+html.theme-dark [class~="hover:bg-gray-200"]:hover { background-color: #334155; }
+html.theme-dark [class~="hover:bg-blue-50"]:hover,
+html.theme-dark [class~="hover:bg-blue-100"]:hover { background-color: #244369; }
+html.theme-dark [class~="hover:bg-green-50"]:hover,
+html.theme-dark [class~="hover:bg-green-100"]:hover { background-color: #245446; }
+html.theme-dark [class~="hover:bg-red-50"]:hover,
+html.theme-dark [class~="hover:bg-red-100"]:hover { background-color: #60333d; }
+html.theme-dark [class~="hover:bg-purple-100"]:hover { background-color: #4d3a6b; }
+html.theme-dark [class~="hover:bg-amber-100"]:hover { background-color: #5a472d; }
+html.theme-dark [class~="hover:text-gray-600"]:hover,
+html.theme-dark [class~="hover:text-gray-700"]:hover,
+html.theme-dark [class~="hover:text-gray-800"]:hover,
+html.theme-dark [class~="hover:text-gray-900"]:hover { color: #f8fafc; }
+
+html.theme-dark input:not([type="checkbox"]):not([type="radio"]),
+html.theme-dark textarea,
+html.theme-dark select {
+  background-color: #172235;
+  border-color: #475569;
+  color: #f1f5f9;
+}
+html.theme-dark input::placeholder,
+html.theme-dark textarea::placeholder { color: #94a3b8; }
+html.theme-dark input[type="checkbox"],
+html.theme-dark input[type="radio"] { background-color: #172235; border-color: #64748b; }
+html.theme-dark input[type="checkbox"]:checked,
+html.theme-dark input[type="radio"]:checked { background-color: #2563eb; }
+
+html.theme-dark .log-viewer { background-color: #111c2d; color: #cbd5e1; }
+html.theme-dark .log-line:hover { background-color: #273449; }
+html.theme-dark .log-info { color: #93c5fd; }
+html.theme-dark .log-error { color: #fca5a5; }
+html.theme-dark .log-warn { color: #fcd34d; }
+html.theme-dark .log-success { color: #86efac; }
+html.theme-dark ::-webkit-scrollbar-track { background: #172235; }
+html.theme-dark ::-webkit-scrollbar-thumb { background: #475569; }
+html.theme-dark ::-webkit-scrollbar-thumb:hover { background: #64748b; }

@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { Toaster } from 'react-hot-toast';
 import Sidebar from './components/Sidebar';
+import ThemeToggle from './components/ThemeToggle';
 import Dashboard from './pages/Dashboard';
 import Tasks from './pages/Tasks';
 import TaskDetail from './pages/TaskDetail';
@@ -18,7 +19,31 @@ function App() {
   const { isAuthenticated, checkAuth } = useAuthStore();
   const [authChecked, setAuthChecked] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [theme, setTheme] = useState(() => {
+    try {
+      return window.localStorage.getItem('rclone-manager-theme') === 'dark' ? 'dark' : 'light';
+    } catch (_) {
+      return 'light';
+    }
+  });
   const location = useLocation();
+
+  useLayoutEffect(() => {
+    document.documentElement.classList.toggle('theme-dark', theme === 'dark');
+    document.documentElement.style.colorScheme = theme;
+    try {
+      window.localStorage.setItem('rclone-manager-theme', theme);
+    } catch (_) {
+      // Private browsing can disable local storage; the switch still works.
+    }
+  }, [theme]);
+
+  const toggleTheme = () => setTheme((current) => current === 'dark' ? 'light' : 'dark');
+  const toastOptions = {
+    style: theme === 'dark'
+      ? { background: '#1e293b', color: '#f1f5f9', border: '1px solid #334155' }
+      : {},
+  };
 
   useEffect(() => {
     checkAuth();
@@ -59,7 +84,7 @@ function App() {
     return (
       <>
         <Login />
-        <Toaster position="top-right" />
+        <Toaster position="top-right" toastOptions={toastOptions} />
       </>
     );
   }
@@ -80,6 +105,11 @@ function App() {
             </svg>
           </button>
           <span className="ml-3 font-semibold text-gray-800">Rclone Manager</span>
+          <div className="ml-auto"><ThemeToggle theme={theme} onToggle={toggleTheme} /></div>
+        </div>
+
+        <div className="hidden md:flex justify-end px-6 py-2 bg-gray-50">
+          <ThemeToggle theme={theme} onToggle={toggleTheme} />
         </div>
 
         <main className="flex-1 overflow-auto p-3 md:p-6 min-w-0">
@@ -98,7 +128,7 @@ function App() {
         </main>
       </div>
 
-      <Toaster position="top-right" />
+      <Toaster position="top-right" toastOptions={toastOptions} />
     </div>
   );
 }
