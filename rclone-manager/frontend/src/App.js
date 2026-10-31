@@ -12,6 +12,8 @@ import Settings from './pages/Settings';
 import FileBrowser from './pages/FileBrowser';
 import OpenlistConfigs from './pages/OpenlistConfigs';
 import Mounts from './pages/Mounts';
+import Dedupe from './pages/Dedupe';
+import DedupeTaskDetail from './pages/DedupeTaskDetail';
 import Login from './pages/Login';
 import useAuthStore from './hooks/useAuthStore';
 
@@ -121,6 +123,8 @@ function App() {
             <Route path="/tasks/:id/edit" element={<TaskForm />} />
             <Route path="/logs" element={<Logs />} />
             <Route path="/files" element={<FileBrowser />} />
+            <Route path="/dedupe" element={<Dedupe />} />
+            <Route path="/dedupe-tasks/:id" element={<DedupeTaskDetail />} />
             <Route path="/mounts" element={<Mounts />} />
             <Route path="/openlist-configs" element={<OpenlistConfigs />} />
             <Route path="/settings" element={<Settings />} />

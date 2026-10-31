@@ -14,11 +14,12 @@ import {
   FolderOpen,
   HardDrive
 } from 'lucide-react';
-import { getTasks, deleteTask, startTask, stopTask } from '../services/api';
+import { getTasks, deleteTask, startTask, stopTask, getDedupeTasks, startManagedDedupeTask, stopManagedDedupeTask, deleteManagedDedupeTask } from '../services/api';
 import toast from 'react-hot-toast';
 
 const Tasks = () => {
   const [tasks, setTasks] = useState([]);
+  const [dedupeTasks, setDedupeTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
@@ -31,8 +32,9 @@ const Tasks = () => {
 
   const loadTasks = async () => {
     try {
-      const res = await getTasks();
+      const [res, dedupe] = await Promise.all([getTasks(), getDedupeTasks()]);
       setTasks(res.data);
+      setDedupeTasks(dedupe.data || []);
     } catch (err) {
       toast.error('加载任务失败');
     } finally {
@@ -74,6 +76,17 @@ const Tasks = () => {
       setTasks(prev => prev.map(t => t.id === id ? { ...t, status: 'running' } : t));
       toast.error('停止失败');
     }
+  };
+
+  const handleDedupeAction = async (task, action) => {
+    if (action === 'delete' && !window.confirm(`删除任务“${task.name}”？运行中的去重会停止。`)) return;
+    try {
+      if (action === 'start') await startManagedDedupeTask(task.id);
+      if (action === 'stop') await stopManagedDedupeTask(task.id);
+      if (action === 'delete') await deleteManagedDedupeTask(task.id);
+      toast.success(action === 'delete' ? '任务已删除' : action === 'stop' ? '任务已停止' : '任务已启动');
+      loadTasks();
+    } catch (error) { toast.error(error.response?.data?.error || '操作失败'); }
   };
 
   const parseRotationRemotes = (value) => {
@@ -118,6 +131,7 @@ const Tasks = () => {
       <div className="flex items-center justify-center h-64">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
       </div>
+
     );
   }
 
@@ -177,6 +191,22 @@ const Tasks = () => {
       </div>
 
       {/* Desktop: Task Table */}
+      {dedupeTasks.length > 0 && <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+        <div className="px-5 py-4 border-b font-semibold text-gray-900">去重合并任务</div>
+        <div className="divide-y divide-gray-100">
+          {dedupeTasks.filter((task) => task.name.toLowerCase().includes(search.toLowerCase()) && (filter === 'all' || (filter === 'running' ? ['queued', 'scanning', 'applying'].includes(task.status) : task.status === filter))).map((task) => <div key={task.id} className="px-5 py-4 flex flex-col md:flex-row md:items-center gap-3">
+            <div className="flex-1 min-w-0">
+              <Link to={`/dedupe-tasks/${task.id}`} className="font-medium text-blue-700 hover:underline break-all">{task.name}</Link>
+              <div className="text-xs text-gray-500 mt-1">{task.mode === 'scheduled' ? `定时 · 每 ${task.interval_minutes} 分钟` : task.mode === 'check' ? '一次性检查' : '一次性直接去重'} · {task.status === 'scanning' ? '检查中' : task.status === 'applying' ? '去重中' : task.status === 'ready' ? '待选择范围' : task.status === 'queued' ? '排队中' : task.status === 'idle' ? '待机' : task.status === 'stopped' ? '已停止' : task.status === 'error' ? '异常' : task.status}</div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Link to={`/dedupe-tasks/${task.id}`} className="p-2 rounded-lg text-gray-600 hover:bg-gray-100" title="详情和日志"><Eye size={17} /></Link>
+              {['queued', 'scanning', 'applying'].includes(task.status) ? <button onClick={() => handleDedupeAction(task, 'stop')} className="p-2 rounded-lg text-red-600 hover:bg-red-50" title="停止"><Square size={17} /></button> : task.status !== 'ready' && <button onClick={() => handleDedupeAction(task, 'start')} className="p-2 rounded-lg text-green-600 hover:bg-green-50" title="运行"><Play size={17} /></button>}
+              <button onClick={() => handleDedupeAction(task, 'delete')} className="p-2 rounded-lg text-red-600 hover:bg-red-50" title="删除任务"><Trash2 size={17} /></button>
+            </div>
+          </div>)}
+        </div>
+      </div>}
       <div className="hidden md:block bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full">

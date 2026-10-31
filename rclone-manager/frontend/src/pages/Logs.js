@@ -3,6 +3,7 @@ import { FileText, Trash2, RotateCcw, Search, List, ChevronLeft, ChevronRight, L
 import { getTaskRuns, getOutputLogs, deleteOutputLog, cleanOutputLogs } from '../services/api';
 import { createWebSocket } from '../services/api';
 import toast from 'react-hot-toast';
+import DedupeRunLogs from './DedupeRunLogs';
 
 const errorDisplay = (value) => {
   const raw = String(value || '').trim();
@@ -12,11 +13,13 @@ const errorDisplay = (value) => {
   }
   const marker = raw.indexOf('（原始错误：');
   if (marker > -1) return { summary: raw.slice(0, marker), detail: raw.slice(marker + 1, -1) };
+  const exitMarker = raw.indexOf('（退出错误：');
+  if (exitMarker > -1) return { summary: raw.slice(0, exitMarker), detail: raw.slice(exitMarker + 1, -1) };
   return { summary: raw, detail: '' };
 };
 
 const Logs = () => {
-  const [activeTab, setActiveTab] = useState('records');
+  const [activeTab, setActiveTab] = useState(new URLSearchParams(window.location.search).get('tab') === 'dedupe' ? 'dedupe' : 'records');
   const [taskRuns, setTaskRuns] = useState([]);
   const [taskRunsTotal, setTaskRunsTotal] = useState(0);
   const [taskRunsPage, setTaskRunsPage] = useState(1);
@@ -319,9 +322,13 @@ const Logs = () => {
               任务日志
             </div>
           </button>
+          <button onClick={() => setActiveTab('dedupe')} className={`px-4 md:px-6 py-3 text-sm font-medium border-b-2 whitespace-nowrap ${activeTab === 'dedupe' ? 'border-blue-500 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}>
+            去重日志
+          </button>
         </div>
 
         <div className="p-3 md:p-4">
+          {activeTab === 'dedupe' ? <DedupeRunLogs /> : <>
           {/* Header + Controls */}
           <div className="flex flex-col gap-3 md:flex-row md:items-center justify-between mb-4">
             {activeTab === 'records' ? (
@@ -752,6 +759,7 @@ const Logs = () => {
               )}
             </>
           )}
+          </>}
         </div>
       </div>
     </div>

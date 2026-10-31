@@ -93,6 +93,43 @@ type Task struct {
 	TaskRuns   []TaskRun   `json:"-" gorm:"constraint:OnDelete:CASCADE;"`
 }
 
+// DedupeTask is independent of transfer tasks. One-shot rows remain in the DB
+// for their logs, but disappear from the active task list after completion.
+type DedupeTask struct {
+	ID              uint       `json:"id" gorm:"primaryKey"`
+	Name            string     `json:"name" gorm:"not null"`
+	SourceType      string     `json:"source_type" gorm:"not null"`
+	Remote          string     `json:"remote"`
+	Path            string     `json:"path" gorm:"not null"`
+	Mode            string     `json:"mode" gorm:"not null"`
+	IntervalMinutes int        `json:"interval_minutes"`
+	Enabled         bool       `json:"enabled"`
+	Status          string     `json:"status"`
+	FindingsJSON    string     `json:"-" gorm:"type:text"`
+	LogJSON         string     `json:"-" gorm:"type:text"`
+	LastError       string     `json:"last_error" gorm:"type:text"`
+	LastRun         *time.Time `json:"last_run"`
+	NextRun         *time.Time `json:"next_run"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+}
+
+// DedupeRun keeps an immutable audit trail for each scan or apply attempt.
+type DedupeRun struct {
+	ID             uint       `json:"id" gorm:"primaryKey"`
+	TaskID         uint       `json:"task_id" gorm:"index"`
+	TaskName       string     `json:"task_name"`
+	Mode           string     `json:"mode"`
+	Target         string     `json:"target"`
+	Action         string     `json:"action"`
+	Status         string     `json:"status"`
+	Summary        string     `json:"summary"`
+	LogJSON        string     `json:"-" gorm:"type:text"`
+	OperationsJSON string     `json:"-" gorm:"type:text"`
+	StartedAt      time.Time  `json:"started_at"`
+	FinishedAt     *time.Time `json:"finished_at"`
+}
+
 func ParseRotationRemotes(raw string) []string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {

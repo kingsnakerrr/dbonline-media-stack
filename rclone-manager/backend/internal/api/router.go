@@ -70,6 +70,7 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 	if err := InitDB(cfg.DataDir); err != nil {
 		panic(err)
 	}
+	startDedupeTaskSchedule()
 
 	// Init WebSocket hub
 	hub = websocket.NewHub()
@@ -156,6 +157,19 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 		api.GET("/rclone/config", getRcloneConfig)
 		api.GET("/rclone/ls", listRemoteDir)
 		api.POST("/rclone/mkdir", createRemoteDir)
+		api.POST("/rclone/dedupe/scan", requireTokenQuery, startDedupeScan)
+		api.GET("/rclone/dedupe/scan", requireTokenQuery, getDedupeScan)
+		api.POST("/rclone/dedupe/apply", requireDedupeWriteToken, applyDedupeSelection)
+		api.GET("/dedupe-tasks", requireTokenQuery, listDedupeTasks)
+		api.POST("/dedupe-tasks", requireTokenQuery, createDedupeTask)
+		api.GET("/dedupe-tasks/:id", requireTokenQuery, getDedupeTask)
+		api.PUT("/dedupe-tasks/:id", requireDedupeWriteToken, updateDedupeTask)
+		api.POST("/dedupe-tasks/:id/start", requireTokenQuery, startDedupeTask)
+		api.POST("/dedupe-tasks/:id/stop", requireTokenQuery, stopDedupeTask)
+		api.DELETE("/dedupe-tasks/:id", requireTokenQuery, deleteDedupeTask)
+		api.POST("/dedupe-tasks/:id/apply", requireDedupeWriteToken, applyCheckedDedupeTask)
+		api.GET("/dedupe-runs", requireTokenQuery, listDedupeRuns)
+		api.GET("/dedupe-runs/:id", requireTokenQuery, getDedupeRun)
 
 		// Mounts
 		mounts := api.Group("/mounts")
@@ -171,7 +185,9 @@ func SetupRouter(cfg *config.Config) *gin.Engine {
 
 		// File browser
 		api.GET("/files/local", listLocalFiles)
+		api.GET("/files/local/size", getLocalFolderSize)
 		api.GET("/files/remote", listRemoteFiles)
+		api.POST("/files/delete", deleteBrowserItem)
 
 		// OpenList configs
 		api.GET("/openlist-configs", listOpenlistConfigs)
@@ -207,6 +223,7 @@ func requireTokenQuery(c *gin.Context) {
 	}
 	c.Next()
 }
+
 
 // getTokenInfo returns whether token protection is enabled and the token value (masked).
 func getTokenInfo(c *gin.Context) {
@@ -712,47 +729,47 @@ func updateTask(c *gin.Context) {
 	}
 
 	if err := db.Model(&task).Updates(map[string]interface{}{
-		"name":                   updates.Name,
-		"source_type":            updates.SourceType,
-		"source_dir":             updates.SourceDir,
-		"dest_type":              updates.DestType,
-		"remote_name":            updates.RemoteName,
-		"remote_dir":             updates.RemoteDir,
-		"transfer_mode":          updates.TransferMode,
-		"transfers":              updates.Transfers,
-		"checkers":               updates.Checkers,
-		"bind_ip":                updates.BindIP,
-		"rclone_config":          updates.RcloneConfig,
-		"enabled":                updates.Enabled,
-		"auto_dedupe":            updates.AutoDedupe,
-		"min_age":                updates.MinAge,
-		"drive_chunk_size":       updates.DriveChunkSize,
-		"buffer_size":            updates.BufferSize,
-		"retries":                updates.Retries,
-		"schedule_enabled":       updates.ScheduleEnabled,
-		"schedule_interval":      updates.ScheduleInterval,
-		"watch_enabled":          updates.WatchEnabled,
-		"qb_enabled":             updates.QBEnabled,
-		"qb_url":                 updates.QBURL,
-		"qb_username":            updates.QBUsername,
-		"qb_password":            updates.QBPassword,
-		"qb_poll_interval":       updates.QBPollInterval,
-		"qb_delete_files":        updates.QBDeleteFiles,
-		"status":                 status,
-		"last_error":             lastError,
-		"openlist_enabled":       updates.OpenlistEnabled,
-		"openlist_config_id":     updates.OpenlistConfigID,
-		"openlist_url":           updates.OpenlistURL,
-		"openlist_token":         updates.OpenlistToken,
-		"openlist_mapping":       updates.OpenlistMapping,
-		"openlist_refresh_dir":   updates.OpenlistRefreshDir,
-		"task_type":              updates.TaskType,
-		"rotation_remotes":       updates.RotationRemotes,
-		"rotation_max_rounds":    updates.RotationMaxRounds,
-		"rotation_resume_time":   updates.RotationResumeTime,
-		"rotation_current_index": updates.RotationCurrentIndex,
-		"rotation_current_round": updates.RotationCurrentRound,
-		"rotation_paused_until":  nil,
+		"name":                     updates.Name,
+		"source_type":              updates.SourceType,
+		"source_dir":               updates.SourceDir,
+		"dest_type":                updates.DestType,
+		"remote_name":              updates.RemoteName,
+		"remote_dir":               updates.RemoteDir,
+		"transfer_mode":            updates.TransferMode,
+		"transfers":                updates.Transfers,
+		"checkers":                 updates.Checkers,
+		"bind_ip":                  updates.BindIP,
+		"rclone_config":            updates.RcloneConfig,
+		"enabled":                  updates.Enabled,
+		"auto_dedupe":              updates.AutoDedupe,
+		"min_age":                  updates.MinAge,
+		"drive_chunk_size":         updates.DriveChunkSize,
+		"buffer_size":              updates.BufferSize,
+		"retries":                  updates.Retries,
+		"schedule_enabled":         updates.ScheduleEnabled,
+		"schedule_interval":        updates.ScheduleInterval,
+		"watch_enabled":            updates.WatchEnabled,
+		"qb_enabled":               updates.QBEnabled,
+		"qb_url":                   updates.QBURL,
+		"qb_username":              updates.QBUsername,
+		"qb_password":              updates.QBPassword,
+		"qb_poll_interval":         updates.QBPollInterval,
+		"qb_delete_files":          updates.QBDeleteFiles,
+		"status":                   status,
+		"last_error":               lastError,
+		"openlist_enabled":         updates.OpenlistEnabled,
+		"openlist_config_id":       updates.OpenlistConfigID,
+		"openlist_url":             updates.OpenlistURL,
+		"openlist_token":           updates.OpenlistToken,
+		"openlist_mapping":         updates.OpenlistMapping,
+		"openlist_refresh_dir":     updates.OpenlistRefreshDir,
+		"task_type":                updates.TaskType,
+		"rotation_remotes":         updates.RotationRemotes,
+		"rotation_max_rounds":      updates.RotationMaxRounds,
+		"rotation_resume_time":     updates.RotationResumeTime,
+		"rotation_current_index":   updates.RotationCurrentIndex,
+		"rotation_current_round":   updates.RotationCurrentRound,
+		"rotation_paused_until":    nil,
 		"rotation_limited_remotes": updates.RotationLimitedRemotes,
 	}).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -877,9 +894,9 @@ func stopTask(c *gin.Context) {
 	var task models.Task
 	db.First(&task, id)
 	db.Model(&task).Updates(map[string]interface{}{
-		"status":                "idle",
-		"last_error":            "",
-		"rotation_paused_until": nil,
+		"status":                   "idle",
+		"last_error":               "",
+		"rotation_paused_until":    nil,
 		"rotation_limited_remotes": "{}",
 	})
 
@@ -939,15 +956,15 @@ func getTaskStatus(c *gin.Context) {
 	}
 
 	response := gin.H{
-		"id":                     task.ID,
-		"status":                 status,
-		"running":                isRunning,
-		"last_run":               task.LastRun,
-		"last_error":             task.LastError,
-		"remote_name":            task.RemoteName,
-		"rotation_current_index": task.RotationCurrentIndex,
-		"rotation_current_round": task.RotationCurrentRound,
-		"rotation_paused_until":  task.RotationPausedUntil,
+		"id":                       task.ID,
+		"status":                   status,
+		"running":                  isRunning,
+		"last_run":                 task.LastRun,
+		"last_error":               task.LastError,
+		"remote_name":              task.RemoteName,
+		"rotation_current_index":   task.RotationCurrentIndex,
+		"rotation_current_round":   task.RotationCurrentRound,
+		"rotation_paused_until":    task.RotationPausedUntil,
 		"rotation_limited_remotes": task.RotationLimitedRemotes,
 	}
 	if qbWatch != nil && task.QBEnabled {
@@ -1105,30 +1122,30 @@ type remoteQuotaLimitInfo struct {
 }
 
 type remoteStatus struct {
-	Name            string  `json:"name"`
-	Type            string  `json:"type"`
-	Status          string  `json:"status"`
-	StatusText      string  `json:"status_text"`
-	Severity        string  `json:"severity"`
-	Reason          string  `json:"reason"`
-	Time            string  `json:"time"`
-	TaskID          uint    `json:"task_id"`
-	TaskName        string  `json:"task_name"`
-	Active          bool    `json:"active"`
-	QuotaErrorAt    string  `json:"quota_error_at"`
-	EstimatedRecoverAt string `json:"estimated_recover_at"`
-	RecoverInSeconds int64 `json:"recover_in_seconds"`
-	RecoverySampleCount int `json:"recovery_sample_count"`
-	LearnedRecoverySeconds int64 `json:"learned_recovery_seconds"`
-	LastRecoverySeconds int64 `json:"last_recovery_seconds"`
-	PredictionSource string `json:"prediction_source"`
-	NextProbeAt string `json:"next_probe_at"`
-	LastProbeAt     string  `json:"last_probe_at"`
-	LastProbeStatus string  `json:"last_probe_status"`
-	UploadedBytes24 int64   `json:"uploaded_bytes_24h"`
-	QuotaBytes      int64   `json:"quota_bytes"`
-	RemainingBytes  int64   `json:"remaining_bytes"`
-	QuotaPercent    float64 `json:"quota_percent"`
+	Name                   string  `json:"name"`
+	Type                   string  `json:"type"`
+	Status                 string  `json:"status"`
+	StatusText             string  `json:"status_text"`
+	Severity               string  `json:"severity"`
+	Reason                 string  `json:"reason"`
+	Time                   string  `json:"time"`
+	TaskID                 uint    `json:"task_id"`
+	TaskName               string  `json:"task_name"`
+	Active                 bool    `json:"active"`
+	QuotaErrorAt           string  `json:"quota_error_at"`
+	EstimatedRecoverAt     string  `json:"estimated_recover_at"`
+	RecoverInSeconds       int64   `json:"recover_in_seconds"`
+	RecoverySampleCount    int     `json:"recovery_sample_count"`
+	LearnedRecoverySeconds int64   `json:"learned_recovery_seconds"`
+	LastRecoverySeconds    int64   `json:"last_recovery_seconds"`
+	PredictionSource       string  `json:"prediction_source"`
+	NextProbeAt            string  `json:"next_probe_at"`
+	LastProbeAt            string  `json:"last_probe_at"`
+	LastProbeStatus        string  `json:"last_probe_status"`
+	UploadedBytes24        int64   `json:"uploaded_bytes_24h"`
+	QuotaBytes             int64   `json:"quota_bytes"`
+	RemainingBytes         int64   `json:"remaining_bytes"`
+	QuotaPercent           float64 `json:"quota_percent"`
 }
 
 // Rclone handlers
@@ -1672,6 +1689,7 @@ func getRcloneConfig(c *gin.Context) {
 
 // File browser types
 type FileItem struct {
+	ID      string    `json:"id,omitempty"`
 	Name    string    `json:"name"`
 	Size    int64     `json:"size"`
 	IsDir   bool      `json:"is_dir"`
@@ -1761,6 +1779,7 @@ func listRemoteFiles(c *gin.Context) {
 
 	var items []FileItem
 	for _, item := range rawItems {
+		id, _ := item["ID"].(string)
 		name, _ := item["Name"].(string)
 		size, _ := item["Size"].(float64)
 		isDir, _ := item["IsDir"].(bool)
@@ -1770,6 +1789,7 @@ func listRemoteFiles(c *gin.Context) {
 			modTime, _ = time.Parse(time.RFC3339, modTimeStr)
 		}
 		items = append(items, FileItem{
+			ID:      id,
 			Name:    name,
 			Size:    int64(size),
 			IsDir:   isDir,

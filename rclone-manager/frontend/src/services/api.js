@@ -56,6 +56,20 @@ export const getRemoteStatuses = () => api.get('/rclone/remotes/status');
 export const getRcloneConfig = () => api.get('/rclone/config');
 export const listRemoteDir = (remote, path = '/') => api.get(`/rclone/ls?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(path)}`);
 export const createRemoteDir = (remote, path) => api.post('/rclone/mkdir', { remote, path });
+const dedupeToken = () => encodeURIComponent(localStorage.getItem('apiToken') || '');
+export const startDedupeScan = (remote, path) => api.post(`/rclone/dedupe/scan?token=${dedupeToken()}`, { remote, path });
+export const getDedupeScan = () => api.get(`/rclone/dedupe/scan?token=${dedupeToken()}`);
+export const applyDedupeSelection = (id, findingIds, remote) => api.post(`/rclone/dedupe/apply?token=${dedupeToken()}`, { id, finding_ids: findingIds, confirm_remote: remote });
+export const getDedupeTasks = () => api.get(`/dedupe-tasks?token=${dedupeToken()}`);
+export const getDedupeTask = (id) => api.get(`/dedupe-tasks/${id}?token=${dedupeToken()}`);
+export const createDedupeTask = (data) => api.post(`/dedupe-tasks?token=${dedupeToken()}`, data);
+export const updateDedupeTask = (id, data) => api.put(`/dedupe-tasks/${id}?token=${dedupeToken()}`, data);
+export const startManagedDedupeTask = (id) => api.post(`/dedupe-tasks/${id}/start?token=${dedupeToken()}`);
+export const stopManagedDedupeTask = (id) => api.post(`/dedupe-tasks/${id}/stop?token=${dedupeToken()}`);
+export const deleteManagedDedupeTask = (id) => api.delete(`/dedupe-tasks/${id}?token=${dedupeToken()}`);
+export const applyManagedDedupeTask = (id, findingIds) => api.post(`/dedupe-tasks/${id}/apply?token=${dedupeToken()}`, { finding_ids: findingIds });
+export const getDedupeRuns = (page = 1, taskId = '') => api.get(`/dedupe-runs?token=${dedupeToken()}&page=${page}${taskId ? `&task_id=${encodeURIComponent(taskId)}` : ''}`);
+export const getDedupeRun = (id) => api.get(`/dedupe-runs/${id}?token=${dedupeToken()}`);
 
 // Mounts
 export const getMountSystemInfo = () => api.get('/mounts/system');
@@ -69,7 +83,9 @@ export const stopMount = (id) => api.post(`/mounts/${id}/stop`);
 
 // File browser
 export const listLocalFiles = (path = '/') => api.get(`/files/local?path=${encodeURIComponent(path)}`);
+export const getLocalFolderSize = (path, signal) => api.get(`/files/local/size?path=${encodeURIComponent(path)}`, { signal });
 export const listRemoteFiles = (remote, path = '/') => api.get(`/files/remote?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(path)}`);
+export const deleteBrowserItem = (data) => api.post(`/files/delete?token=${dedupeToken()}`, data);
 
 // Quick task from file browser
 export const createQuickTask = (data) => api.post('/tasks/quick', data);

@@ -51,6 +51,8 @@ func InitDB(dataDir string) error {
 	// Auto migrate
 	err = db.AutoMigrate(
 		&models.Task{},
+		&models.DedupeTask{},
+		&models.DedupeRun{},
 		&models.TaskLog{},
 		&models.TaskRun{},
 		&models.SystemSetting{},
